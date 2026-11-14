@@ -7,6 +7,7 @@ import io
 import runpy
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -170,7 +171,7 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
         original = self._workflow()
         start = original.index("  build-tvos:\n")
         end = original.index("  build-macos:\n", start)
-        incompatible = (original[:start] + original[start:end].replace("&& 'macos-26' ||", "&& 'macos-26-intel' ||")
+        incompatible = (original[:start] + original[start:end].replace("|| 'macos-26' }}", "|| 'macos-26-intel' }}")
                         + original[end:])
         skipped = original.replace("inputs.rebuild_tvos && needs.build-tvos.result == 'success'",
                                    "inputs.rebuild_tvos && needs.build-tvos.result == 'skipped'")
@@ -289,8 +290,11 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
         ci_path = ROOT / '.github/workflows/ci.yml'
         original = Path.read_text
         ci = original(ci_path, encoding='utf-8')
-        selection = "runs-on: macos-26"
-        self.assertIn(selection, ci)
+        job_match = re.search(
+            r"(?ms)^  apple-native-test:\n.*?(?=^  [A-Za-z0-9_-]+:\n|\Z)", ci
+        )
+        self.assertIsNotNone(job_match)
+        apple_job = job_match.group(0)
         changes = [
             ("runs-on: macos-26", "runs-on: macos-26-intel"),
             ("runs-on: macos-26", "runs-on: macos-15"),
@@ -300,12 +304,10 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
         ]
         for before, after in changes:
             with self.subTest(before=before, after=after):
-                # Restrict label mutations to this native matrix, preserving
-                # unrelated jobs so a different guard cannot mask this check.
-                if before.startswith("'macos-"):
-                    invalid = ci.replace(selection, selection.replace(before, after), 1)
-                else:
-                    invalid = ci.replace(before, after, 1)
+                # Restrict mutations to this native test job so earlier
+                # formatting jobs cannot mask the Apple architecture check.
+                invalid_job = apple_job.replace(before, after, 1)
+                invalid = ci[:job_match.start()] + invalid_job + ci[job_match.end():]
                 self.assertNotEqual(invalid, ci)
                 def read(path, *args, **kwargs):
                     return invalid if path == ci_path else original(path, *args, **kwargs)

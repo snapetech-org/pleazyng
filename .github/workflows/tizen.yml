@@ -148,7 +148,7 @@ jobs:
       TIZEN_CMAKE_TOOLCHAIN_X64: ${{ vars.PLEZYNG_TIZEN_TOOLCHAIN_X64 }}
       PACKAGE_ARCH: ${{ inputs.architecture }}
       SIGNING_PROFILE: ${{ inputs.security_profile }}
-      PLEZYNG_ALLOW_DIRECT_DOWNLOADS: '1'
+      PLEZYNG_ALLOW_DIRECT_DOWNLOADS: ${{ inputs.execution_profile == 'hybrid' && github.run_attempt == 1 && '1' || '0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

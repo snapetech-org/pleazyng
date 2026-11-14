@@ -38,11 +38,14 @@ def trusted_run():
 
 
 class NativeRecoveryTest(unittest.TestCase):
-    def test_recovery_is_only_from_completed_explicit_private_main_run(self):
+    def test_recovery_accepts_only_completed_explicit_public_or_private_main_runs(self):
         self.assertTrue(release.native_recovery_run_is_trusted(trusted_run()))
+        self.assertTrue(release.native_recovery_run_is_trusted({
+            **trusted_run(), "display_title": "action:build:pool:public",
+        }))
         for field, value in (("status", "in_progress"), ("event", "push"),
                              ("head_branch", "feature"), ("path", ".github/workflows/test.yml"),
-                             ("display_title", "action:build:pool:public"),
+                             ("display_title", "action:build:pool:other"),
                              ("head_repository", {"full_name": "outside/fork"}),
                              ("head_sha", "short")):
             with self.subTest(field=field):
@@ -160,6 +163,44 @@ class NativeRecoveryTest(unittest.TestCase):
 
     def test_bad_release_asset_rolls_back_manifest_and_package(self):
         self._exercise_recovery(asset_error=True)
+
+    def test_cancelled_active_run_recovers_published_groups_then_builds_public_main(self):
+        active = {"databaseId": 42, "status": "in_progress"}
+        native_sha = "c" * 40
+
+        def command(args, **kwargs):
+            output = native_sha if args[:3] == ["git", "rev-parse", "HEAD"] else ""
+            return subprocess.CompletedProcess(args, 0, output, "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            with (patch.object(release, "command", side_effect=command),
+                  patch.object(release, "active_run", return_value=active),
+                  patch.object(release, "wait_for_run", return_value={
+                      "status": "completed", "conclusion": "cancelled",
+                  }) as wait,
+                  patch.object(release, "recover_native_groups", return_value=["android", "apple"]) as recover,
+                  patch.object(release, "verify_native_groups", side_effect=[False, True]),
+                  patch.object(release, "matching_run", return_value=None),
+                  patch.object(release, "dispatch") as dispatch,
+                  patch.object(release, "sync_native_asset_bases"),
+                  patch.object(release, "verify_native_release_assets")):
+                checkout, selected_sha = release.prepare_native_checkout(scratch)
+
+        wait.assert_called_once_with(
+            release.MPV_REPO, active, "Native mpv/FFmpeg build", allow_failure=True,
+        )
+        recover.assert_called_once_with(checkout, scratch / "native-recovery")
+        dispatch.assert_called_once_with(
+            release.MPV_REPO,
+            release.MPV_WORKFLOW,
+            "main",
+            {"action_tag": "build", "runner_pool_tag": "public"},
+            "Native mpv/FFmpeg build",
+            expected_title="action:build:pool:public",
+            expected_sha=native_sha,
+        )
+        self.assertEqual(selected_sha, native_sha)
 
 
 if __name__ == "__main__":

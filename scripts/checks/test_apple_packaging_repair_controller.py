@@ -336,6 +336,7 @@ class PackagingRepairControllerTests(unittest.TestCase):
                 args.remove('--rebuild-tvos')
                 args.extend(['--reuse-tvos-run', '84'])
             stack.enter_context(patch.object(sys, 'argv', args))
+            stack.enter_context(patch.object(release, 'private_apple_host_reachable', return_value=True))
             command = stack.enter_context(patch.object(release, 'command', return_value=subprocess.CompletedProcess([], 0, self.repair, '')))
             create = stack.enter_context(patch.object(release, 'create_plezy_worktree', return_value=Path(temp) / 'checkout'))
             stack.enter_context(patch.object(release, 'existing_release_tag_commit', return_value=self.product))
@@ -356,7 +357,7 @@ class PackagingRepairControllerTests(unittest.TestCase):
             self.assertEqual(build.call_args.args[1], self.repair)
             self.assertEqual(build.call_args.kwargs['workflow_source_sha'], self.workflow)
             self.assertTrue(build.call_args.kwargs['include_apple_store_build'])
-            self.assertEqual(build.call_args.kwargs['tvos_runner_pool'], 'auto')
+            self.assertEqual(build.call_args.kwargs['tvos_runner_pool'], 'private')
             self.assertEqual(build.call_args.kwargs['macos_runner_pool'], 'private')
             self.assertNotIn('candidate_ref', build.call_args.kwargs)
             if reuse_tvos:

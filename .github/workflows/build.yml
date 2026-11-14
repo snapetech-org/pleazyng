@@ -116,11 +116,6 @@ on:
         required: true
         type: boolean
         default: true
-      include_tizen_build:
-        description: Build the experimental ARM Samsung Tizen tester candidate in this workflow run
-        required: true
-        type: boolean
-        default: true
       include_apple_store_build:
         description: Opt in to signed iOS and tvOS App Store IPAs; GitHub-only releases use unsigned developer IPAs
         required: true
@@ -355,7 +350,6 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INCLUDE_WEBOS_BUILD_INPUT: ${{ inputs.include_webos_build }}
           INCLUDE_WEBOS_RELEASE_INPUT: ${{ inputs.include_webos_release }}
-          INCLUDE_TIZEN_BUILD_INPUT: ${{ inputs.include_tizen_build }}
           INCLUDE_APPLE_STORE_BUILD_INPUT: ${{ inputs.include_apple_store_build }}
           PREPARE_HOMEBREW_CASK_INPUT: ${{ inputs.prepare_homebrew_cask }}
           PRIVATE_APPLE_SIGNING_UNAVAILABLE_INPUT: ${{ inputs.private_apple_signing_unavailable }}
@@ -386,7 +380,8 @@ jobs:
           SUBTITLE_GPU_BACKEND="$SUBTITLE_GPU_BACKEND_INPUT"
           INCLUDE_WEBOS_BUILD="$INCLUDE_WEBOS_BUILD_INPUT"
           INCLUDE_WEBOS_RELEASE="$INCLUDE_WEBOS_RELEASE_INPUT"
-          INCLUDE_TIZEN_BUILD="$INCLUDE_TIZEN_BUILD_INPUT"
+          INCLUDE_TIZEN_BUILD=false
+          if [[ "$MODE" == "release" ]]; then INCLUDE_TIZEN_BUILD=true; fi
           INCLUDE_APPLE_STORE_BUILD="$INCLUDE_APPLE_STORE_BUILD_INPUT"
           PREPARE_HOMEBREW_CASK="$PREPARE_HOMEBREW_CASK_INPUT"
           PRIVATE_APPLE_SIGNING_UNAVAILABLE="$PRIVATE_APPLE_SIGNING_UNAVAILABLE_INPUT"
@@ -531,10 +526,6 @@ jobs:
           fi
           if [[ "$MODE" == "release" && "$INCLUDE_WEBOS_BUILD" != "true" && "$INCLUDE_WEBOS_BUILD" != "false" ]]; then
             echo "include_webos_build must be true or false." >&2
-            exit 1
-          fi
-          if [[ "$MODE" == "release" && "$INCLUDE_TIZEN_BUILD" != "true" && "$INCLUDE_TIZEN_BUILD" != "false" ]]; then
-            echo "include_tizen_build must be true or false." >&2
             exit 1
           fi
           if [[ "$MODE" == "release" && ( "$INCLUDE_WEBOS_BUILD" != "true" || "$INCLUDE_WEBOS_RELEASE" != "true" || "$INCLUDE_TIZEN_BUILD" != "true" ) ]]; then
@@ -3083,6 +3074,7 @@ jobs:
           python3 scripts/fetch_linux_libmpv.py --dest libmpv-prefix
 
       - name: Install fpm
+        shell: bash
         run: sudo gem install fpm --version 1.17.0 --no-document
 
       - name: Install dependencies

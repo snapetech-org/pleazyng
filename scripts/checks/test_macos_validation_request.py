@@ -31,17 +31,18 @@ class MacRequestTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0,result.stderr)
                 self.assertEqual(log.exists(),not included)
 
-    def test_signed_mac_validation_and_recovery_accept_both_profiles(self):
+    def test_signed_mac_validation_and_recovery_use_hybrid_profile(self):
         workflow=yaml.safe_load((ROOT/'.github/workflows/build.yml').read_text())
         version=subprocess.check_output(['python3',str(ROOT/'scripts/pubspec_version.py'),str(ROOT/'pubspec.yaml')],text=True).strip().split('+',1)[0]
         script=next(s['run'] for s in workflow['jobs']['validate-trusted-ref']['steps'] if s.get('name')=='Resolve release request')
-        for profile in ('private','hybrid'):
+        for profile in ('hybrid',):
             with self.subTest(profile=profile),tempfile.TemporaryDirectory(prefix='pleazyng-mac-request-') as directory:
                 output=Path(directory)/'outputs'
-                env={**os.environ,'ACTION_INPUT':'build','RUNNER_POOL_INPUT':'private','EXECUTION_PROFILE_INPUT':profile,
+                env={**os.environ,'ACTION_INPUT':'build','RUNNER_POOL_INPUT':'public','EXECUTION_PROFILE_INPUT':profile,
                      'MODE_INPUT':'macos-validation','BUILD_VERSION_INPUT':version,'REF_TYPE':'branch','REF_NAME':'main',
-                     'INCLUDE_WEBOS_BUILD_INPUT':'true','INCLUDE_WEBOS_RELEASE_INPUT':'true','INCLUDE_TIZEN_BUILD_INPUT':'true',
-                     'INCLUDE_APPLE_STORE_BUILD_INPUT':'false','PREPARE_HOMEBREW_CASK_INPUT':'true','SUBTITLE_GPU_BACKEND_INPUT':'cpu',
+                     'INCLUDE_WEBOS_BUILD_INPUT':'true','INCLUDE_WEBOS_RELEASE_INPUT':'true',
+                     'INCLUDE_APPLE_STORE_BUILD_INPUT':'false','PRIVATE_APPLE_SIGNING_UNAVAILABLE_INPUT':'false',
+                     'PREPARE_HOMEBREW_CASK_INPUT':'true','SUBTITLE_GPU_BACKEND_INPUT':'cpu',
                      'TVOS_RUNNER_POOL_INPUT':'hosted',
                      'RUNNER_ACQUISITION_RETRY_OF':'',
                      'REUSE_PLATFORMS':'','REUSE_ANDROID':'','MACOS_PACKAGE_RUN':'','MACOS_COMPILATION_JOB':'128247608189',

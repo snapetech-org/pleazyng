@@ -686,7 +686,7 @@ class ControllerTests(unittest.TestCase):
     @patch.object(controller, "dispatch", return_value={
         "databaseId": 78, "status": "completed", "conclusion": "success",
     })
-    def test_hosted_tvos_non_acquisition_recovers_only_tvos_on_private_jit(
+    def test_hosted_tvos_non_acquisition_does_not_auto_retry_private(
         self, dispatch, ensure_main, matching, _allocation_evidence, verify
     ):
         matching.side_effect = [
@@ -694,20 +694,12 @@ class ControllerTests(unittest.TestCase):
             None,
         ]
 
-        result = controller.ensure_release("v3.0.0", "b" * 40, include_webos_release=True)
+        with self.assertRaisesRegex(controller.ReleaseError, "never reroute to private JIT automatically"):
+            controller.ensure_release("v3.0.0", "b" * 40, include_webos_release=True)
 
-        self.assertEqual(result["databaseId"], 78)
-        ensure_main.assert_called_once_with("b" * 40, "dispatching the v3.0.0 release build")
-        verify.assert_called_once_with(77, "b" * 40, "3.0.0", rebuild_tvos=True,
-                                       webos_run=77, android_run=77)
-        fields = dispatch.call_args.args[3]
-        self.assertEqual(fields["tvos_runner_pool"], "private")
-        self.assertEqual(fields["reuse_platform_run_id"], "77")
-        self.assertEqual(fields["reuse_android_run_id"], "77")
-        self.assertEqual(fields["reuse_webos_run_id"], "77")
-        self.assertEqual(fields["rebuild_tvos"], "true")
-        self.assertEqual(dispatch.call_args.kwargs["expected_title"],
-                         "action:release:pool:private:tag:v3.0.0:recovery:source:77:tvos")
+        ensure_main.assert_not_called()
+        verify.assert_not_called()
+        dispatch.assert_not_called()
 
     @patch.object(controller, "verify_platform_recovery")
     @patch.object(controller, "matching_run", return_value=None)
@@ -736,7 +728,7 @@ class ControllerTests(unittest.TestCase):
         verify.assert_called_once_with(42, "b" * 40, "3.0.0")
         self.assertEqual(dispatch.call_args.args[3]["reuse_platform_run_id"], "42")
         self.assertEqual(dispatch.call_args.kwargs["expected_title"],
-                         "action:release:pool:private:tag:v3.0.0")
+                         "action:release:pool:public:tag:v3.0.0")
         self.assertEqual(dispatch.call_args.kwargs["expected_sha"], "b" * 40)
         self.assertEqual(dispatch.call_args.args[3]["include_webos_release"], "true")
         self.assertEqual(dispatch.call_args.args[3]["include_webos_build"], "true")

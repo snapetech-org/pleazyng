@@ -46,10 +46,10 @@ class AppleRunnerRoutingTests(unittest.TestCase):
         self.assertEqual(select_apple_runner_pool("auto"), "hosted")
 
     def test_mobile_hosted_macos_private_route_is_split(self) -> None:
-        self.assertEqual(apple_workflow_route("hosted", "private"), "split")
+        self.assertEqual(apple_workflow_route("hosted", "private"), "private")
         self.assertEqual(apple_workflow_route("private", "private"), "private")
         self.assertEqual(apple_workflow_route("hosted", "hosted"), "hosted")
-        self.assertEqual(apple_workflow_route("hosted", "private", "private"), "private-ios")
+        self.assertEqual(apple_workflow_route("hosted", "private", "private"), "private")
 
     @patch("release_all_platforms.wait_for_run")
     @patch("release_all_platforms.workflow_runs")
@@ -135,7 +135,7 @@ class AppleRunnerRoutingTests(unittest.TestCase):
         )
 
         fields = dispatch_mock.call_args.args[3]
-        self.assertEqual(fields["tvos_runner_pool"], "private-ios")
+        self.assertEqual(fields["tvos_runner_pool"], "private")
         self.assertTrue(dispatch_mock.call_args.kwargs["watch_hosted_tvos"])
 
     def test_hosted_tvos_queue_timeout_requires_ten_minutes_without_a_runner(self) -> None:
@@ -509,8 +509,8 @@ class ReleaseCandidateBuildGateTests(unittest.TestCase):
                 "build_version": "3.0.0",
                 "include_webos_build": "true",
                 "include_webos_release": "true",
-                "include_tizen_build": "true",
                 "include_apple_store_build": "false",
+                "private_apple_signing_unavailable": "false",
                 "tvos_runner_pool": "hosted",
                 "subtitle_gpu_backend": "cpu",
                 "prepare_homebrew_cask": "false",
@@ -559,7 +559,10 @@ class ReleaseCandidateBuildGateTests(unittest.TestCase):
             "build.yml",
             "b" * 40,
             ref="main",
-            expected_title="action:build:pool:public:mode:release:version:3.0.0",
+            expected_title=(
+                "action:build:pool:public:mode:release:version:3.0.0",
+                "action:build:pool:private:mode:release:version:3.0.0",
+            ),
         )
 
     @patch("release_all_platforms.verify_unacquired_hosted_tvos_run")

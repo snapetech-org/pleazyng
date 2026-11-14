@@ -947,16 +947,17 @@ def prepare_native_checkout(scratch: Path) -> tuple[Path, str]:
     running = active_run(MPV_REPO, MPV_WORKFLOW, ref="main")
     if running:
         print(f"Reusing active native build {running['databaseId']} instead of starting a duplicate.")
-        try:
-            wait_for_run(MPV_REPO, running, "Native mpv/FFmpeg build")
-        except ReleaseError:
-            # A terminal platform failure can leave other groups fully published.
-            # Recover them below only after checking their current content keys.
-            state = gh_json("run", "view", str(running["databaseId"]), "--repo", MPV_REPO,
-                            "--json", "status,conclusion")
-            if state.get("status") != "completed":
-                raise
-            print(f"Native run ended {state.get('conclusion')}; checking reusable published groups.")
+        # A failed or deliberately drained/cancelled native run may still have
+        # complete published groups. Do not abort here: recover_native_groups()
+        # validates their source keys and artifacts before reusing any of them.
+        native_run = wait_for_run(
+            MPV_REPO, running, "Native mpv/FFmpeg build", allow_failure=True,
+        )
+        if native_run.get("conclusion") != "success":
+            print(
+                f"Native run ended {native_run.get('conclusion') or native_run.get('status')}; "
+                "checking reusable published groups before rebuilding missing groups from current main."
+            )
     command(["git", "fetch", "origin", "main"], cwd=checkout)
     command(["git", "checkout", "--detach", "origin/main"], cwd=checkout)
 
@@ -1413,7 +1414,6 @@ def ensure_candidate_build(
             "build_version": version,
             "include_webos_build": "true" if include_webos_build else "false",
             "include_webos_release": "true",
-            "include_tizen_build": "true",
             "include_apple_store_build": "true" if include_apple_store_build else "false",
             "private_apple_signing_unavailable": "true" if private_apple_signing_unavailable else "false",
             "tvos_runner_pool": apple_workflow_route(pool, macos_runner_pool, ios_runner_pool),
@@ -1966,7 +1966,6 @@ def ensure_release(
         "build_version": tag.removeprefix("v"),
         "include_webos_build": "true" if include_webos_build else "false",
         "include_webos_release": "true" if include_webos_release else "false",
-        "include_tizen_build": "true",
         "include_apple_store_build": "true" if include_apple_store_build else "false",
         "private_apple_signing_unavailable": "true" if private_apple_signing_unavailable else "false",
         "prepare_homebrew_cask": "true" if prepare_homebrew_cask else "false",

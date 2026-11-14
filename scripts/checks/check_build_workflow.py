@@ -105,7 +105,7 @@ require(
 require(
     "allow_private_apple_retry: bool = False" in release_driver_text
     and release_driver_text.count("allow_private_apple_retry=False") >= 2
-    and "automatically retry" in release_driver_text,
+    and "hosted failures never reroute to private JIT automatically" in release_driver_text,
     "hosted Apple build failures must not trigger private runner retries",
 )
 require(
@@ -1026,19 +1026,16 @@ require(
     is not None,
     "versioned builds must build the experimental WebOS candidate by default",
 )
-require(
-    re.search(
-        r"(?ms)^      include_tizen_build:\n.*?        type: boolean\n"
-        r"        default: true\n",
-        text,
-    )
-    is not None,
-    "versioned builds must build the experimental Tizen candidate by default",
-)
 request_resolver = named_step(job("validate-trusted-ref"), "Resolve release request")
 require(
+    dispatch_inputs is not None
+    and re.search(r"(?m)^      include_tizen_build:", dispatch_inputs.group("body")) is None
+    and 'if [[ "$MODE" == "release" ]]; then INCLUDE_TIZEN_BUILD=true; fi' in request_resolver,
+    "versioned builds must build the experimental Tizen candidate by default",
+)
+require(
     'INCLUDE_WEBOS_BUILD="$INCLUDE_WEBOS_BUILD_INPUT"' in request_resolver
-    and 'INCLUDE_TIZEN_BUILD="$INCLUDE_TIZEN_BUILD_INPUT"' in request_resolver
+    and 'if [[ "$MODE" == "release" ]]; then INCLUDE_TIZEN_BUILD=true; fi' in request_resolver
     and '"$REF_TYPE" != "branch" || "$REF_NAME" != "main"' in request_resolver
     and 'VERSION="$BUILD_VERSION_INPUT"' in request_resolver
     and '"$VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$' in request_resolver
@@ -1151,14 +1148,15 @@ require(
     and "tester_build:" in tizen_workflow
     and "default: hybrid" in tizen_workflow
     and "options: [hybrid]" in tizen_workflow
-    and tizen_workflow.count("inputs.execution_profile == 'hybrid' && 'ubuntu-24.04'") == 2
+    and tizen_workflow.count("runs-on: ubuntu-24.04") >= 2
     and "PLEZYNG_ALLOW_DIRECT_DOWNLOADS: ${{ inputs.execution_profile == 'hybrid' && github.run_attempt == 1 && '1' || '0' }}" in tizen_workflow
-    and "Ignore private Tizen toolchain paths on hosted runners" in tizen_workflow
+    and "name: Use the pinned public Tizen toolchain" in tizen_workflow
+    and "echo 'PLEZYNG_TIZEN_STUDIO_ROOT='" in tizen_workflow
     and "python3 scripts/tizen/prepare_signing_profile.py" in tizen_workflow
     and "python3 scripts/tizen/package.py build" in tizen_workflow
-    and "startsWith(github.ref, 'refs/tags/v')" in tizen_workflow
+    and "name: Samsung Tizen TV" in tizen_workflow
     and "name: pleazyng-tizen-${{ inputs.architecture }}-experimental" in tizen_workflow,
-    "Tizen reusable workflow must build signed packages from main and version tags",
+    "the trusted release caller must build the Samsung Tizen tester package and preserve it",
 )
 tizen_prerequisites = named_step(tizen_workflow, "Install Tizen host build prerequisites")
 require(
@@ -1217,7 +1215,10 @@ require(
         r".*?^        options:\n          - hybrid\n        default: hybrid$",
         text,
     ) is not None
-    and "inputs.execution_profile == 'hybrid'" in job("validate-trusted-ref")
+    and "EXECUTION_PROFILE_INPUT: ${{ inputs.execution_profile }}" in job("validate-trusted-ref")
+    and 'if [[ "$MODE" == "release" && "$EXECUTION_PROFILE" != "hybrid" ]]' in named_step(
+        job("validate-trusted-ref"), "Resolve release request"
+    )
     and '"$MODE" != "release"' in named_step(job("validate-trusted-ref"), "Resolve release request")
     and '"$VERSION" != "3.0.0"' not in named_step(job("validate-trusted-ref"), "Resolve release request"),
     "the hybrid execution profile must be the default for trusted-main release builds",
@@ -1519,7 +1520,7 @@ for apple_job_name in ("build-ios", "build-tvos"):
         f"{apple_job_name} signing archives and DerivedData must stay on local APFS",
     )
 require(
-    "runs-on: macos-26" in apple_native
+    re.search(r"(?m)^    runs-on: macos-26$", apple_native) is not None
     and "timeout-minutes: 120" in apple_native
     and "timeout-minutes: 75" in named_step(apple_native, "Run Apple native reliability tests")
     and "hosted-xcode-version: '26.5'" in apple_native
@@ -1584,10 +1585,9 @@ require(
     "Windows native CI must keep bounded x64 setup and the pinned ARM64 Flutter bootstrap",
 )
 require(
-    '"arch":"arm64","flutter_setup":"git"' in windows_native
-    and "matrix: ${{ fromJSON(inputs.execution_profile == 'hybrid'" in windows_native
-    and '"include":[{"arch":"x64"' in windows_native
-    and "'windows-11-vs2026-arm'" in windows_native,
+    "- arch: arm64" in windows_native
+    and "runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-vs2026-arm' || 'windows-2025' }}" in windows_native
+    and "inputs.execution_profile != 'hybrid' || github.ref == 'refs/heads/main'" in windows_native,
     "native Windows ARM64 CI must run on the public ARM64 host in the hybrid profile",
 )
 require(
@@ -1879,7 +1879,7 @@ require(
     "iOS recovery must stage the locked device worker and require a successful fresh artifact",
 )
 require(
-    "&& 'macos-26' ||" in job("build-tvos").split("permissions:", 1)[0]
+    "|| 'macos-26' }}" in job("build-tvos").split("permissions:", 1)[0]
     and "hosted-xcode-version: '26.5'" in job("build-tvos")
     and 'test "$(uname -m)" = arm64' in named_step(job("build-tvos"), "Require native ARM host for tvOS AOT")
     and "(inputs.reuse_platform_run_id == '' || inputs.rebuild_tvos)" in job("build-tvos")

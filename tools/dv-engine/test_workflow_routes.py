@@ -42,67 +42,51 @@ class DolbyWorkflowRouteTests(unittest.TestCase):
         self.assertIn('--network none --read-only', job)
         self.assertIn('verify_offline_bundle.py', job)
 
-    def test_dolby_jobs_use_run_scoped_private_jit_labels(self):
+    def test_dolby_jobs_use_compatible_public_hosted_runners(self):
         expected = {
             "dv-platforms.yml": {
-                "contracts": (
-                    ("ng-shared-main-jit", "packer-windows"),
-                    "{0}-{1}-contracts",
-                ),
-                "app-tests": (("ng-shared-main-jit",), "{0}-app-tests"),
-                "felbaker-source": (
-                    ("ng-shared-main-jit",),
-                    "{0}-felbaker-source",
-                ),
-                "apple-source": (
-                    ("private-apple-builds",),
-                    "{0}-apple-source",
-                ),
+                "contracts": ("ubuntu-24.04", "windows-2025", "macos-26"),
+                "app-tests": ("ubuntu-24.04",),
+                "felbaker-source": ("ubuntu-24.04",),
+                "apple-source": ("macos-26",),
             },
             "dv-experimental.yml": {
-                "linux-engine": (("ng-shared-main-jit",), "{0}-linux-engine"),
+                "linux-engine": ("ubuntu-24.04",),
             },
         }
         for workflow, jobs in expected.items():
             source = (WORKFLOWS / workflow).read_text()
-            for job_id, (groups, label) in jobs.items():
+            for job_id, runners in jobs.items():
                 with self.subTest(workflow=workflow, job=job_id):
                     block = job_block(source, job_id)
-                    for group in groups:
-                        self.assertIn(f'"group":"{group}"', block)
-                    self.assertIn("fromJSON(format(", block)
-                    self.assertIn('"ng-main-run-{0}"', block)
-                    self.assertIn("github.run_id", block)
-                    if "{1}" in label:
-                        self.assertIn("strategy.job-index", block)
-                    self.assertIn(
-                        f'"gha-{label}"',
-                        block,
-                    )
+                    for runner in runners:
+                        self.assertIn(runner, block)
+                    self.assertNotIn("private-apple-builds", block)
+                    self.assertNotIn("ng-shared-main-jit", block)
+                    self.assertIn("persist-credentials: false", block)
 
-    def test_platform_specific_jobs_route_to_private_platform_pools(self):
+    def test_platform_specific_jobs_route_to_native_public_runners(self):
         platforms = (WORKFLOWS / "dv-platforms.yml").read_text()
         contracts = job_block(platforms, "contracts")
         self.assertIn("matrix.platform == 'windows-x64'", contracts)
-        self.assertIn('"group":"packer-windows"', contracts)
-        self.assertIn('"Windows","X64"', contracts)
-        self.assertIn("matrix.platform == 'macos-arm64'", contracts)
-        self.assertIn('"macOS","ARM64"', contracts)
+        self.assertIn("'windows-2025'", contracts)
+        self.assertIn("platform: [linux-x64, windows-x64, macos-arm64]", contracts)
+        self.assertIn("'macos-26'", contracts)
 
         apple = job_block(platforms, "apple-source")
-        self.assertIn('"group":"private-apple-builds"', apple)
-        self.assertIn('"macOS","ARM64"', apple)
+        self.assertIn("runs-on: macos-26", apple)
 
-    def test_manual_fork_validation_only_uses_the_gvisor_sandbox(self):
+    def test_manual_fork_validation_is_public_and_secret_free(self):
         source = (WORKFLOWS / "dv-fork-validation.yml").read_text()
         self.assertIn("workflow_dispatch:", source)
         self.assertNotRegex(source, r"(?m)^  (push|pull_request|pull_request_target|schedule):")
-        self.assertIn("group: gvisor-sandbox", source)
-        self.assertIn("labels: gvisor-sandbox", source)
+        self.assertIn("runs-on: ubuntu-24.04", source)
+        self.assertIn("permissions:\n  contents: read", source)
         self.assertIn("persist-credentials: false", source)
         self.assertNotIn("secrets.", source)
         self.assertNotIn("ubuntu-latest", source)
         self.assertNotIn("ng-shared-main-jit", source)
+        self.assertNotIn("gvisor-sandbox", source)
 
 
 if __name__ == "__main__":

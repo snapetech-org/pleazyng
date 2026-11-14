@@ -281,14 +281,12 @@ class AndroidSdkTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args.args[0][-2:], ["--install", "ndk;29.0.14206865"])
 
-    def test_ci_release_and_games_use_shared_setup_in_order(self):
+    def test_ci_release_and_games_install_after_android_setup(self):
         for filename in ("ci.yml", "build.yml", "games-native.yml"):
             source = (MODULE.ROOT / ".github/workflows" / filename).read_text()
             with self.subTest(workflow=filename):
-                proxy = source.index("python3 scripts/prepare_android_sdk.py proxy")
-                setup = source.index("uses: android-actions/setup-android@", proxy)
+                setup = source.index("uses: android-actions/setup-android@")
                 install = source.index("python3 scripts/prepare_android_sdk.py install", setup)
-                self.assertLess(proxy, setup)
                 self.assertLess(setup, install)
                 if filename in ("ci.yml", "build.yml"):
                     self.assertIn(
