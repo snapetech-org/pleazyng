@@ -4,5 +4,5 @@
   "version": "1.0.0",
   "engines": {"node": ">=20"},
   "scripts": {"test": "node run.cjs"},
-  "devDependencies": {"playwright": "1.62.1"}
+  "devDependencies": {"playwright": "1.65.0"}
 }
