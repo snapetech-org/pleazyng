@@ -1,4 +1,4 @@
-name: Compare detail appearance against the fork base
+name: Verify golden scenes and repaired playback paths
 on:
   push:
     branches: [qualification/detail-appearance-20261121]
@@ -8,19 +8,11 @@ jobs:
   appearance:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: fork-base
-            sha: 6bf4f3a1f3257a9d37d95d874cf9ccd252de4fcb
-          - label: integration
-            sha: 6dd24f483efdbd14bce12de6ad84ecf1abf9d723
     steps:
       - name: Check out revision for validation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ matrix.sha }}
+          ref: d2d732253675272f373a4e088413c4dc463d1daa
           fetch-depth: 1
           persist-credentials: false
 
@@ -57,15 +49,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/prepare_native_downloads.py --sqlite-platform linux --arch x64
 
-      - name: Render the exact detail scenes
+      - name: Check all 24 appearance fixtures in their normal order
+        run: flutter test --no-pub -j 1 test/appearance/appearance_golden_test.dart
+      - name: Check rotation, downloaded handoff and Home row editing
+        if: ${{ !cancelled() }}
         run: |
-          flutter test --no-pub -j 1 --update-goldens test/appearance/appearance_golden_test.dart --plain-name 'detail '
-          git diff --numstat -- test/appearance/goldens/detail_*.png
-          sha256sum test/appearance/goldens/detail_*.png
-      - name: Retain rendered detail scenes
+          flutter test --no-pub -j 2 test/widgets/video_controls_startup_chrome_test.dart test/utils/video_player_navigation_test.dart test/screens/settings/home_layout_settings_screen_test.dart
+      - name: Retain any visual regressions
+        if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: detail-render-${{ matrix.label }}
-          path: test/appearance/goldens/detail_*.png
-          if-no-files-found: error
+          name: complete-appearance-differences
+          path: test/appearance/failures/*.png
+          if-no-files-found: ignore
           retention-days: 7
