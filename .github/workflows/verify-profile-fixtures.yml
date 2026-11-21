@@ -1,0 +1,52 @@
+name: Verify profile switches and shelf privacy
+on:
+  push:
+    branches: [qualification/profile-fixtures-20261121]
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out revision for validation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Load pinned Flutter SDK
+        run: python3 scripts/flutter/load_sdk_pin.py --github-env
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+          pub-cache: false
+
+      - name: Cache Pub dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-pull-request-pub-v1-${{ hashFiles('**/pubspec.yaml', '**/pubspec.lock') }}
+
+      - name: Install system dependencies
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          sudo python3 scripts/configure_hosted_apt.py "$RUNNER_ENVIRONMENT"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang build-essential cmake ffmpeg
+
+      - name: Install Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Prefetch checksum-pinned host native libraries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prepare_native_downloads.py --sqlite-platform linux --arch x64
+
+      - name: Test the real database, profile lifetimes, PIN shelf and root focus
+        run: flutter test --no-pub --reporter expanded test/navigation/profile_session_screen_test.dart
