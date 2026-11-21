@@ -1,0 +1,71 @@
+name: Compare detail appearance against the fork base
+on:
+  push:
+    branches: [qualification/detail-appearance-20261121]
+permissions:
+  contents: read
+jobs:
+  appearance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: fork-base
+            sha: 6bf4f3a1f3257a9d37d95d874cf9ccd252de4fcb
+          - label: integration
+            sha: 6dd24f483efdbd14bce12de6ad84ecf1abf9d723
+    steps:
+      - name: Check out revision for validation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Load pinned Flutter SDK
+        run: python3 scripts/flutter/load_sdk_pin.py --github-env
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+          pub-cache: false
+
+      - name: Cache Pub dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-pull-request-pub-v1-${{ hashFiles('**/pubspec.yaml', '**/pubspec.lock') }}
+
+      - name: Install system dependencies
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          sudo python3 scripts/configure_hosted_apt.py "$RUNNER_ENVIRONMENT"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang build-essential cmake ffmpeg
+
+      - name: Install Flutter dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Prefetch checksum-pinned host native libraries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/prepare_native_downloads.py --sqlite-platform linux --arch x64
+
+      - name: Render the exact detail scenes
+        run: |
+          flutter test --no-pub -j 1 --update-goldens test/appearance/appearance_golden_test.dart --plain-name 'detail '
+          git diff --numstat -- test/appearance/goldens/detail_*.png
+          sha256sum test/appearance/goldens/detail_*.png
+      - name: Retain rendered detail scenes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: detail-render-${{ matrix.label }}
+          path: test/appearance/goldens/detail_*.png
+          if-no-files-found: error
+          retention-days: 7
