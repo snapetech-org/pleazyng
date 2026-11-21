@@ -1,0 +1,163 @@
+name: Qualify the frozen Apple and Android parity candidate
+on:
+  push:
+    branches: [qualification/native-parity-20261121]
+permissions:
+  contents: read
+jobs:
+  android:
+    name: Android native (${{ matrix.check }})
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [tests, lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 802096978f7c191065ccae473d7495dd5f471e8c
+          persist-credentials: false
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          cmdline-tools-version: '15859902'
+          log-accepted-android-sdk-licenses: false
+      - name: Install pinned Android toolchains
+        run: python3 scripts/prepare_android_sdk.py install --direct-egress
+      - name: Load pinned Flutter SDK
+        run: python3 scripts/flutter/load_sdk_pin.py --github-env
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+          pub-cache: false
+      - name: Install build inputs
+        run: |
+          python3 scripts/prepare_gradle_repositories.py
+          python3 scripts/prepare_android_ffmpeg_source.py --direct-egress "$RUNNER_TEMP/pleazyng-ffmpeg-source/ffmpeg-9.0.2.tar.xz"
+          flutter pub get --enforce-lockfile
+          printf 'flutter.sdk=%s\nsdk.dir=%s\n' "$FLUTTER_ROOT" "$ANDROID_HOME" > android/local.properties
+      - name: Compile and exercise app-owned native C and C++ logic
+        if: matrix.check == 'tests'
+        run: |
+          cmake -S android/app/src/test/cpp -B "$RUNNER_TEMP/native-test" -DCMAKE_BUILD_TYPE=Debug
+          cmake --build "$RUNNER_TEMP/native-test" --parallel 2
+          ctest --test-dir "$RUNNER_TEMP/native-test" --output-on-failure --no-tests=error
+      - name: Compile Android and exercise decoder, HDR and storage paths
+        if: matrix.check == 'tests'
+        working-directory: android
+        run: ./gradlew :app:testDebugUnitTest :saf_util:testDebugUnitTest :libass:testDebugUnitTest -x :app:compileFlutterBuildDebug --continue --console=plain
+      - name: Enforce the platform API boundary
+        if: matrix.check == 'lint'
+        working-directory: android
+        run: ./gradlew :app:lintDebug -x :app:compileFlutterBuildDebug --console=plain
+      - name: Check app-owned Android warnings against the reviewed baseline
+        if: matrix.check == 'lint'
+        working-directory: android
+        run: |
+          test -s app/lint-baseline.xml
+          ./gradlew -PpleazyngFullAndroidLint :app:lintDebug -x :app:compileFlutterBuildDebug --console=plain
+      - name: Preserve the measured Android lint results
+        if: ${{ !cancelled() && matrix.check == 'lint' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: android-lint-${{ github.sha }}
+          path: |
+            android/app/lint-baseline.xml
+            build/app/reports/lint-results-debug.xml
+          if-no-files-found: error
+  compile:
+    name: Unsigned Apple compile (${{ matrix.platform }})
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            slug: ios
+          - platform: macOS
+            slug: macos
+          - platform: tvOS
+            slug: tvos
+    # Native tests and their simulator dependencies build arm64 on every platform.
+    runs-on: xcode-27
+    permissions:
+      contents: read
+    env:
+      LANG: en_US.UTF-8
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: 802096978f7c191065ccae473d7495dd5f471e8c
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require native Apple Silicon host
+        shell: bash
+        run: test "$(uname -m)" = arm64
+      - name: Load pinned Flutter SDK
+        shell: bash
+        run: python3 scripts/flutter/load_sdk_pin.py --github-env
+      - name: Setup Flutter
+        uses: ./.github/actions/setup-flutter-apple
+        with:
+          hosted-xcode-version: '27.2'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+      - name: Ensure CMake for the embedded Steam receiver
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v cmake >/dev/null || brew install cmake
+          command -v xcodegen >/dev/null || brew install xcodegen
+          command -v git-lfs >/dev/null || brew install git-lfs
+          command -v gtimeout >/dev/null || brew install coreutils
+          cmake --version
+      - name: Install CocoaPods
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:$PATH"
+          gem install cocoapods --version 1.17.0 --no-document \
+            --install-dir "$RUNNER_TEMP/cocoapods-gems" --bindir "$RUNNER_TEMP/cocoapods-bin"
+          gem_path="$RUNNER_TEMP/cocoapods-gems:$(gem env gempath)"
+          { echo "GEM_HOME=$RUNNER_TEMP/cocoapods-gems"; echo "GEM_PATH=$gem_path"; } >> "$GITHUB_ENV"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/cocoapods-bin" >> "$GITHUB_PATH"
+          export GEM_HOME="$RUNNER_TEMP/cocoapods-gems" GEM_PATH="$gem_path"
+          export PATH="$RUNNER_TEMP/cocoapods-bin:/opt/homebrew/bin:$PATH"
+          pod --version
+      - name: Select clang-tidy for changed Apple native sources
+        shell: bash
+        env:
+          TARGET_BASE: 6c7eba6acd52a5a2e982b25cb2453a9b80bbe3ea
+        run: |
+          base="${TARGET_BASE:-HEAD^}"
+          if [[ "$GITHUB_REF" == refs/heads/integration/upstream-* || "$base" =~ ^0+$ ]]; then base=origin/main; fi
+          base="$(git merge-base "$base" HEAD)"
+          if git diff --quiet "$base" HEAD -- native/games/apple ':(glob)native/games/steam/**/*.h'; then exit 0; fi
+          if ! command -v clang-tidy >/dev/null; then
+            brew list --versions llvm >/dev/null || brew install llvm
+            tidy="$(brew --prefix llvm)/bin/clang-tidy"
+          else
+            tidy="$(command -v clang-tidy)"
+          fi
+          "$tidy" --version
+          echo "PLEAZYNG_APPLE_TIDY=$tidy" >> "$GITHUB_ENV"
+          echo "PLEAZYNG_APPLE_TIDY_BASE=$base" >> "$GITHUB_ENV"
+      - name: Test Dolby Vision runtime preparation and compatibility fallback
+        if: matrix.slug == 'macos'
+        run: swift test --package-path shared/apple/DVRuntimeAPI --scratch-path "$RUNNER_TEMP/dv-runtime-api"
+      - name: Compile Apple application and tests
+        uses: ./.github/actions/apple-native-reliability
+        timeout-minutes: 110
+        with:
+          platform: ${{ matrix.platform }}
+          build-only: 'true'
+        env:
+          PUB_CACHE: ${{ runner.temp }}/apple-native-pub-${{ matrix.slug }}
