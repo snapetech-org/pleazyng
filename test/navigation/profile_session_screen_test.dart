@@ -34,15 +34,17 @@ import '../test_helpers/prefs.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  late _SessionGraph graph;
   setUp(() async {
     resetSharedPreferencesForTest();
     await SettingsService.getInstance();
     SystemShelfService().debugReset();
+    graph = await _SessionGraph.create();
   });
+  tearDown(() => graph.dispose());
 
   group('launcher shelf during profile selection', () {
     late SettingsService settings;
-    late _SessionGraph graph;
     final owner = Profile.local(
       id: 'local-owner',
       displayName: 'Owner',
@@ -54,19 +56,12 @@ void main() {
     setUp(() async {
       settings = await SettingsService.getInstance();
       await settings.write(SettingsService.requireProfileSelectionOnOpen, true);
-      graph = await _SessionGraph.create();
       await graph.profileRegistry.upsert(owner);
       await graph.profileRegistry.upsert(kids);
       await graph.storage.setActiveProfileId(owner.id);
       await graph.activeProfile.initialize();
     });
-    tearDown(() async {
-      try {
-        await graph.dispose();
-      } finally {
-        SystemShelfService.debugOverrideInstance(null);
-      }
-    });
+    tearDown(() => SystemShelfService.debugOverrideInstance(null));
 
     testWidgets('a PIN-protected profile stays off the launcher shelf while startup asks for a profile', (
       tester,
@@ -103,9 +98,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(shelf.debugActiveOwner, isNull);
       expect(calls.last, ('clear', owner.id));
-      final activation = graph.activeProfile.activate(kids);
-      await tester.pumpAndSettle();
-      expect(await activation, isTrue);
+      expect(await tester.runAsync(() => graph.activeProfile.activate(kids)), isTrue);
       await tester.pumpAndSettle();
       expect(shelf.debugActiveOwner, kids.id);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -114,7 +107,6 @@ void main() {
   });
 
   testWidgets('profile switch disposes the profile navigator, routes, and providers', (tester) async {
-    final graph = await _SessionGraph.create();
     final discoverProviders = <DiscoverProvider>[];
     final hiddenProviders = <HiddenLibrariesProvider>[];
     final trackerProviders = <TrackersProvider>[];
@@ -133,17 +125,18 @@ void main() {
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
-      await graph.dispose();
     });
 
     final owner = Profile.local(id: 'local-owner', displayName: 'Owner', createdAt: DateTime(2026, 1, 1));
     final kids = Profile.local(id: 'local-kids', displayName: 'Kids', createdAt: DateTime(2026, 1, 2));
-    await graph.profileRegistry.upsert(owner);
-    await graph.profileRegistry.upsert(kids);
-    await graph.storage.saveHiddenLibrariesForProfile(owner.id, {'srv:owner'});
-    await graph.storage.saveHiddenLibrariesForProfile(kids.id, {'srv:kids'});
-    await graph.storage.setActiveProfileId(owner.id);
-    await graph.activeProfile.initialize();
+    await tester.runAsync(() async {
+      await graph.profileRegistry.upsert(owner);
+      await graph.profileRegistry.upsert(kids);
+      await graph.storage.saveHiddenLibrariesForProfile(owner.id, {'srv:owner'});
+      await graph.storage.saveHiddenLibrariesForProfile(kids.id, {'srv:kids'});
+      await graph.storage.setActiveProfileId(owner.id);
+      await graph.activeProfile.initialize();
+    });
 
     await graph.pump(
       tester,
@@ -180,7 +173,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('old profile route'), findsOneWidget);
 
-    expect(await graph.activeProfile.activate(kids), isTrue);
+    expect(await tester.runAsync(() => graph.activeProfile.activate(kids)), isTrue);
     await tester.pumpAndSettle();
     expect(trackerHttpClients, hasLength(trackerAuthClientsPerProfile * 2));
     final kidsHttpClients = trackerHttpClients.sublist(ownerHttpClients.length);
@@ -207,7 +200,7 @@ void main() {
     expect(SystemShelfService().debugActiveOwner, kids.id);
     expect(discoverProviders.last.profileId, kids.id);
 
-    await graph.activeProfile.clearActiveProfile();
+    await tester.runAsync(graph.activeProfile.clearActiveProfile);
     await tester.pumpAndSettle();
     expect(trackerHttpClients, hasLength(trackerAuthClientsPerProfile * 3));
     final signedOutHttpClients = trackerHttpClients.sublist(ownerHttpClients.length + kidsHttpClients.length);
@@ -226,7 +219,6 @@ void main() {
   testWidgets(
     'a root-navigator route over the session blocks focus steals below it and hands focus back on pop (#2239)',
     (tester) async {
-      final graph = await _SessionGraph.create();
       final rootNavigator = GlobalKey<NavigatorState>();
       final content = FocusNode(debugLabel: 'SessionContent');
       final sidebar = FocusNode(debugLabel: 'SessionSidebar');
@@ -238,13 +230,14 @@ void main() {
         content.dispose();
         sidebar.dispose();
         picker.dispose();
-        await graph.dispose();
       });
 
       final owner = Profile.local(id: 'local-owner', displayName: 'Owner', createdAt: DateTime(2026, 1, 1));
-      await graph.profileRegistry.upsert(owner);
-      await graph.storage.setActiveProfileId(owner.id);
-      await graph.activeProfile.initialize();
+      await tester.runAsync(() async {
+        await graph.profileRegistry.upsert(owner);
+        await graph.storage.setActiveProfileId(owner.id);
+        await graph.activeProfile.initialize();
+      });
 
       await graph.pump(
         tester,
@@ -288,12 +281,12 @@ void main() {
   testWidgets('switching profiles under the root picker hands the new session its first focus on pop (#2817)', (
     tester,
   ) async {
-    final session = await _CoveredSession.pump(tester);
+    final session = await _CoveredSession.pump(tester, graph);
     // The switch commits the new active id first: the keyed session remounts
     // under the still-open picker, and its first focus claim waits on the
     // bind (MainScreen awaits ensureActiveLoaded()).
     final kidsLoaded = session.gateFor(_kids.id);
-    expect(await session.graph.activeProfile.activate(_kids), isTrue);
+    expect(await tester.runAsync(() => session.graph.activeProfile.activate(_kids)), isTrue);
     await tester.pump();
     await tester.pump();
     expect(session.contentScopes[_kids.id], isNotNull, reason: 'kids session remounted under the picker');
@@ -311,12 +304,12 @@ void main() {
   testWidgets('a session remounted twice under the root picker (bind rollback) still gets its first focus on pop', (
     tester,
   ) async {
-    final session = await _CoveredSession.pump(tester);
+    final session = await _CoveredSession.pump(tester, graph);
     // The chosen profile's bind fails and the switch rolls back: two keyed
     // remounts under the picker, each claiming first focus while covered.
     session.gateFor(_kids.id).complete();
     for (final profile in [_kids, _owner]) {
-      expect(await session.graph.activeProfile.activate(profile), isTrue);
+      expect(await tester.runAsync(() => session.graph.activeProfile.activate(profile)), isTrue);
       await tester.pump();
       await tester.pump();
     }
@@ -349,20 +342,20 @@ class _CoveredSession {
   /// Completing it lets that profile's session claim its first focus.
   Completer<void> gateFor(String? profileId) => _gates.putIfAbsent(profileId, Completer<void>.new);
 
-  static Future<_CoveredSession> pump(WidgetTester tester) async {
-    final session = _CoveredSession._(await _SessionGraph.create());
-    final graph = session.graph;
+  static Future<_CoveredSession> pump(WidgetTester tester, _SessionGraph graph) async {
+    final session = _CoveredSession._(graph);
     addTearDown(() async {
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       session.picker.dispose();
-      await graph.dispose();
     });
 
-    await graph.profileRegistry.upsert(_owner);
-    await graph.profileRegistry.upsert(_kids);
-    await graph.storage.setActiveProfileId(_owner.id);
-    await graph.activeProfile.initialize();
+    await tester.runAsync(() async {
+      await graph.profileRegistry.upsert(_owner);
+      await graph.profileRegistry.upsert(_kids);
+      await graph.storage.setActiveProfileId(_owner.id);
+      await graph.activeProfile.initialize();
+    });
     session.gateFor(_owner.id).complete();
 
     await graph.pump(
