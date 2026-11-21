@@ -1,4 +1,4 @@
-name: Compare the maintained profile fixture against the integrated application
+name: Locate the profile fixture lifetime stall
 on:
   push:
     branches: [qualification/profile-fixtures-20261121]
@@ -49,7 +49,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/prepare_native_downloads.py --sqlite-platform linux --arch x64
 
-      - name: Use the fixture qualified by the fork on the same day
-        run: git show 6c7eba6acd52a5a2e982b25cb2453a9b80bbe3ea:test/navigation/profile_session_screen_test.dart > test/navigation/profile_session_screen_test.dart
-      - name: Test the real database, profile lifetimes, PIN shelf and root focus
-        run: flutter test --no-pub --reporter expanded test/navigation/profile_session_screen_test.dart
+      - name: Mark database and widget lifetime boundaries in the temporary checkout
+        run: |
+          python - <<'TRACE'
+          from pathlib import Path
+          p = Path('test/navigation/profile_session_screen_test.dart')
+          lines = p.read_text().splitlines()
+          output = []
+          for n, line in enumerate(lines, 1):
+              stripped = line.lstrip()
+              indent = line[:len(line) - len(stripped)]
+              if stripped.startswith(('await ', 'expect(await ', 'multiServer.dispose();', 'serverManager.dispose();',
+                                      'activeProfile.dispose();', 'offlineWatch.dispose();', 'session.picker.dispose();')):
+                  output.append(f"{indent}print('profile fixture reached line {n}');")
+              output.append(line)
+          p.write_text('\n'.join(output) + '\n')
+          TRACE
+      - name: Trace the PIN shelf fixture
+        timeout-minutes: 6
+        run: |
+          timeout --kill-after=10 220 flutter test --no-pub --reporter expanded --plain-name 'a PIN-protected profile stays off' test/navigation/profile_session_screen_test.dart
