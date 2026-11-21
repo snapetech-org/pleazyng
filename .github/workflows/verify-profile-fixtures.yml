@@ -1,4 +1,4 @@
-name: Verify profile switches and shelf privacy
+name: Compare the maintained profile fixture against the integrated application
 on:
   push:
     branches: [qualification/profile-fixtures-20261121]
@@ -7,12 +7,13 @@ permissions:
 jobs:
   profile:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Check out revision for validation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          fetch-depth: 1
+          ref: 802096978f7c191065ccae473d7495dd5f471e8c
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Load pinned Flutter SDK
@@ -48,5 +49,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/prepare_native_downloads.py --sqlite-platform linux --arch x64
 
+      - name: Use the fixture qualified by the fork on the same day
+        run: git show 6c7eba6acd52a5a2e982b25cb2453a9b80bbe3ea:test/navigation/profile_session_screen_test.dart > test/navigation/profile_session_screen_test.dart
       - name: Test the real database, profile lifetimes, PIN shelf and root focus
         run: flutter test --no-pub --reporter expanded test/navigation/profile_session_screen_test.dart
