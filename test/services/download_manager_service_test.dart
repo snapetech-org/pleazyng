@@ -442,21 +442,32 @@ void main() {
       });
     }
 
-    test('existing media stays complete; a missing stacked part becomes retryable without deleting files', () async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      addTearDown(db.close);
-      const stored = 'downloads/movie.mkv';
-      await seedRow(db, DownloadStatus.completed, videoFilePath: stored);
-      final file = File(await DownloadStorageService.instance.ensureAbsolutePath(stored));
-      await file.parent.create(recursive: true);
-      await file.writeAsBytes([1, 2, 3]);
-      final manager = await managerFor(db);
-      expect(await manager.reconcileMissingManagedDownloads(), 0);
-      await db.updateAdditionalPartPaths('srv:item-1', ['downloads/part2.mkv']);
-      expect(await manager.reconcileMissingManagedDownloads(), 1);
-      expect(await file.readAsBytes(), [1, 2, 3]);
-      expect((await db.getDownloadedMedia('srv:item-1'))!.additionalPartPathList, [null]);
-    });
+    for (final missingFirst in [false, true]) {
+      test('restore reconciliation preserves every surviving stacked file (missing first: $missingFirst)', () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        addTearDown(db.close);
+        const first = 'downloads/first.mkv', second = 'downloads/second.mkv', third = 'downloads/third.mkv';
+        await seedRow(db, DownloadStatus.completed, videoFilePath: first);
+        for (final stored in [if (!missingFirst) first, third]) {
+          final file = File(await DownloadStorageService.instance.ensureAbsolutePath(stored));
+          await file.parent.create(recursive: true);
+          await file.writeAsBytes([1, 2, 3]);
+        }
+        final manager = await managerFor(db);
+        if (!missingFirst) expect(await manager.reconcileMissingManagedDownloads(), 0);
+        await db.updateAdditionalPartPaths('srv:item-1', [second, third]);
+        expect(await manager.reconcileMissingManagedDownloads(), 1);
+
+        final repaired = (await db.getDownloadedMedia('srv:item-1'))!;
+        expect(repaired.status, DownloadStatus.failed.index);
+        expect(repaired.videoFilePath, missingFirst ? isNull : first);
+        expect(repaired.additionalPartPathList, [null, third]);
+        expect(repaired.nextMissingPartIndex, missingFirst ? 0 : 1);
+        for (final stored in repaired.storedPartPaths) {
+          expect(await File(await DownloadStorageService.instance.ensureAbsolutePath(stored)).readAsBytes(), [1, 2, 3]);
+        }
+      });
+    }
 
     test('cancels a still-live task targeting the previous app location and requeues it', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -4096,6 +4107,43 @@ void main() {
         expect(File(file).existsSync(), isFalse, reason: file);
         expect(Directory(fixture.storage.sidecarSubtitlesDirectoryPath(file)).existsSync(), isFalse, reason: file);
       }
+    });
+
+    test('retrying a repaired stack fetches only the missing middle file', () async {
+      final fixture = await _createSupplementaryFixture();
+      final key = fixture.metadata.globalKey;
+      final client = _SupplementaryClient(metadata: fixture.metadata, resolution: stackedResolution);
+      final (:manager, :tasks) = startManager(fixture, client, httpClient: _ScriptedSubtitleClient());
+      await manager.queueDownload(
+        metadata: fixture.metadata,
+        client: client,
+        downloadArtwork: false,
+        downloadSubtitles: false,
+      );
+      final first = await complete(fixture, manager, await nextTask(tasks), 'first');
+      final second = await complete(fixture, manager, await nextTask(tasks), 'second');
+      final third = await complete(fixture, manager, await nextTask(tasks), 'third');
+      await File(second).delete();
+      await (fixture.db.update(
+        fixture.db.downloadedMedia,
+      )..where((row) => row.globalKey.equals(key))).write(const DownloadedMediaCompanion(downloadedAt: Value(1)));
+
+      expect(await manager.reconcileMissingManagedDownloads(), 1);
+      await manager.retryDownload(key, client);
+      final retry = await nextTask(tasks);
+      expect(retry.filename, p.basename(second));
+      expect(await complete(fixture, manager, retry, 'replacement'), second);
+
+      final repaired = (await fixture.db.getDownloadedMedia(key))!;
+      expect(repaired.status, DownloadStatus.completed.index);
+      expect(repaired.downloadedAt, greaterThan(1));
+      expect(repaired.progress, 100);
+      expect(
+        [for (final stored in repaired.storedPartPaths) await fixture.storage.ensureAbsolutePath(stored)],
+        [first, second, third],
+      );
+      expect(await File(first).readAsString(), 'first');
+      expect(await File(third).readAsString(), 'third');
     });
 
     test('a restart between files resumes at the next file instead of starting over', () async {

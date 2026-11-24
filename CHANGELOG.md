@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Preserve playable parts when a stacked download loses a file. Retry fetches the missing parts and marks the item complete once the whole stack is available. Completed downloads show 100% after reopening the app.
+- Refresh orphan-download reviews when download ownership changes, omit files that disappeared or changed while a review was paused, and honor cancellation through the end of the scan.
+
 - Keep complete playlists in offline sync and native music playback when Plex, Jellyfin, or Emby omits the total count. Malformed replies preserve the existing offline playlist, and batch removal stops before deleting entries if the listing is incomplete or inconsistent.
 
 - Requalify an interrupted Apple release on hosted Macs and reuse the original verified packages across every platform.

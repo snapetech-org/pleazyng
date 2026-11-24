@@ -7,6 +7,7 @@ import 'package:path/path.dart' as path;
 import '../media/codec_catalog.dart';
 
 part 'orphan_download_scan_checkpoint.dart';
+part 'orphan_download_review_files.dart';
 
 enum OrphanDownloadScanFailure { unsafeRoot, tooManyEntries, scanFailed, cancelled }
 
@@ -151,44 +152,16 @@ class OrphanDownloadCleanupService {
     var deletedBytes = 0;
     var skippedCount = 0;
     for (final candidate in scan.files) {
-      if (protectedTags.contains(candidate.itemTag)) {
-        skippedCount++;
-        continue;
-      }
-
-      final segments = path.split(candidate.relativePath);
-      if (path.isAbsolute(candidate.relativePath) ||
-          segments.isEmpty ||
-          segments.any((segment) => segment.isEmpty || segment == '.' || segment == '..') ||
-          !_isRecognizedCandidate(candidate, segments)) {
-        skippedCount++;
-        continue;
-      }
-
-      final filePath = path.normalize(path.joinAll([canonicalRoot, ...segments]));
-      if (!path.isWithin(canonicalRoot, filePath) ||
-          !await _hasRealDirectoryParents(canonicalRoot, segments) ||
-          await FileSystemEntity.type(filePath, followLinks: false) != FileSystemEntityType.file) {
-        skippedCount++;
-        continue;
-      }
-
       try {
-        final resolvedFile = path.normalize(await File(filePath).resolveSymbolicLinks());
-        if (!path.isWithin(canonicalRoot, resolvedFile)) {
-          skippedCount++;
-          continue;
-        }
-        final file = File(filePath);
-        final stat = await file.stat();
-        if (stat.size != candidate.sizeBytes || stat.modified != candidate.modified) {
+        final file = await _matchingReviewedFile(canonicalRoot, candidate, protectedTags);
+        if (file == null) {
           skippedCount++;
           continue;
         }
         await file.delete();
         deletedCount++;
-        deletedBytes += stat.size;
-      } catch (_) {
+        deletedBytes += candidate.sizeBytes;
+      } on FileSystemException {
         skippedCount++;
       }
     }
@@ -228,15 +201,6 @@ class OrphanDownloadCleanupService {
 
     final directoryTag = _subtitleDirectoryTag.firstMatch(segments[segments.length - 2])?.group(1);
     return directoryTag == candidate.itemTag && _subtitleFile.hasMatch(fileName);
-  }
-
-  Future<bool> _hasRealDirectoryParents(String rootPath, List<String> segments) async {
-    var currentPath = rootPath;
-    for (final segment in segments.take(segments.length - 1)) {
-      currentPath = path.join(currentPath, segment);
-      if (await FileSystemEntity.type(currentPath, followLinks: false) != FileSystemEntityType.directory) return false;
-    }
-    return true;
   }
 
   Future<bool> _isRealDirectory(Directory directory) async =>

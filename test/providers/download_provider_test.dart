@@ -4589,6 +4589,33 @@ void main() {
       p.dispose();
     });
 
+    test('loading a legacy completed row shows 100 percent despite its stale progress', () async {
+      final root = await Directory.systemTemp.createTemp('legacy_download_progress');
+      final previousPaths = PathProviderPlatform.instance;
+      PathProviderPlatform.instance = FakePathProvider(root);
+      addTearDown(() async {
+        PathProviderPlatform.instance = previousPaths;
+        DownloadStorageService.resetForTesting();
+        await root.delete(recursive: true);
+      });
+      await db.insertDownload(
+        serverId: ServerId('srv'),
+        ratingKey: '1',
+        globalKey: 'srv:1',
+        type: 'movie',
+        status: DownloadStatus.completed.index,
+      );
+      await db.updateDownloadProgress('srv:1', 42, 42, 100);
+      await db.addDownloadOwner(profileId: 'test-profile', globalKey: 'srv:1');
+      final p = DownloadProvider.forTesting(downloadManager: downloadManager, database: db);
+      await p.ensureInitialized();
+      addTearDown(p.dispose);
+      await p.refresh();
+
+      expect(p.downloads['srv:1']?.status, DownloadStatus.completed);
+      expect(p.downloads['srv:1']?.progress, 100);
+    });
+
     test('terminal status-only events preserve bytes but a retry resets progress', () async {
       final p = DownloadProvider.forTesting(downloadManager: downloadManager, database: db);
       await p.ensureInitialized();

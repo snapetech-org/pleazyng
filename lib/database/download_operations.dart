@@ -11,6 +11,8 @@ import '../models/download_models.dart';
 import '../profiles/profile.dart';
 import '../utils/active_client_scope.dart';
 
+part 'download_state_operations.dart';
+
 enum QueueDownloadOutcome {
   /// A missing or retryable row was durably admitted to the queue.
   admitted,
@@ -489,24 +491,6 @@ extension DownloadDatabaseOperations on AppDatabase {
     });
   }
 
-  Future<void> updateDownloadStatus(String globalKey, int status) async {
-    await (update(
-      downloadedMedia,
-    )..where((t) => t.globalKey.equals(globalKey))).write(DownloadedMediaCompanion(status: Value(status)));
-  }
-
-  /// Change status only while the row is still in one of [fromStatuses].
-  /// Queue actions can overlap native terminal callbacks, so callers must not
-  /// overwrite a completion or failure that committed while they were awaiting
-  /// the downloader.
-  Future<bool> updateDownloadStatusIfIn(String globalKey, int status, {required List<int> fromStatuses}) async {
-    if (fromStatuses.isEmpty) return false;
-    final changed =
-        await (update(downloadedMedia)..where((row) => row.globalKey.equals(globalKey) & row.status.isIn(fromStatuses)))
-            .write(DownloadedMediaCompanion(status: Value(status)));
-    return changed > 0;
-  }
-
   Future<void> updateDownloadMediaSource(String globalKey, String? mediaSourceId) async {
     await (update(downloadedMedia)..where((t) => t.globalKey.equals(globalKey))).write(
       DownloadedMediaCompanion(mediaSourceId: Value(mediaSourceId)),
@@ -531,19 +515,6 @@ extension DownloadDatabaseOperations on AppDatabase {
       DownloadedMediaCompanion(
         videoFilePath: Value(filePath),
         downloadedAt: stampDownloadedAt ? Value(DateTime.now().millisecondsSinceEpoch) : const Value.absent(),
-      ),
-    );
-  }
-
-  /// Start a download stacked across `1 + additionalPartCount` files over:
-  /// no file stored yet. A zero count marks the download single-file.
-  Future<void> resetDownloadParts(String globalKey, {required int additionalPartCount}) async {
-    await (update(downloadedMedia)..where((t) => t.globalKey.equals(globalKey))).write(
-      DownloadedMediaCompanion(
-        videoFilePath: const Value(null),
-        additionalPartPaths: Value(
-          encodeAdditionalPartPaths(additionalPartCount == 0 ? null : List<String?>.filled(additionalPartCount, null)),
-        ),
       ),
     );
   }

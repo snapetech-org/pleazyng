@@ -187,6 +187,79 @@ void main() {
     expect(await target.exists(), isTrue);
   });
 
+  test('a resumed scan includes files whose downloads stopped protecting them', () async {
+    const tag = '1234abcd';
+    await write('Movies/A/A [$tag].mp4', [1, 2, 3]);
+    await write('Movies/Z/Z [5678abcd].mp4', [4]);
+    final cache = Directory(path.join(scratch.path, 'cache'));
+    const service = OrphanDownloadCleanupService(maxEntries: 3);
+    var cancelled = false;
+    final partial = await service.scanWithCheckpoint(
+      downloads,
+      cache,
+      protectedTags: {tag},
+      onProgress: (count) {
+        if (count >= 3) cancelled = true;
+      },
+      cancelled: () => cancelled,
+    );
+    expect(partial.failure, OrphanDownloadScanFailure.cancelled);
+
+    final resumed = await service.scanWithCheckpoint(downloads, cache, protectedTags: {});
+    expect(resumed.files.map((file) => file.itemTag), [tag, '5678abcd']);
+  });
+
+  test('a resumed scan excludes files removed or replaced while it was stopped', () async {
+    final removed = await write('Movies/A/A [1234abcd].mp4', [1]);
+    final replaced = await write('Movies/B/B [5678abcd].mp4', [2]);
+    final kept = await write('Movies/C/C [12345678].mp4', [3]);
+    await write('Movies/Z/Z [abcd1234].mp4', [4]);
+    final cache = Directory(path.join(scratch.path, 'cache'));
+    const service = OrphanDownloadCleanupService(maxEntries: 7);
+    var cancelled = false;
+    final partial = await service.scanWithCheckpoint(
+      downloads,
+      cache,
+      protectedTags: {},
+      onProgress: (count) {
+        if (count >= 7) cancelled = true;
+      },
+      cancelled: () => cancelled,
+    );
+    expect(partial.failure, OrphanDownloadScanFailure.cancelled);
+    await removed.delete();
+    await replaced.writeAsBytes([2, 2]);
+
+    final progress = <int>[];
+    final resumed = await service.scanWithCheckpoint(downloads, cache, protectedTags: {}, onProgress: progress.add);
+    expect(progress.first, partial.scannedEntries);
+    expect(resumed.files.map((file) => file.itemTag), ['12345678', 'abcd1234']);
+    expect(await kept.exists(), isTrue);
+    expect(await replaced.readAsBytes(), [2, 2]);
+  });
+
+  test('cancelling while finalizing the scan leaves it resumable and unavailable for deletion', () async {
+    await write('Movies/A/A [1234abcd].mp4', [1, 2, 3]);
+    final cache = Directory(path.join(scratch.path, 'cache'));
+    const service = OrphanDownloadCleanupService();
+    var cancelled = false;
+    final partial = await service.scanWithCheckpoint(
+      downloads,
+      cache,
+      protectedTags: {},
+      onProgress: (_) {
+        cancelled = true;
+      },
+      cancelled: () => cancelled,
+    );
+    expect(partial.failure, OrphanDownloadScanFailure.cancelled);
+    expect(partial.canDelete, isFalse);
+
+    final resumed = await service.scanWithCheckpoint(downloads, cache, protectedTags: {});
+    expect(resumed.files.single.itemTag, '1234abcd');
+    expect(resumed.canDelete, isTrue);
+  });
+
   test('refuses deletion after a bounded scan is incomplete', () async {
     final tag = DownloadStorageService.tagForGlobalKey('server:bounded');
     final file = await write('Movies/A/A [$tag].mp4', [1]);

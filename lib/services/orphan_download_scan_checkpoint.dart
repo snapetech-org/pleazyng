@@ -10,15 +10,10 @@ extension ResumableOrphanScan on OrphanDownloadCleanupService {
     void Function(int)? onProgress,
     bool Function()? cancelled,
   }) async {
-    final canonical = path.normalize(await root.resolveSymbolicLinks());
     if (await FileSystemEntity.type(root.path, followLinks: false) != FileSystemEntityType.directory) {
-      return OrphanDownloadScan(
-        rootPath: canonical,
-        files: [],
-        failure: OrphanDownloadScanFailure.unsafeRoot,
-        scannedEntries: 0,
-      );
+      return scan(root, protectedTags: protectedTags);
     }
+    final canonical = path.normalize(await root.resolveSymbolicLinks());
     final directory = Directory(path.join(cache.path, sha256.convert(utf8.encode(canonical)).toString()));
     await directory.create(recursive: true);
     final checkpoint = File(path.join(directory.path, 'cursor.json'));
@@ -26,26 +21,27 @@ extension ResumableOrphanScan on OrphanDownloadCleanupService {
       <String, String>{'path': '', 'after': ''},
     ];
     final state = _ScanState(rootPath: canonical, protectedTags: protectedTags, maxEntries: maxEntries);
+    final protection = sha256.convert(utf8.encode(jsonEncode(protectedTags.toList()..sort()))).toString();
     var chunks = 0, saved = 0;
     if (await checkpoint.exists()) {
       try {
         final data = jsonDecode(await checkpoint.readAsString()) as Map;
-        if (data['root'] == canonical && data['version'] == 1) {
+        if (data['root'] == canonical && data['version'] == 2 && data['protection'] == protection) {
           final frames = (data['stack'] as List).map((e) => Map<String, String>.from(e as Map)).toList();
           if (frames.length > 6 ||
               frames.any((f) => path.isAbsolute(f['path']!) || path.split(f['path']!).contains('..'))) {
             throw const FormatException('Invalid scan cursor');
           }
           chunks = data['chunks'] as int;
-          state.scannedEntries = data['entries'] as int;
+          saved = state.scannedEntries = data['entries'] as int;
           stack
             ..clear()
             ..addAll(frames);
         }
-      } catch (_) {
+      } on Object {
         if (await checkpoint.exists()) await checkpoint.delete();
         chunks = 0;
-        state.scannedEntries = 0;
+        saved = state.scannedEntries = 0;
         stack
           ..clear()
           ..add({'path': '', 'after': ''});
@@ -66,8 +62,9 @@ extension ResumableOrphanScan on OrphanDownloadCleanupService {
         state.files.clear();
       }
       await write(checkpoint, {
-        'version': 1,
+        'version': 2,
         'root': canonical,
+        'protection': protection,
         'chunks': chunks,
         'entries': state.scannedEntries,
         'stack': stack,
@@ -76,17 +73,20 @@ extension ResumableOrphanScan on OrphanDownloadCleanupService {
       onProgress?.call(saved);
     }
 
+    OrphanDownloadScan stopped() => OrphanDownloadScan(
+      rootPath: canonical,
+      files: const [],
+      failure: OrphanDownloadScanFailure.cancelled,
+      scannedEntries: saved,
+    );
+
+    if (saved > 0) onProgress?.call(saved);
     final iterators = <String, Iterator<String>>{};
     final budget = maxEntries.clamp(1, 1024);
     while (stack.isNotEmpty) {
       if (cancelled?.call() == true) {
         await save();
-        return OrphanDownloadScan(
-          rootPath: canonical,
-          files: [],
-          failure: OrphanDownloadScanFailure.cancelled,
-          scannedEntries: saved,
-        );
+        return stopped();
       }
       final frame = stack.last, rel = frame['path']!;
       var iterator = iterators[rel];
@@ -154,29 +154,11 @@ extension ResumableOrphanScan on OrphanDownloadCleanupService {
       }
     }
     await save();
-    final files = <OrphanDownloadFile>[];
-    try {
-      for (var n = 0; n < chunks; n++) {
-        for (final r in jsonDecode(await File(path.join(directory.path, '$n.json')).readAsString()) as List) {
-          if (!protectedTags.contains(r[1])) {
-            files.add(
-              OrphanDownloadFile(
-                relativePath: r[0],
-                itemTag: r[1],
-                sizeBytes: r[2],
-                modified: DateTime.fromMicrosecondsSinceEpoch(r[3]),
-              ),
-            );
-          }
-        }
-      }
-    } on Object {
-      // A damaged cache must not strand every later review on the same cursor.
-      await directory.delete(recursive: true);
-      rethrow;
-    }
-    files.sort((a, b) => a.relativePath.compareTo(b.relativePath));
+    if (cancelled?.call() == true) return stopped();
+    final files = await _restoreReviewedFiles(directory, canonical, chunks, protectedTags, cancelled);
+    if (files == null) return stopped();
     await directory.delete(recursive: true);
+    if (cancelled?.call() == true) return stopped();
     return OrphanDownloadScan(rootPath: canonical, files: files, failure: null, scannedEntries: saved);
   }
 }

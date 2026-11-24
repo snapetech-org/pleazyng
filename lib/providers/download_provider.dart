@@ -503,7 +503,7 @@ class DownloadProvider extends ChangeNotifier with DisposableChangeNotifierMixin
         _downloads[item.globalKey] = DownloadProgress(
           globalKey: item.globalKey,
           status: DownloadStatus.values[item.status],
-          progress: item.progress,
+          progress: item.status == DownloadStatus.completed.index ? 100 : item.progress,
           downloadedBytes: item.downloadedBytes,
           totalBytes: item.totalBytes ?? 0,
           errorMessage: item.errorMessage,

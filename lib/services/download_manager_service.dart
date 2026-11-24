@@ -57,6 +57,7 @@ import '../utils/storage_failure.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 part 'download_manager/server_conversion.dart';
+part 'download_manager/managed_download_repair.dart';
 
 typedef MediaClientResolver = MediaServerClient? Function(ServerId serverId, {String? clientScopeId});
 typedef _NativeTaskForId = Future<Task?> Function(String taskId);
@@ -1171,68 +1172,7 @@ class DownloadManagerService {
     }
   }
 
-  /// Backup restores retain metadata but deliberately omit regenerable media.
-  /// Keep those entries visible for manual retry instead of claiming they are
-  /// playable offline. Custom/removable/SAF locations are outside this policy.
-  Future<int> reconcileMissingManagedDownloads() async {
-    if (!downloadsSupported) return 0;
-    final root = path.normalize((await _storageService.getAppManagedDownloadsDirectory()).absolute.path);
-    var repaired = 0;
-    for (final row in await getAllDownloads()) {
-      if (row.status != DownloadStatus.completed.index || row.videoFilePath == null) continue;
-      final storedPaths = [row.videoFilePath!, ...?row.additionalPartPathList?.whereType<String>()];
-      final files = <String>[];
-      for (final stored in storedPaths) {
-        if (_storageService.isSafUri(stored)) break;
-        final absolute = path.normalize(await _storageService.ensureAbsolutePath(stored));
-        if (!path.isWithin(root, absolute)) break;
-        files.add(absolute);
-      }
-      if (files.length != storedPaths.length) continue;
-      try {
-        // A completed stacked item must have a stored path for every part.
-        // `whereType<String>()` above keeps path/root classification simple,
-        // but would otherwise erase null placeholders and make a row with an
-        // undiscovered part look complete when its first file still exists.
-        var missing = row.nextMissingPartIndex != null;
-        if (!missing) {
-          for (final file in files) {
-            if (!await File(file).exists()) {
-              missing = true;
-              break;
-            }
-          }
-        }
-        if (!missing) continue;
-        final changed = await _database.transaction(() async {
-          final current = await _database.getDownloadedMedia(row.globalKey);
-          if (current == null ||
-              current.status != DownloadStatus.completed.index ||
-              current.videoFilePath != row.videoFilePath ||
-              current.additionalPartPaths != row.additionalPartPaths) {
-            return false;
-          }
-          await _database.resetDownloadParts(
-            row.globalKey,
-            additionalPartCount: row.additionalPartPathList?.length ?? 0,
-          );
-          await _database.updateBgTaskId(row.globalKey, null);
-          await _database.updateDownloadProgress(row.globalKey, 0, 0, 0);
-          await _database.updateDownloadStatus(row.globalKey, DownloadStatus.failed.index);
-          await _database.updateDownloadError(row.globalKey, t.downloads.errorFileNotFound);
-          await _database.removeFromQueue(row.globalKey);
-          return true;
-        });
-        if (changed) {
-          repaired++;
-          _emitProgress(row.globalKey, DownloadStatus.failed, 0, errorMessage: t.downloads.errorFileNotFound);
-        }
-      } on FileSystemException catch (error) {
-        appLogger.w('Could not check managed download after restore', error: error);
-      }
-    }
-    return repaired;
-  }
+  Future<int> reconcileMissingManagedDownloads() => _repairManagedDownloads();
 
   Future<void> _reconcileNativeDownloadTasks() async {
     if (!downloadsSupported) return;
@@ -2116,13 +2056,10 @@ class DownloadManagerService {
     if (client != null) _startQueueProcessing(client);
   }
 
-  /// Progress a stacked download earned with the files it already stored, so
-  /// a resume at a later file does not report 0%. 0 for single-file rows and
-  /// for rows with every file stored, which a new attempt starts over.
+  /// A repaired stack can have files on either side of the next missing part.
   int _storedPartsPercent(DownloadedMediaItem row) {
-    final storedCount = row.nextMissingPartIndex;
-    if (row.partCount == 1 || storedCount == null) return 0;
-    return storedCount * 100 ~/ row.partCount;
+    if (row.partCount == 1 || row.nextMissingPartIndex == null) return 0;
+    return row.storedPartPaths.length * 100 ~/ row.partCount;
   }
 
   Future<void> _cancelNativeTask(String globalKey, String taskId, {required String reason}) =>
@@ -2791,9 +2728,8 @@ class DownloadManagerService {
     final speedBytesPerSec = update.hasNetworkSpeed ? update.networkSpeed * 1024 * 1024 : 0.0;
     final fileBytes = update.hasExpectedFileSize ? update.expectedFileSize : 0;
     final fileDownloadedBytes = fileBytes > 0 ? (update.progress * fileBytes).round() : 0;
-    // The file this task fetches is the row's first one not stored yet.
-    final partIndex = existing.nextMissingPartIndex ?? partCount - 1;
-    final progress = ((partIndex + update.progress) * 100 / partCount).round().clamp(0, 100);
+    final storedCount = existing.storedPartPaths.length.clamp(0, partCount - 1);
+    final progress = ((storedCount + update.progress) * 100 / partCount).round().clamp(0, 100);
     final downloadedBytes = storedBytes + fileDownloadedBytes;
     final totalBytes = fileBytes > 0 ? storedBytes + fileBytes : 0;
     if (_disposed) return;
@@ -3328,19 +3264,15 @@ class DownloadManagerService {
 
       // The completion time is stamped when the last file lands.
       final partCount = existingCheck.partCount;
+      final finalFile = existingCheck.storedPartPaths.length == partCount - 1;
       if (partIndex == null || partIndex == 0) {
         await _database.updateVideoFilePath(
           globalKey,
           storedPath,
-          stampDownloadedAt: partCount == 1 || partIndex == null,
+          stampDownloadedAt: partCount == 1 || partIndex == null || finalFile,
         );
       } else {
-        await _database.updateAdditionalPartPath(
-          globalKey,
-          partIndex,
-          storedPath,
-          stampDownloadedAt: partIndex == partCount - 1,
-        );
+        await _database.updateAdditionalPartPath(globalKey, partIndex, storedPath, stampDownloadedAt: finalFile);
       }
       final recorded = await _database.getDownloadedMedia(globalKey);
       final missingPart = recorded?.nextMissingPartIndex;
