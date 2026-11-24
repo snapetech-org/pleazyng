@@ -396,7 +396,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       XCUIRemote.shared.press(.down)
       XCUIRemote.shared.press(.select)
       _ = try waitForTVScreen(
-        ["Open media", "What would you like to open", "Stream address", "Device files"],
+        ["Open media", "What would you like to open", "Stream address", "Media address"],
         in: app, attachmentName: "pleazyng-localtest-files-books-tvos", timeout: 30)
       XCUIRemote.shared.press(.menu)
       _ = try waitForTVScreen(

@@ -601,7 +601,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn("markers.allSatisfy", UI_TEST)
         self.assertIn("hasTVRailFocus(settings.boundingBox, in: screen.image)", UI_TEST)
         self.assertIn("XCUIRemote.shared.press(.menu)", UI_TEST)
-        self.assertIn('["Open media", "What would you like to open", "Stream address", "Device files"]', UI_TEST)
+        self.assertIn('["Open media", "What would you like to open", "Stream address", "Media address"]', UI_TEST)
         self.assertIn("try captureTVLocalLibrary(in: app)", UI_TEST)
         self.assertIn('"pleazyng-diagnostic-files-books-arrival-tvos"', UI_TEST)
         self.assertIn('"pleazyng-diagnostic-files-books-return-tvos"', UI_TEST)
