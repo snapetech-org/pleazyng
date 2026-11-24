@@ -36,6 +36,7 @@ import zipfile
 from pathlib import Path
 import launch_queued_apple_jit_jobs as apple_queue
 import recover_hosted_capacity as hosted_capacity
+from release_job_inventory import inventory as release_inventory
 from verify_tvos_runner_acquisition import RunnerAcquisitionError, verify_unacquired_hosted_tvos_run
 
 
@@ -536,12 +537,33 @@ def wait_for_run(repo: str, run: dict, purpose: str, *, private_apple: bool = Tr
     native_failed_job_keys: set[tuple[int, str]] = set()
     native_cancellation_requested = False
     watch_failures = 0
+    watch_jobs = True
+    active_states = {"queued", "in_progress", "waiting", "requested", "pending"}
+    attempt = run.get("attempt", 1)
+    overview_path = f"repos/{repo}/actions/runs/{run_id}"
     while True:
-        watcher = subprocess.Popen(
-            ["gh", "run", "watch", run_id, "--repo", repo, "--interval", "30", "--exit-status"],
-            cwd=ROOT,
-        )
-        while watcher.poll() is None:
+        watcher = None
+        if watch_jobs:
+            watcher = subprocess.Popen(
+                ["gh", "run", "watch", run_id, "--repo", repo, "--interval", "30", "--exit-status"],
+                cwd=ROOT,
+            )
+        overview = {}
+        next_summary_check = 0.0
+        while watcher is None or watcher.poll() is None:
+            if watcher is None and time.monotonic() >= next_summary_check:
+                next_summary_check = time.monotonic() + 30
+                try:
+                    overview = gh_json("api", overview_path)
+                except ReleaseError:
+                    overview = {}
+                if overview.get("status") not in active_states or (
+                    repo == PLEZY_REPO and overview.get("id") == int(run_id)
+                    and overview.get("run_attempt", attempt) > attempt
+                    and hosted_capacity.trusted_workflow(repo, overview)
+                ):
+                    break
+                watch_failures = 0
             if repo == MPV_REPO and not native_cancellation_requested \
                     and time.monotonic() >= next_native_job_check:
                 next_native_job_check = time.monotonic() + 15
@@ -637,8 +659,9 @@ def wait_for_run(repo: str, run: dict, purpose: str, *, private_apple: bool = Tr
             if apple_controller is not None:
                 controller_code = apple_controller.poll()
                 if controller_code not in (None, 0) and not preflight_cancel_requested:
-                    watcher.terminate()
-                    watcher.wait(timeout=30)
+                    if watcher is not None:
+                        watcher.terminate()
+                        watcher.wait(timeout=30)
                     raise ReleaseError(
                         f"Apple JIT queue controller failed with exit code {controller_code}; "
                         "the GitHub workflow was left running and was not canceled."
@@ -659,16 +682,15 @@ def wait_for_run(repo: str, run: dict, purpose: str, *, private_apple: bool = Tr
                     except ReleaseError:
                         print("Could not confirm failed-build drainage; preserving the workflow and retrying.", flush=True)
             time.sleep(3)
-        watch_code = watcher.wait()
-        if watch_code == 0:
-            break
-        try:
-            overview = gh_json("api", f"repos/{repo}/actions/runs/{run_id}")
-        except ReleaseError:
-            overview = {}
+        if watcher is not None:
+            if watcher.wait() == 0:
+                break
+            try:
+                overview = gh_json("api", overview_path)
+            except ReleaseError:
+                overview = {}
         # The watch command can exit for the prior attempt after GitHub has already
         # requeued the run. Start job discovery again if signing work is requested.
-        attempt = run.get("attempt", 1)
         if overview.get("status") == "completed" and overview.get("conclusion") == "failure":
             advanced = await_hosted_retry(repo, int(run_id), overview)
         elif (overview.get("status") != "completed" and repo == PLEZY_REPO and overview.get("id") == int(run_id)
@@ -693,12 +715,17 @@ def wait_for_run(repo: str, run: dict, purpose: str, *, private_apple: bool = Tr
             raise ReleaseError(f"{purpose} did not succeed: {overview.get('conclusion') or 'unknown'}")
         # A confirmed active run is healthy even when the watch endpoint fails.
         # Count only consecutive failures to confirm its state.
-        watch_failures = 0 if overview.get("status") in {
-            "queued", "in_progress", "waiting", "requested", "pending"
-        } else watch_failures + 1
+        if overview.get("status") in active_states:
+            watch_failures = 0
+            if watch_jobs:
+                print(f"GitHub job watch failed for active run {run_id}. Following run status directly.", flush=True)
+                watch_jobs = False
+        else:
+            watch_failures += 1
         if watch_failures >= 6:
-            raise ReleaseError(f"gh run watch repeatedly failed for active run {run_id}; preserve and resume it later.")
-        print(f"GitHub watch failed for active run {run_id}; retrying status watch.", flush=True)
+            raise ReleaseError(f"GitHub repeatedly failed to report the state of run {run_id}. Resume the same run later.")
+        if watch_failures:
+            print(f"GitHub could not confirm run {run_id} status. Retrying.", flush=True)
         time.sleep(10)
     if apple_controller is not None:
         controller_code = apple_controller.wait()
@@ -707,8 +734,13 @@ def wait_for_run(repo: str, run: dict, purpose: str, *, private_apple: bool = Tr
                 f"Apple JIT queue controller failed with exit code {controller_code}; "
                 "inspect its per-run evidence before retrying."
             )
-    updated = gh_json("run", "view", run_id, "--repo", repo,
-                      "--json", "databaseId,status,conclusion,headSha,headBranch,event,url,jobs")
+    summary_fields = "databaseId,status,conclusion,headSha,headBranch,event,url"
+    try:
+        updated = gh_json("run", "view", run_id, "--repo", repo, "--json", f"{summary_fields},jobs")
+    except ReleaseError:
+        updated = gh_json("run", "view", run_id, "--repo", repo, "--json", summary_fields)
+        updated["jobs"] = release_inventory(f"{overview_path}/jobs", "jobs",
+                                            lambda path: gh_json("api", path), ReleaseError, page_size=30)
     if updated.get("status") != "completed" or (updated.get("conclusion") != "success" and not allow_failure):
         raise ReleaseError(f"{purpose} did not succeed: {updated.get('conclusion') or updated.get('status')}")
     return updated

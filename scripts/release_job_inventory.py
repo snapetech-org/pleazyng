@@ -1,8 +1,8 @@
 """Read a complete GitHub Actions inventory and combine split Mac qualification evidence."""
 
 
-def inventory(path, key, get, error=ValueError):
-    url = path + ("&" if "?" in path else "?") + "per_page=100"
+def inventory(path, key, get, error=ValueError, *, page_size=100):
+    url = path + ("&" if "?" in path else "?") + f"per_page={page_size}"
     result = []
     expected = None
     for page in range(1, 101):
@@ -18,7 +18,7 @@ def inventory(path, key, get, error=ValueError):
         result.extend(rows)
         if len(result) == expected:
             return result
-        if len(rows) != 100 or len(result) > expected:
+        if len(rows) != page_size or len(result) > expected:
             break
     raise error(f"Incomplete GitHub {key} inventory; refusing recovery.")
 

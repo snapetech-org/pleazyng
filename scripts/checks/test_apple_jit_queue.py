@@ -249,20 +249,36 @@ class AppleQueueTests(unittest.TestCase):
         watcher.terminate.assert_not_called()
         controller.terminate.assert_not_called()
 
-    def test_transient_watch_api_failure_reuses_the_active_run(self):
+    def test_job_watch_api_failure_follows_the_active_run_summary(self):
         failed_watch = Mock()
         failed_watch.poll.return_value = 1
         failed_watch.wait.return_value = 1
-        successful_watch = Mock()
-        successful_watch.poll.return_value = 0
-        successful_watch.wait.return_value = 0
+        active = {"status": "in_progress"}
         completed = {"status": "completed", "conclusion": "success"}
-        with (patch.object(release.subprocess, "Popen", side_effect=[failed_watch, successful_watch]) as popen,
-              patch.object(release, "gh_json", side_effect=[{"status": "in_progress"}, completed]),
-              patch.object(release.time, "sleep")):
+        with (patch.object(release.subprocess, "Popen", return_value=failed_watch) as popen,
+              patch.object(release, "gh_json", side_effect=[active, active, completed, completed]) as api,
+              patch.object(release.time, "sleep"),
+              patch.object(release.time, "monotonic", side_effect=[0, 0, 30, 30])):
             self.assertEqual(release.wait_for_run(release.PLEZY_REPO,
                 {"databaseId": 42}, "Release", private_apple=False), completed)
-        self.assertEqual(popen.call_count, 2)
+        popen.assert_called_once()
+        for call in api.call_args_list[:3]:
+            self.assertEqual(call.args, ("api", "repos/snapetech-org/pleazyng/actions/runs/42"))
+
+    def test_completed_run_with_large_job_response_uses_smaller_pages(self):
+        watcher = Mock()
+        watcher.poll.return_value = 0
+        watcher.wait.return_value = 0
+        completed = {"databaseId": 42, "status": "completed", "conclusion": "success"}
+        jobs = [{"id": job_id} for job_id in range(31)]
+        responses = [release.ReleaseError("HTTP 502 listing jobs"), completed,
+                     {"total_count": 31, "jobs": jobs[:30]}, {"total_count": 31, "jobs": jobs[30:]}]
+        with (patch.object(release.subprocess, "Popen", return_value=watcher),
+              patch.object(release, "gh_json", side_effect=responses) as api):
+            result = release.wait_for_run(release.PLEZY_REPO, {"databaseId": 42}, "Release", private_apple=False)
+        self.assertEqual(result["jobs"], jobs)
+        self.assertEqual(api.call_args.args,
+                         ("api", "repos/snapetech-org/pleazyng/actions/runs/42/jobs?per_page=30&page=2"))
 
     def test_cancellation_waits_for_public_jobs_and_queued_packages(self):
         failed = {"name": "WebOS", "status": "completed", "conclusion": "failure"}
