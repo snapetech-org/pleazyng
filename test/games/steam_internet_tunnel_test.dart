@@ -20,6 +20,10 @@ class _LocalTLS extends HttpOverrides {
 }
 
 class _Relay {
+  _Relay({this.upgrade = true, this.sendReady = true});
+
+  final bool upgrade, sendReady;
+  final requested = Completer<void>();
   late HttpServer server;
   late RawDatagramSocket observer;
   final peers = <String, WebSocket>{};
@@ -60,19 +64,23 @@ class _Relay {
     });
     server = await HttpServer.bindSecure(InternetAddress.loopbackIPv4, 0, context);
     server.listen((request) async {
+      if (!requested.isCompleted) requested.complete();
       expect(request.headers.value('X-Steam-Relay-Admission'), 'a' * 43);
       expect(request.headers.value('Authorization'), startsWith('Bearer '));
       expect(request.uri.hasQuery, isFalse);
+      if (!upgrade) return;
       final role = request.headers.value('X-Steam-Relay-Role')!;
       peers[role] = await WebSocketTransformer.upgrade(request, compression: CompressionOptions.compressionOff);
       final socket = peers[role]!; // Owned and closed by the fixture's peer map.
-      socket.add(
-        jsonEncode({
-          'kind': 'ready',
-          'udpPort': observer.port,
-          'udpCookie': base64Url.encode(List.filled(32, role == 'host' ? 1 : 2)).replaceAll('=', ''),
-        }),
-      );
+      if (sendReady) {
+        socket.add(
+          jsonEncode({
+            'kind': 'ready',
+            'udpPort': observer.port,
+            'udpCookie': base64Url.encode(List.filled(32, role == 'host' ? 1 : 2)).replaceAll('=', ''),
+          }),
+        );
+      }
       socket.listen(
         (data) {
           expect(data, isA<List<int>>());
@@ -109,6 +117,14 @@ class _Relay {
   }
 }
 
+Future<_LocalTLS> _prepareRelay(_Relay relay) async {
+  final trusted = await relay.start();
+  CertificateTrust.debugSetUserAuthoritiesForTesting(trusted);
+  addTearDown(CertificateTrust.debugReset);
+  addTearDown(relay.close);
+  return _LocalTLS(trusted);
+}
+
 Future<void> until(bool Function() condition) async {
   final deadline = DateTime.now().add(const Duration(seconds: 12));
   while (!condition()) {
@@ -143,12 +159,59 @@ void main() {
       expect(steamRelayUri(s), isNull);
     }
   });
+  test('retiring a tunnel cancels an in-flight WebSocket upgrade', () async {
+    final relay = _Relay(upgrade: false);
+    final tls = await _prepareRelay(relay);
+    var allowed = true;
+    final pending = HttpOverrides.runWithHttpOverrides(
+      () => SteamInternetTunnel.connectForTesting(
+        identity(),
+        host: false,
+        allowed: () => allowed,
+        admission: 'a' * 43,
+        relay: relay.uri,
+        isPublic: (address) => address.isLoopback,
+      ),
+      tls,
+    );
+    final result = expectLater(pending.timeout(const Duration(seconds: 3)), throwsA(isA<SocketException>()));
+    await relay.requested.future.timeout(const Duration(seconds: 2));
+    allowed = false;
+    await result;
+  });
+
+  test('a host only waits indefinitely after the relay acknowledges readiness', () async {
+    Future<SteamInternetTunnel> connectHost(_Relay relay) async {
+      final tls = await _prepareRelay(relay);
+      final host = await HttpOverrides.runWithHttpOverrides(
+        () => SteamInternetTunnel.connectForTesting(
+          identity(),
+          host: true,
+          allowed: () => true,
+          admission: 'a' * 43,
+          relay: relay.uri,
+          isPublic: (address) => address.isLoopback,
+          waitForPeer: false,
+        ),
+        tls,
+      );
+      addTearDown(() {
+        host.close();
+        host.path.dispose();
+      });
+      return host;
+    }
+
+    final ready = await connectHost(_Relay());
+    final waiting = await connectHost(_Relay(sendReady: false));
+    await waiting.done.timeout(const Duration(seconds: 10));
+    expect(waiting.current, isFalse);
+    expect(ready.current, isTrue);
+  });
+
   test('real TLS relay, encrypted UDP upgrade/fallback and permission retirement carry Steam datagrams', () async {
-    final relay = _Relay();
-    final trusted = await relay.start();
-    CertificateTrust.debugSetUserAuthoritiesForTesting(trusted);
-    addTearDown(CertificateTrust.debugReset);
-    addTearDown(relay.close);
+    final relay = _Relay()..dropUdp = true;
+    final tls = await _prepareRelay(relay);
     await HttpOverrides.runWithHttpOverrides(() async {
       var allowed = true;
       // Ephemeral fixture ports keep the real Steam client and parallel tests intact.
@@ -204,8 +267,7 @@ void main() {
       final steam = steamSockets[5];
       final native = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(native.close);
-      final received = StreamController<List<int>>();
-      addTearDown(received.close);
+      Completer<List<int>>? awaitingReply;
       final subscription = steam.listen((event) {
         if (event != RawSocketEvent.read) return;
         final d = steam.receive();
@@ -215,19 +277,23 @@ void main() {
       final nativeSub = native.listen((event) {
         if (event != RawSocketEvent.read) return;
         final d = native.receive();
-        if (d != null) received.add(d.data);
+        final pending = awaitingReply;
+        if (d != null && pending != null && !pending.isCompleted) pending.complete(d.data);
       });
       addTearDown(nativeSub.cancel);
-      final queue = StreamIterator(received.stream);
-      addTearDown(queue.cancel);
       Future<void> echo(int tag) async {
-        native.send([11, 22, 33, 44, tag], InternetAddress.loopbackIPv4, receiver.ports[5]);
-        expect(await queue.moveNext().timeout(const Duration(seconds: 4)), isTrue);
-        expect(queue.current, [11, 22, 33, 44, tag, 99]);
+        final pending = awaitingReply = Completer<List<int>>();
+        try {
+          native.send([11, 22, 33, 44, tag], InternetAddress.loopbackIPv4, receiver.ports[5]);
+          expect(await pending.future.timeout(const Duration(seconds: 4)), [11, 22, 33, 44, tag, 99]);
+        } finally {
+          awaitingReply = null;
+        }
       }
 
       await echo(1);
       expect(receiver.path.value, SteamInternetPath.relay);
+      relay.dropUdp = false;
       await until(() => host.path.value == SteamInternetPath.direct && receiver.path.value == SteamInternetPath.direct);
       expect(session.internetPath.value, SteamInternetPath.direct);
       final before = relay.forwarded;
@@ -245,6 +311,6 @@ void main() {
       expect(session.internetPath.value, isNull);
       expect(session.creationParams['address'], computer.address);
       expect(session.creationParams.containsKey('relayPort0'), isFalse);
-    }, _LocalTLS(trusted));
+    }, tls);
   });
 }

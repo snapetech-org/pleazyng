@@ -11,7 +11,7 @@ import '../services/companion_remote/remote_auth_context.dart';
 import '../services/plezy_server.dart';
 import '../utils/web_socket_connect.dart';
 import 'game_models.dart';
-import 'steam_discovery_codec.dart';
+import 'steam_host_probe.dart';
 import 'steam_tunnel_codec.dart';
 
 enum SteamInternetPath { relay, direct }
@@ -72,6 +72,7 @@ class SteamInternetTunnel {
     this._hostPorts,
   );
   final String _admission;
+  static const _relayReadyTimeout = Duration(seconds: 8);
   static const _steamPorts = [27031, 27032, 27033, 27034, 27035, 27036];
   final List<int> _hostPorts;
   final bool Function(InternetAddress) _isPublic;
@@ -173,6 +174,9 @@ class SteamInternetTunnel {
     );
     // Observe rejection even for a host waiting asynchronously for a remote.
     unawaited(tunnel._ready.future.catchError((Object _) {}));
+    // Other owners only receive this tunnel after setup. Poll retirement while
+    // the connection is opening so those owners can cancel a pending upgrade.
+    tunnel._tick = Timer.periodic(const Duration(milliseconds: 500), (_) => tunnel._maintain());
     try {
       await tunnel._start();
       if (waitForPeer) await tunnel._ready.future.timeout(const Duration(seconds: 15));
@@ -186,8 +190,12 @@ class SteamInternetTunnel {
   }
 
   Future<void> _start() async {
-    _codec = await SteamTunnelCodec.create(_context, host: host);
-    if (!current) throw const SocketException('Retired');
+    final codec = await SteamTunnelCodec.create(_context, host: host);
+    if (!current) {
+      codec.close();
+      throw const SocketException('Retired');
+    }
+    _codec = codec;
     for (var i = 0; i < 6; i++) {
       final socket = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
       if (!current) {
@@ -255,7 +263,9 @@ class SteamInternetTunnel {
     if (!current) throw const SocketException('Retired');
     _attempt = WebSocketConnectAttempt(
       _uri,
-      connectTimeout: const Duration(seconds: 8),
+      connectTimeout: _relayReadyTimeout,
+      maxPayloadLength: 65536,
+      followRedirects: false,
       headers: {
         'Authorization': 'Bearer ${SteamTunnelCodec.roomToken(_context)}',
         'X-Steam-Relay-Admission': _admission,
@@ -264,11 +274,13 @@ class SteamInternetTunnel {
       },
     );
     final socket = await _attempt!.socket;
+    _attempt = null;
     if (!current) {
       unawaited(socket.close());
       throw const SocketException('Retired');
     }
     _socket = socket;
+    _handshakeDeadline = Timer(_relayReadyTimeout, close);
     _subscriptions.add(
       socket.listen(
         (message) {
@@ -288,7 +300,6 @@ class SteamInternetTunnel {
         onDone: close,
       ),
     );
-    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) => _maintain());
   }
 
   void _control(String message) {
@@ -315,6 +326,9 @@ class SteamInternetTunnel {
           _cookie = cookie;
           _observerPort = m['udpPort'];
           _serverReady = true;
+          // A ready host can idle until a receiver pairs. Only an unresponsive
+          // relay or an incomplete peer handshake should expire.
+          _handshakeDeadline?.cancel();
         case 'peer':
           if (!_serverReady || _peer) throw const FormatException();
           _peer = true;
@@ -339,6 +353,7 @@ class SteamInternetTunnel {
           throw const FormatException();
       }
     } catch (_) {
+      // Unexpected relay control messages retire the current connection.
       close();
     }
   }
@@ -469,17 +484,23 @@ class SteamInternetTunnel {
         final row = _outgoing.removeFirst();
         final packet = row.kind == -1 ? row.data : await _codec!.seal(row.kind, row.data);
         if (!current) break;
-        if (row.udp && _udp != null && _candidate != null) {
-          _udp!.send(packet, _candidate!, _candidatePort);
-        } else {
-          await _socket!.addStream(Stream<List<int>>.value(packet)).timeout(const Duration(seconds: 3));
-        }
+        if (row.udp && (_sendDirect(row.kind, packet) || row.kind != 1)) continue;
+        await _socket!.addStream(Stream<List<int>>.value(packet)).timeout(const Duration(seconds: 3));
       }
     } catch (_) {
+      // A failed relay write makes this tunnel unusable.
       close();
     } finally {
       _sending = false;
     }
+  }
+
+  bool _sendDirect(int kind, List<int> packet) {
+    final udp = _udp, candidate = _candidate;
+    return udp != null &&
+        candidate != null &&
+        (kind != 1 || _direct) &&
+        udp.send(packet, candidate, _candidatePort) == packet.length;
   }
 
   void _maintain() {
@@ -495,7 +516,7 @@ class SteamInternetTunnel {
         _observerPort > 0) {
       _udp!.send([80, 83, 85, 49, ..._cookie!], _observer!, _observerPort);
     }
-    if (_ready.isCompleted && _candidate != null && _ticks % 2 == 0) {
+    if (_ready.isCompleted && _udp != null && _candidate != null && _ticks % 2 == 0) {
       final random = Random.secure();
       _ping = List.generate(8, (_) => random.nextInt(256));
       _pingAt = DateTime.now();
@@ -536,41 +557,16 @@ class SteamInternetTunnel {
 /// Discovery is only a routing hint. A response must match the chosen Steam
 /// host ID and address; Steam's native pairing still authorizes the session.
 Future<bool> steamHostReachable(GameHost host) async {
-  RawDatagramSocket? socket;
-  StreamSubscription<RawSocketEvent>? subscription;
   try {
-    final addresses = await InternetAddress.lookup(
-      host.address,
-      type: InternetAddressType.IPv4,
-    ).timeout(const Duration(seconds: 1));
-    if (addresses.isEmpty) return false;
-    socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-    final done = Completer<bool>();
-    subscription = socket.listen(
-      (event) {
-        if (event != RawSocketEvent.read) return;
-        for (var n = 0; n < 32; n++) {
-          final d = socket!.receive();
-          if (d == null) break;
-          if (d.port == host.port &&
-              addresses.any((a) => a.address == d.address.address) &&
-              SteamDiscoveryCodec.decode(d.data)?.id == host.id &&
-              !done.isCompleted) {
-            done.complete(true);
-          }
-        }
-      },
-      onError: (Object _) {
-        if (!done.isCompleted) done.complete(false);
-      },
+    await probeSteamHost(
+      host,
+      lookupTimeout: const Duration(seconds: 1),
+      replyTimeout: const Duration(milliseconds: 900),
+      expectedId: host.id,
     );
-    socket.send(SteamDiscoveryCodec.query(Random.secure().nextInt(0x7fffffff) + 1), addresses.first, host.port);
-    return await done.future.timeout(const Duration(milliseconds: 900), onTimeout: () => false);
-  } catch (_) {
-    // best-effort: Offer the route only after the Steam host responds to the reachability probe.
+    return true;
+  } on Object {
+    // Offer the local route only when the selected Steam host answers.
     return false;
-  } finally {
-    await subscription?.cancel();
-    socket?.close();
   }
 }

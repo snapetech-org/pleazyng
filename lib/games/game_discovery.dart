@@ -10,6 +10,7 @@ import 'package:xml/xml.dart';
 
 import 'game_models.dart';
 import 'steam_discovery_codec.dart';
+import 'steam_host_probe.dart';
 
 /// One bounded, cancellable LAN scan. Nothing is paired, persisted or launched.
 class GameDiscovery {
@@ -173,48 +174,19 @@ class GameDiscovery {
 /// Resolve a manual/routed Steam host with a bounded unicast status request.
 /// This identifies the peer for the PIN exchange; it does not establish trust.
 Future<GameHost> identifySteamHost(GameHost candidate) async {
-  final addresses = await InternetAddress.lookup(
-    candidate.address,
-    type: InternetAddressType.IPv4,
-  ).timeout(const Duration(seconds: 3));
-  if (addresses.isEmpty) throw const FormatException('Computer unavailable');
-  final address = addresses.first;
-  final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-  StreamSubscription<RawSocketEvent>? subscription;
-  try {
-    final result = Completer<GameHost>();
-    subscription = socket.listen(
-      (event) {
-        if (event != RawSocketEvent.read || result.isCompleted) return;
-        Datagram? packet;
-        var count = 0;
-        while (count++ < 64 && (packet = socket.receive()) != null) {
-          if (packet!.address != address || packet.port != candidate.port) continue;
-          final status = SteamDiscoveryCodec.decode(packet.data);
-          if (status == null) continue;
-          result.complete(
-            GameHost(
-              id: status.id,
-              name: status.name,
-              address: candidate.address,
-              protocol: GameProtocol.steam,
-              port: packet.port,
-              mac: candidate.mac,
-            ),
-          );
-          break;
-        }
-      },
-      onError: (Object error) {
-        if (!result.isCompleted) result.completeError(error);
-      },
-    );
-    socket.send(SteamDiscoveryCodec.query(Random.secure().nextInt(0x7fffffff) + 1), address, candidate.port);
-    return await result.future.timeout(const Duration(seconds: 4));
-  } finally {
-    socket.close();
-    await subscription?.cancel();
-  }
+  final status = await probeSteamHost(
+    candidate,
+    lookupTimeout: const Duration(seconds: 3),
+    replyTimeout: const Duration(seconds: 4),
+  );
+  return GameHost(
+    id: status.id,
+    name: status.name,
+    address: candidate.address,
+    protocol: GameProtocol.steam,
+    port: candidate.port,
+    mac: candidate.mac,
+  );
 }
 
 /// Public serverinfo supplies the UUID used by Moonlight's official shortcut.

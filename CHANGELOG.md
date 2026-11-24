@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Cancel pending Steam relay connections when permission ends and retry relay hosts that connect but never acknowledge readiness.
+- Keep Steam datagrams moving over the relay when the UDP route expires or a direct send cannot queue the packet. Try other IPv4 addresses for a Steam computer before deciding its local route is unavailable.
+
 - Retry remote-stream journal writes when another engine holds SQLite's writer lock. A preparation that expires while waiting cannot renew its lease or save another checkpoint.
 - Restore the remote-stream settings reset for unreadable journals, preserve settings another engine already repaired, and let the worker process healthy profiles after a damaged one.
 
