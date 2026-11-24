@@ -390,38 +390,18 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     }
 
     private func captureTVLocalLibrary(in app: XCUIApplication) throws {
-      // The TV layout places local search and the empty library under the
-      // Podcast, Open Media, and streaming cards. Move focus down so the
-      // app scrolls the actual local library controls into view.
-      let markers = ["Files and books", "Search saved library", "import a book"]
-      var dismissedSearchKeyboard = false
-      for _ in 0..<14 {
-        let screen = try captureTVScreen(in: app)
-        let text = joinedText(screen.lines)
-        if !dismissedSearchKeyboard &&
-           ["SPACE", "ABC", "search"].allSatisfy({ text.localizedCaseInsensitiveContains($0) }) &&
-           !text.localizedCaseInsensitiveContains("Files and books") {
-          // tvOS opens its full-screen keyboard on the search field's first
-          // focus. Menu dismisses it and the field remembers that dismissal.
-          XCUIRemote.shared.press(.menu)
-          _ = try waitForTVScreen(
-            ["Files and books"], in: app,
-            attachmentName: "pleazyng-diagnostic-search-keyboard-dismissed-tvos", timeout: 15)
-          dismissedSearchKeyboard = true
-          continue
-        }
-        if markers.allSatisfy({ text.localizedCaseInsensitiveContains($0) }) &&
-           !text.localizedCaseInsensitiveContains("unlock the saved streaming settings") {
-          attachScreenshot(screen.screenshot, named: "pleazyng-localtest-files-books-tvos")
-          attachText(text, named: "pleazyng-localtest-files-books-tvos-visible-text")
-          return
-        }
-        XCUIRemote.shared.press(.down)
-        Thread.sleep(forTimeInterval: 0.4)
-      }
-      try attachScreenshot(of: app, named: "pleazyng-diagnostic-local-library-not-visible-tvos")
-      throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 23,
-                    userInfo: [NSLocalizedDescriptionKey: "The local Files and Books controls did not scroll fully into view"])
+      // Files and Books starts on Podcasts, one remote step above Open media.
+      // Capture the playback options reachable from this library rather than
+      // scrolling to a text-only empty state below the last focusable row.
+      XCUIRemote.shared.press(.down)
+      XCUIRemote.shared.press(.select)
+      _ = try waitForTVScreen(
+        ["Open media", "What would you like to open", "Stream address", "Device files"],
+        in: app, attachmentName: "pleazyng-localtest-files-books-tvos", timeout: 30)
+      XCUIRemote.shared.press(.menu)
+      _ = try waitForTVScreen(
+        ["Files and books", "Open media"], in: app,
+        attachmentName: "pleazyng-diagnostic-files-books-return-tvos", timeout: 30)
     }
 
     // The tvOS Flutter engine can render controls without exposing them
