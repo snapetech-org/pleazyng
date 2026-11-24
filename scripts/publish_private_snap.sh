@@ -15,7 +15,7 @@ if [[ "$GITHUB_ACTIONS" != true || ! "${RUNNER_ENVIRONMENT:-}" =~ ^(self-hosted|
   exit 1
 fi
 if [[ "$(uname -s):$(uname -m)" != Linux:x86_64 ]]; then
-  echo 'Snap publication requires the private Linux x64 runner.' >&2
+  echo 'Snap publication requires a Linux x64 runner.' >&2
   exit 1
 fi
 if [[ $# != 2 ]]; then

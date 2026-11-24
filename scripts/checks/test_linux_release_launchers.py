@@ -201,8 +201,19 @@ class LinuxReleaseLauncherTests(unittest.TestCase):
         override = textwrap.dedent(manifest.split("    override-build: |\n", 1)[1]
                                    .split("    stage-packages:", 1)[0])
         installed = self.root / "snap-install"
+        triplet = "x86_64-linux-gnu"
+        libraries = ("libssh.so.4", "libssh-gcrypt.so.4")
+        for soname in libraries:
+            (project / "src/lib" / soname).write_bytes(b"old")
+            staged = installed / "usr/lib" / triplet / soname
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(b"security update")
         self.run_script(override, CRAFT_PROJECT_DIR=str(project),
-                        CRAFT_PART_SRC=str(project / "src"), CRAFT_PART_INSTALL=str(installed))
+                        CRAFT_PART_SRC=str(project / "src"), CRAFT_PART_INSTALL=str(installed),
+                        CRAFT_ARCH_TRIPLET_BUILD_FOR=triplet)
+        for soname in libraries:
+            runtime_lib = installed / "opt/pleazyng/lib" / soname
+            self.assertTrue(runtime_lib.samefile(installed / "usr/lib" / triplet / soname))
         command = re.search(r"(?m)^    command: (.+)$", manifest)[1]
         self.assert_launch(installed / command, installed / "opt/pleazyng/lib")
         self.assertTrue((installed / "usr/share/applications/org.snapetech.pleazyng.desktop").is_file())

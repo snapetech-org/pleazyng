@@ -22,7 +22,7 @@ elif [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted \
   # lane. Public-fork and pull-request code cannot enable direct networking.
   allow_direct_network=true
 else
-  echo 'Snap packaging requires private JIT or the validated trusted-main hybrid job.' >&2
+  echo 'Snap packaging requires the validated trusted-main hosted job or a configured private runner.' >&2
   exit 1
 fi
 arch="${1:?Pass the native Snap architecture: amd64 or arm64}"
@@ -69,7 +69,7 @@ fi
 
 sudo -n apt-get update -o Acquire::Retries=3
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-  -o Acquire::Retries=3 podman squashfs-tools
+  -o Acquire::Retries=3 podman squashfs-tools python3-yaml
 # Podman's image download runs in this process, so the proxy applies without
 # restarting a Docker, snapd, or LXD daemon. The image supplies Ubuntu 24.04.
 sudo -n env HTTP_PROXY="$proxy" HTTPS_PROXY="$proxy" http_proxy="$proxy" https_proxy="$proxy" \
@@ -104,4 +104,5 @@ if (( ${#snaps[@]} != 1 )); then
   exit 1
 fi
 unsquashfs -s "${snaps[0]}"
+/usr/bin/python3 "$root/scripts/checks/check_snap_libssh.py" "${snaps[0]}" "$arch"
 printf 'snap=%s\n' "${snaps[0]}" >> "$GITHUB_OUTPUT"

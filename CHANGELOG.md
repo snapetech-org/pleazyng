@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Use Ubuntu’s patched libssh libraries in the Linux Snap and check both runtime copies before Store publication. [USN-9187-1](https://ubuntu.com/security/notices/USN-9187-1)
+
 - Update release packaging to version 3.0.51 on all supported platforms.
 
 - Let iOS CocoaPods fetch pinned public RomM dependencies when GitHub requests authentication.

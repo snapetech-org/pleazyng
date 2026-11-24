@@ -14,15 +14,31 @@ Publication uses the public GitHub-hosted Linux job for either package architect
 
 ```bash
 bash scripts/publish_private_snap.sh \
-  "$RUNNER_TEMP/plezyng-snap/plezyng-linux-arm64.snap" stable
+  "$RUNNER_TEMP/pleazyng-snap/pleazyng-linux-arm64.snap" stable
 ```
 
-Download the package and the release's `SHA256SUMS.txt` into that exact directory
+For ordinary publication, download the package and the release's `SHA256SUMS.txt` into that exact directory
 first. The helper requires one matching checksum entry for the exact regular
 package file. It accepts `edge`, `beta`, `candidate`, or `stable`, and rejects
 symlinks, files outside the job directory, and reused container receipts before
 provisioning tools. The workflow must still validate the published release and
 its relationship to main before invoking this helper.
+
+For an Ubuntu security notice affecting staged packages, use the Snap-only
+refresh on main with the published release tag and affected channel. For example:
+
+```bash
+gh workflow run publish-snap.yml --ref main -f action=refresh-snap \
+  -f runner_pool=public -f release_tag=v3.0.50 -f channel=stable
+```
+
+The two native hosted builders verify the release tarballs against the published
+checksums and repackage them with fresh Ubuntu dependencies. The run retains the
+new Snaps and checksums as Actions artifacts. Both builds must pass before upload.
+The package check reads the primed manifest and compares the libssh files on the
+launcher's search path against the staged Ubuntu libraries for USN-9187-1.
+After upload, check both revisions in the public Store channel map. Channels
+that inherit stable follow its new revision automatically.
 
 Set `SNAPCRAFT_STORE_CREDENTIALS` from the existing Actions secret. The helper
 passes the variable name through sudo and Podman; it does not construct a

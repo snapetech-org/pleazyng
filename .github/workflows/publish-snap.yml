@@ -9,7 +9,7 @@ on:
         description: Publication action authorized on the protected default branch
         required: true
         type: choice
-        options: [publish-snap]
+        options: [publish-snap, refresh-snap]
       runner_pool:
         description: Runner pool for this publication
         required: true
@@ -102,9 +102,75 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
 
+  refresh:
+    name: Refresh ${{ matrix.arch }} Snap dependencies
+    needs: resolve-release
+    if: inputs.action == 'refresh-snap'
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            snap_arch: amd64
+          - arch: arm64
+            snap_arch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Stage the verified release bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          project="$GITHUB_WORKSPACE/linux/packaging/snap"
+          asset="pleazyng-linux-${ARCH}.tar.gz"
+          cd "$RUNNER_TEMP"
+          gh release download "$RELEASE_TAG" -p "$asset" -p SHA256SUMS.txt
+          awk -v name="$asset" '$2 == name {print; matches++} END {exit matches != 1}' SHA256SUMS.txt | tee bundle.sha256
+          sha256sum --check --strict bundle.sha256
+          mkdir "$project/src" "$project/gui"
+          tar --no-same-owner -xzf "$asset" -C "$project/src"
+          install -m755 "$project/src/pleazyng.sh" "$project/pleazyng.sh"
+          install -m644 "$project/src/pleazyng.png" "$project/gui/pleazyng.png"
+          install -m644 "$project/pleazyng.desktop" "$project/gui/pleazyng.desktop"
+          sed -i "s/^version: .*/version: '${RELEASE_TAG#v}'/" "$project/snapcraft.yaml"
+
+      - name: Build and verify the refreshed Snap
+        id: snap
+        env:
+          PLEZYNG_ALLOW_PUBLIC_SNAP: 'true'
+        run: bash scripts/build_snap.sh '${{ matrix.snap_arch }}'
+
+      - name: Record the refreshed package digest
+        env:
+          SNAP_PATH: ${{ steps.snap.outputs.snap }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir "$RUNNER_TEMP/pleazyng-snap"
+          cd "$RUNNER_TEMP/pleazyng-snap"
+          cp "$SNAP_PATH" "pleazyng-linux-${ARCH}.snap"
+          sha256sum "pleazyng-linux-${ARCH}.snap" | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: refreshed-snap-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pleazyng-snap/
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
   publish:
     name: Publish ${{ matrix.arch }} package
-    needs: resolve-release
+    needs: [resolve-release, refresh]
+    if: >-
+      ${{ !cancelled() && needs.resolve-release.result == 'success' &&
+          ((inputs.action == 'publish-snap' && needs.refresh.result == 'skipped') ||
+           (inputs.action == 'refresh-snap' && needs.refresh.result == 'success')) }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -129,7 +195,7 @@ jobs:
           fi
 
       - name: Download release Snap
-        if: steps.credentials.outputs.available == 'true'
+        if: inputs.action == 'publish-snap'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
@@ -144,6 +210,23 @@ jobs:
           test -s "$RUNNER_TEMP/pleazyng-snap/pleazyng-linux-${ARCH}.snap"
           cd "$RUNNER_TEMP/pleazyng-snap"
           sha256sum --check --status --ignore-missing SHA256SUMS.txt
+
+      - name: Download verified refresh from this run
+        if: inputs.action == 'refresh-snap'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: refreshed-snap-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pleazyng-snap
+
+      - name: Check the packages and runtime libraries before publication
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          if ! command -v unsquashfs >/dev/null || ! /usr/bin/python3 -c 'import yaml'; then
+            sudo apt-get update -o Acquire::Retries=3
+            sudo apt-get install -y --no-install-recommends squashfs-tools python3-yaml
+          fi
+          /usr/bin/python3 scripts/checks/check_snap_libssh.py "$RUNNER_TEMP/pleazyng-snap/pleazyng-linux-${ARCH}.snap" "${ARCH/x64/amd64}"
 
       - name: Publish to Snap Store
         if: steps.credentials.outputs.available == 'true'
