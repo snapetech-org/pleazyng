@@ -34,9 +34,6 @@ class SharedPreferencesWindows extends SharedPreferencesStorePlatform {
     SharedPreferencesAsyncWindows.registerWith();
   }
 
-  /// Local copy of preferences
-  Map<String, Object>? _cachedPreferences;
-
   /// File system used to store to disk. Exposed for testing only.
   @visibleForTesting
   FileSystem fs = const LocalFileSystem();
@@ -45,15 +42,14 @@ class SharedPreferencesWindows extends SharedPreferencesStorePlatform {
   @visibleForTesting
   PathProviderWindows pathProvider = PathProviderWindows();
 
-  /// Checks for cached preferences and returns them or loads preferences from
-  /// file and returns and caches them.
-  Future<Map<String, Object>> _readPreferences() async {
-    _cachedPreferences ??= await _readFromFile(
-      _defaultFileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
-    return _cachedPreferences!;
+  Future<bool> _update(void Function(Map<String, Object>) change) async {
+    try {
+      await _updatePreferences(_defaultFileName, fs: fs, pathProvider: pathProvider, change: change);
+      return true;
+    } on FileSystemException catch (error) {
+      debugPrint('Error saving preferences to disk: $error');
+      return false;
+    }
   }
 
   @override
@@ -74,15 +70,8 @@ class SharedPreferencesWindows extends SharedPreferencesStorePlatform {
   Future<bool> clearWithParameters(ClearParameters parameters) async {
     final PreferencesFilter filter = parameters.filter;
 
-    final Map<String, Object> preferences = await _readPreferences();
-    preferences.removeWhere((String key, _) =>
-        key.startsWith(filter.prefix) && (filter.allowList == null || filter.allowList!.contains(key)));
-    return _writePreferences(
-      preferences,
-      _defaultFileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
+    return _update((preferences) => preferences.removeWhere(
+        (key, _) => key.startsWith(filter.prefix) && (filter.allowList == null || filter.allowList!.contains(key))));
   }
 
   @override
@@ -102,35 +91,18 @@ class SharedPreferencesWindows extends SharedPreferencesStorePlatform {
   @override
   Future<Map<String, Object>> getAllWithParameters(GetAllParameters parameters) async {
     final PreferencesFilter filter = parameters.filter;
-    final Map<String, Object> withPrefix = Map<String, Object>.from(await _readPreferences());
+    final Map<String, Object> withPrefix = await _loadPreferences(_defaultFileName, fs: fs, pathProvider: pathProvider);
     withPrefix
         .removeWhere((String key, _) => !(key.startsWith(filter.prefix) && (filter.allowList?.contains(key) ?? true)));
     return withPrefix;
   }
 
   @override
-  Future<bool> remove(String key) async {
-    final Map<String, Object> preferences = await _readPreferences();
-    preferences.remove(key);
-    return _writePreferences(
-      preferences,
-      _defaultFileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
-  }
+  Future<bool> remove(String key) => _update((preferences) => preferences.remove(key));
 
   @override
-  Future<bool> setValue(String valueType, String key, Object value) async {
-    final Map<String, Object> preferences = await _readPreferences();
-    preferences[key] = value;
-    return _writePreferences(
-      preferences,
-      _defaultFileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
-  }
+  Future<bool> setValue(String valueType, String key, Object value) =>
+      _update((preferences) => preferences[key] = value);
 }
 
 /// The Windows implementation of [SharedPreferencesAsyncPlatform].
@@ -141,9 +113,6 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
   static void registerWith() {
     SharedPreferencesAsyncPlatform.instance = SharedPreferencesAsyncWindows();
   }
-
-  /// Local copy of preferences
-  Map<String, Object>? _cachedPreferences;
 
   /// File system used to store to disk. Exposed for testing only.
   @visibleForTesting
@@ -251,14 +220,10 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     final SharedPreferencesWindowsOptions windowsOptions =
         SharedPreferencesWindowsOptions.fromSharedPreferencesOptions(options);
     final PreferencesFilters filter = parameters.filter;
-    final Map<String, Object> preferences = await _readPreferences(windowsOptions.fileName);
-    preferences.removeWhere((String key, _) => filter.allowList == null || filter.allowList!.contains(key));
-    await _writePreferences(
-      preferences,
-      windowsOptions.fileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
+    await _updatePreferences(windowsOptions.fileName,
+        fs: fs,
+        pathProvider: pathProvider,
+        change: (prefs) => prefs.removeWhere((key, _) => filter.allowList == null || filter.allowList!.contains(key)));
   }
 
   @override
@@ -274,7 +239,7 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
   Future<void> reload(
     SharedPreferencesWindowsOptions options,
   ) async {
-    _cachedPreferences = await _readFromFile(options.fileName);
+    await _loadPreferences(options.fileName, fs: fs, pathProvider: pathProvider);
   }
 
   Future<Map<String, Object>> _readAll(
@@ -283,7 +248,8 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
   ) async {
     final SharedPreferencesWindowsOptions windowsOptions =
         SharedPreferencesWindowsOptions.fromSharedPreferencesOptions(options);
-    final Map<String, Object> prefs = Map<String, Object>.from(await _readPreferences(windowsOptions.fileName));
+    final Map<String, Object> prefs =
+        await _loadPreferences(windowsOptions.fileName, fs: fs, pathProvider: pathProvider);
     prefs.removeWhere((String key, _) => !(allowList?.contains(key) ?? true));
     return prefs;
   }
@@ -291,31 +257,14 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
   Future<Object?> _getValue(String key, SharedPreferencesOptions options) async {
     final SharedPreferencesWindowsOptions windowsOptions =
         SharedPreferencesWindowsOptions.fromSharedPreferencesOptions(options);
-    return (await _readPreferences(windowsOptions.fileName))[key];
+    return (await _loadPreferences(windowsOptions.fileName, fs: fs, pathProvider: pathProvider))[key];
   }
 
   Future<void> _setValue(String key, Object value, SharedPreferencesOptions options) async {
     final SharedPreferencesWindowsOptions windowsOptions =
         SharedPreferencesWindowsOptions.fromSharedPreferencesOptions(options);
-    final Map<String, Object> preferences = await _readPreferences(windowsOptions.fileName);
-    preferences[key] = value;
-    await _writePreferences(
-      preferences,
-      windowsOptions.fileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
-  }
-
-  /// Checks for cached preferences and returns them or loads preferences from
-  /// file and returns and caches them.
-  Future<Map<String, Object>> _readPreferences(String fileName) async {
-    _cachedPreferences ??= await _readFromFile(
-      fileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
-    return _cachedPreferences!;
+    await _updatePreferences(windowsOptions.fileName,
+        fs: fs, pathProvider: pathProvider, change: (prefs) => prefs[key] = value);
   }
 }
 
@@ -342,32 +291,76 @@ Future<File?> _getLocalDataFile(
 /// accumulate copies.
 const String _stagingSuffix = '.tmp';
 
-/// Gets the preferences from the stored file.
-Future<Map<String, Object>> _readFromFile(
-  String fileName, {
-  FileSystem fs = const LocalFileSystem(),
-  PathProviderWindows? pathProvider,
-}) async {
-  Map<String, Object> preferences = <String, Object>{};
-  final File? localDataFile = await _getLocalDataFile(
-    fileName,
-    fs: fs,
-    pathProvider: pathProvider,
-  );
-  if (localDataFile != null && localDataFile.existsSync()) {
-    final String stringMap = localDataFile.readAsStringSync();
-    if (stringMap.isNotEmpty) {
-      final Object? data = json.decode(stringMap);
-      if (data is Map) {
-        preferences = data.cast<String, Object>();
-      }
-    }
-    // PLEZY DELTA: the canonical document just read cleanly, so any staging
-    // file left by an interrupted write is stale. It is a plaintext copy of
-    // the credentials, so it does not get to sit there indefinitely.
-    _removeStagingFile(localDataFile);
+/// Run each synchronous file operation against the selected document. Its
+/// stable lock file also coordinates independent desktop app processes.
+T _withDocumentLock<T>(File file, {required bool writing, required T Function() run}) {
+  if (file.fileSystem is! LocalFileSystem) return run();
+  final lock = file.fileSystem.file('${file.path}.lock');
+  final handle = writing ? lock.openSync(mode: FileMode.append) : lock.openSync();
+  try {
+    handle.lockSync(writing ? FileLock.blockingExclusive : FileLock.blockingShared);
+    return run();
+  } finally {
+    handle.closeSync();
   }
-  return preferences;
+}
+
+Map<String, Object> _readDocument(File file) {
+  if (!file.existsSync()) return <String, Object>{};
+  final Object? data;
+  try {
+    final contents = file.readAsStringSync();
+    if (contents.isEmpty) return <String, Object>{};
+    data = json.decode(contents);
+  } on FormatException {
+    // A decoder exception can contain a snippet of the credential-bearing file.
+    throw const FormatException('Unreadable preferences document');
+  }
+  if (data is! Map<String, dynamic> || data.containsValue(null)) {
+    throw const FormatException('Invalid preferences document');
+  }
+  return Map<String, Object>.from(data);
+}
+
+Future<Map<String, Object>> _loadPreferences(
+  String fileName, {
+  required FileSystem fs,
+  required PathProviderWindows pathProvider,
+}) async {
+  final file = await _getLocalDataFile(fileName, fs: fs, pathProvider: pathProvider);
+  if (file == null || !file.existsSync()) return <String, Object>{};
+  // Older stores may be on a read-only volume and have no lock file yet.
+  final lock = fs.file('${file.path}.lock');
+  final hasLock = lock.existsSync();
+  if (!hasLock && !fs.file('${file.path}$_stagingSuffix').existsSync()) return _readDocument(file);
+  try {
+    return _withDocumentLock<Map<String, Object>>(file, writing: !hasLock, run: () {
+      final data = _readDocument(file);
+      _removeStagingFile(file);
+      return data;
+    });
+  } on FileSystemException {
+    // A legacy document remains readable when its directory cannot be
+    // upgraded with a lock for stale-stage cleanup.
+    if (hasLock || lock.existsSync()) rethrow;
+    return _readDocument(file);
+  }
+}
+
+Future<void> _updatePreferences(
+  String fileName, {
+  required FileSystem fs,
+  required PathProviderWindows pathProvider,
+  required void Function(Map<String, Object>) change,
+}) async {
+  final file = await _getLocalDataFile(fileName, fs: fs, pathProvider: pathProvider);
+  if (file == null) throw const FileSystemException('No application support directory for preferences');
+  if (!file.parent.existsSync()) file.parent.createSync(recursive: true);
+  _withDocumentLock(file, writing: true, run: () {
+    final data = _readDocument(file);
+    change(data);
+    _writeDocument(file, data);
+  });
 }
 
 /// Deletes a stale staging file, best effort.
@@ -385,77 +378,52 @@ void _removeStagingFile(File localDataFile) {
   }
 }
 
-/// Writes the cached preferences to disk. Returns [true] if the operation
-/// succeeded.
-Future<bool> _writePreferences(
-  Map<String, Object> preferences,
-  String fileName, {
-  FileSystem fs = const LocalFileSystem(),
-  PathProviderWindows? pathProvider,
-}) async {
-  try {
-    final File? localDataFile = await _getLocalDataFile(
-      fileName,
-      fs: fs,
-      pathProvider: pathProvider,
-    );
-    if (localDataFile == null) {
-      debugPrint('Unable to determine where to write preferences.');
-      return false;
-    }
-    final String stringMap = json.encode(preferences);
+void _writeDocument(File localDataFile, Map<String, Object> preferences) {
+  final String stringMap = json.encode(preferences);
 
-    // PLEZY DELTA: stage, flush, then rename over the target.
+  // PLEZY DELTA: stage, flush, then rename over the target.
+  //
+  // Upstream calls `writeAsStringSync` straight onto the live document.
+  // That opens with the default `FileMode.write`, which truncates first, so
+  // every single preference write has a window in which the only copy of the
+  // store on disk is empty or half-written. A crash, power loss, forced
+  // reboot or antivirus interception inside that window leaves a document
+  // that fails to parse on every subsequent launch, and the store holds the
+  // credential-vault key, so the damage is not recoverable by rewriting it.
+  //
+  // Renaming into place is atomic for readers: `MoveFileExW` with
+  // MOVEFILE_REPLACE_EXISTING on Windows, `rename(2)` elsewhere. The flush
+  // has to come first, or the rename could publish a file whose contents
+  // were never committed — the same corruption by a different route.
+  //
+  // The staging file is created in the target's own directory, both because
+  // rename must stay on one volume and so it inherits exactly the mode the
+  // canonical file would have been created with.
+  final File staged = localDataFile.fileSystem.file('${localDataFile.path}$_stagingSuffix');
+  staged.writeAsStringSync(stringMap, flush: true);
+  try {
+    staged.renameSync(localDataFile.path);
+  } on FileSystemException {
+    // PLEZY DELTA: a reader that denies delete sharing vetoes every rename
+    // over the document. `MoveFileExW` with MOVEFILE_REPLACE_EXISTING — and
+    // even a POSIX-semantics rename — fails while an open handle on the
+    // destination lacks FILE_SHARE_DELETE, and dart:io's own `File.open`
+    // produces exactly such a handle (`_wopen` shares read/write only), as
+    // do some antivirus and indexing services. The atomic path is not slow
+    // there; it is unavailable.
     //
-    // Upstream calls `writeAsStringSync` straight onto the live document.
-    // That opens with the default `FileMode.write`, which truncates first, so
-    // every single preference write has a window in which the only copy of the
-    // store on disk is empty or half-written. A crash, power loss, forced
-    // reboot or antivirus interception inside that window leaves a document
-    // that fails to parse on every subsequent launch, and the store holds the
-    // credential-vault key, so the damage is not recoverable by rewriting it.
-    //
-    // Renaming into place is atomic for readers: `MoveFileExW` with
-    // MOVEFILE_REPLACE_EXISTING on Windows, `rename(2)` elsewhere. The flush
-    // has to come first, or the rename could publish a file whose contents
-    // were never committed — the same corruption by a different route.
-    //
-    // The staging file is created in the target's own directory, both because
-    // rename must stay on one volume and so it inherits exactly the mode the
-    // canonical file would have been created with.
-    final File staged = localDataFile.fileSystem.file('${localDataFile.path}$_stagingSuffix');
-    if (!staged.parent.existsSync()) {
-      staged.parent.createSync(recursive: true);
-    }
-    staged.writeAsStringSync(stringMap, flush: true);
-    try {
-      staged.renameSync(localDataFile.path);
-    } on FileSystemException {
-      // PLEZY DELTA: a reader that denies delete sharing vetoes every rename
-      // over the document. `MoveFileExW` with MOVEFILE_REPLACE_EXISTING — and
-      // even a POSIX-semantics rename — fails while an open handle on the
-      // destination lacks FILE_SHARE_DELETE, and dart:io's own `File.open`
-      // produces exactly such a handle (`_wopen` shares read/write only), as
-      // do some antivirus and indexing services. The atomic path is not slow
-      // there; it is unavailable.
-      //
-      // Fall back to the upstream in-place rewrite: the sharing mode that
-      // blocks the rename still admits opening the document for write. This
-      // reintroduces the truncate window only while such a reader holds the
-      // store — a brief loss of crash-atomicity beats turning every
-      // preference write into a silent no-op on exactly the machines whose
-      // scanners are most likely to have damaged the store in the first
-      // place.
-      localDataFile.writeAsStringSync(stringMap, flush: true);
-      // The staging copy holds the whole document, credentials included, and
-      // was not consumed by a rename, so it must not outlive the write.
-      _removeStagingFile(localDataFile);
-    }
-  } catch (e) {
-    debugPrint('Error saving preferences to disk: $e');
-    return false;
+    // Fall back to the upstream in-place rewrite: the sharing mode that
+    // blocks the rename still admits opening the document for write. This
+    // reintroduces the truncate window only while such a reader holds the
+    // store — a brief loss of crash-atomicity beats turning every
+    // preference write into a silent no-op on exactly the machines whose
+    // scanners are most likely to have damaged the store in the first
+    // place.
+    localDataFile.writeAsStringSync(stringMap, flush: true);
+    // The staging copy holds the whole document, credentials included, and
+    // was not consumed by a rename, so it must not outlive the write.
+    _removeStagingFile(localDataFile);
   }
-  return true;
 }
 
 /// Windows specific SharedPreferences Options.

@@ -86,9 +86,7 @@ abstract class BaseSharedPreferencesService {
   }
 
   static Future<SharedPreferencesWithCache> _loadSharedCache() async {
-    // Validate before the plugin reads anything: the desktop backends memoise
-    // the document they parse and never re-read it, so a store rejected only
-    // after the fact could not be repaired in-process (#1732).
+    // Detect damage before migration or cache initialization can change the store.
     await PrefsRecovery.assertStoreReadable();
     try {
       return await _openSharedCache();
@@ -102,8 +100,7 @@ abstract class BaseSharedPreferencesService {
       // so whatever went wrong keeps its own type and its own path.
       final damage = await PrefsRecovery.describeCurrentStoreDamage(reopenSafe: false);
       if (damage == null) rethrow;
-      // The plugin has now cached something we cannot reason about. Repair can
-      // still quarantine the file, but the process has to restart afterwards.
+      // Migration or cache initialization may already have run. Restart after quarantine.
       appLogger.e('Preference store could not be parsed', error: error, stackTrace: stackTrace);
       throw damage;
     }
@@ -131,13 +128,8 @@ abstract class BaseSharedPreferencesService {
   /// preferences until [sharedCache] resolves, so doing the work here closes
   /// that window entirely.
   ///
-  /// Only valid for [CorruptPreferenceStoreException]. The desktop plugins
-  /// memoise the parsed document in a private `_cachedPreferences` map and
-  /// never re-read it without an explicit reload; that map is only empty here
-  /// because the parse threw before it could be populated. Use
-  /// [dropUnreadableCredential] for a store that parsed but holds one
-  /// unreadable value — quarantining that one would reopen onto the stale
-  /// in-memory map and write the bad value straight back.
+  /// Use this only for [CorruptPreferenceStoreException]. If the store parsed
+  /// and one credential has the wrong type, use [dropUnreadableCredential].
   static Future<PrefsRepairOutcome> repairCorruptStore({bool reopenSafe = true}) async {
     final (:salvaged, :backupPath, :shape) = await PrefsRecovery.quarantine();
     // Conservative by construction: the warning is dropped only for bytes
@@ -151,14 +143,8 @@ abstract class BaseSharedPreferencesService {
     _instances.clear();
 
     if (!reopenSafe) {
-      // The plugin memoised the bad document before it threw, so reopening
-      // would hand that copy back and the first write would persist it over
-      // the repaired file. Write the salvage straight to disk for the next
-      // process instead, and leave this one's store closed.
-      //
-      // Nothing may write a preference before that restart or the plugin's
-      // stale map would overwrite the seed; the caller keeps the app on the
-      // failure screen precisely so nothing does.
+      // The app cache began opening before damage was detected. Keep the
+      // recovered credentials on disk for a clean initialization after restart.
       final seeded = await PrefsRecovery.seedStore(salvaged);
       appLogger.w('Preference store quarantined; a restart is required before it can be reopened');
       return PrefsRepairOutcome(
@@ -203,14 +189,8 @@ abstract class BaseSharedPreferencesService {
 
   /// Removes one credential preference whose stored type is unreadable.
   ///
-  /// The store itself parsed here, so the plugin's `_cachedPreferences` map is
-  /// already populated and a quarantine-and-reopen would hand back that stale
-  /// map and persist the bad value again. Delete through the live cache
-  /// instead: that updates both the in-memory map and the file, and leaves
-  /// every other credential in place.
-  ///
-  /// The file is *copied* first, not moved — it is still the app's live store,
-  /// and the copy is the only record of the pre-repair state.
+  /// Copy the live store before repair, then remove the key through the app
+  /// cache so the other credentials and preferences stay available.
   static Future<PrefsRepairOutcome> dropUnreadableCredential(String key) async {
     final backupPath = await PrefsRecovery.backupStore();
 

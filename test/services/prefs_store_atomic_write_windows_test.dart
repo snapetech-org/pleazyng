@@ -3,6 +3,7 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -41,15 +42,20 @@ void main() {
   });
 
   test('rename replaces an existing document on NTFS', () async {
-    // The bare `MoveFileW` this would otherwise compile to fails outright when
-    // the destination exists. If the vendored write ever loses its replace
-    // semantics, every preference write after the first one fails silently —
-    // `_writePreferences` swallows the exception and returns false.
     await backend.setString('theme', 'dark', options);
     await backend.setString('theme', 'light', options);
 
     expect(jsonDecode(await store.readAsString()), containsPair('theme', 'light'));
     expect(await staging.exists(), isFalse);
+  });
+
+  test('independent Windows writers preserve every key', () async {
+    final path = support.path;
+    await Future.wait([for (var i = 0; i < 4; i++) _writeBatch(path, i)]);
+    expect(jsonDecode(await store.readAsString()), {
+      for (var writer = 0; writer < 4; writer++)
+        for (var key = 0; key < 12; key++) 'writer-$writer-$key': key,
+    });
   });
 
   test('a replaced document is complete and parseable', () async {
@@ -88,6 +94,13 @@ void main() {
     expect(jsonDecode(await store.readAsString()), containsPair('theme', 'light'));
   });
 }
+
+Future<void> _writeBatch(String path, int writer) => Isolate.run(() async {
+  final backend = SharedPreferencesAsyncWindows()..pathProvider = _TempPathProviderWindows(path);
+  for (var key = 0; key < 12; key++) {
+    await backend.setInt('writer-$writer-$key', key, const SharedPreferencesOptions());
+  }
+});
 
 class _TempPathProviderWindows extends PathProviderWindows {
   _TempPathProviderWindows(this.supportPath);

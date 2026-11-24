@@ -299,6 +299,19 @@ void main() {
     });
   });
 
+  test('Linux keeps the repair backup, quarantine and reseeded credentials owner-only', () async {
+    await store.writeAsString(jsonEncode({credentialVaultKeyPref: _validVaultKey}));
+    // Reproduce the permissions left by an older app under the default umask.
+    expect((await Process.run('chmod', ['0644', store.path])).exitCode, 0);
+    final copied = await PrefsRecovery.backupStore(storeFileOverride: store);
+    final quarantined = await PrefsRecovery.quarantine(storeFileOverride: store);
+    expect(await PrefsRecovery.seedStore(quarantined.salvaged, storeFileOverride: store), isTrue);
+    for (final file in [File(copied!), File(quarantined.backupPath!), store]) {
+      expect((await file.stat()).mode & 0x1ff, 0x180, reason: file.path);
+      expect(await file.readAsString(), contains(_validVaultKey));
+    }
+  }, skip: !Platform.isLinux);
+
   group('quarantine', () {
     test('moves the damaged file aside and keeps its bytes', () async {
       final raw = '{"$credentialVaultKeyPref":"$_validVaultKey","trunc';
@@ -358,7 +371,7 @@ void main() {
       expect(written.containsKey('trakt_session'), isTrue);
       // Ordinary settings are not salvaged, so a reseed must not invent them.
       expect(written.containsKey('theme'), isFalse);
-      expect(await File('${store.path}.seed').exists(), isFalse);
+      expect(await tempDir.list().map((entry) => entry.path).toList(), [store.path]);
     });
 
     test('the seeded store passes the preflight it will face on restart', () async {

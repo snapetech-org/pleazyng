@@ -1867,7 +1867,7 @@ packages:
     source: hosted
     version: "2.5.6"
   shared_preferences_linux:
-    dependency: "direct dev"
+    dependency: "direct main"
     description:
       path: "packages/shared_preferences_linux"
       relative: true

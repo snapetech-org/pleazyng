@@ -13,6 +13,7 @@ import '../media/playback_report_metadata.dart';
 import '../media/watch_progress.dart';
 import '../mixins/disposable_change_notifier_mixin.dart';
 import '../utils/app_logger.dart';
+import '../utils/serial_future_queue.dart';
 import '../utils/active_client_scope.dart';
 import '../utils/global_key_utils.dart';
 import 'offline_mode_source.dart';
@@ -23,6 +24,8 @@ import 'plex_client.dart';
 import 'settings_service.dart';
 import 'trackers/tracker_coordinator.dart';
 import 'watch_state_resolver.dart';
+
+part 'offline_watch_replay.dart';
 
 class _RetiredWatchOwner implements Exception {
   const _RetiredWatchOwner();
@@ -55,6 +58,8 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
 
   OfflineModeSource? _offlineModeSource;
   VoidCallback? _offlineModeListener;
+  final _pushes = SerialFutureQueue();
+  Future<void>? _queuedPush;
   bool _isSyncing = false;
   final _itemWrites = <String, Future<void>>{};
 
@@ -131,10 +136,9 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
   Completer<void>? _bidirectionalSync;
   // Set for good by [stopBackgroundSync].
   bool _backgroundSyncStopped = false;
-  // Profile generation the running bidirectional sync started under, and
-  // whether a sync for a newer profile was requested while it ran.
   int? _bidirectionalSyncGeneration;
-  bool _bidirectionalSyncRerunRequested = false;
+  // Null until a follow-up is requested. True when its pull must bypass throttling.
+  bool? _nextPullForced;
   DateTime? _lastSyncTime;
   bool _hasPerformedStartupSync = false;
   String? _activeProfileId;
@@ -142,7 +146,7 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
   // profile it started for is gone, even after a switch back (A → B → A).
   int _profileGeneration = 0;
   int? _availableProfileCount;
-  final Set<String> _legacyWatchActionsAdoptedForProfiles = <String>{};
+  final _legacyAdoptions = <String, Future<void>>{};
 
   /// Callback to refresh download provider metadata after sync
   VoidCallback? onWatchStatesRefreshed;
@@ -239,7 +243,7 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
   }
 
   /// Whether a sync is currently in progress
-  bool get isSyncing => _isSyncing;
+  bool get isSyncing => _isSyncing || _queuedPush != null;
 
   void setActiveProfileId(String? profileId, {int? availableProfileCount}) {
     if (profileId != _activeProfileId) {
@@ -258,18 +262,15 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
     }
   }
 
-  Future<void> _adoptLegacyWatchActionsForProfile(String profileId, {int? availableProfileCount}) async {
-    if (profileId.isEmpty || !_legacyWatchActionsAdoptedForProfiles.add(profileId)) return;
-    if (availableProfileCount != 1) {
-      _legacyWatchActionsAdoptedForProfiles.remove(profileId);
-      return;
-    }
-    try {
-      await _database.adoptLegacyOfflineWatchActionsForProfile(profileId);
-    } catch (e, st) {
-      _legacyWatchActionsAdoptedForProfiles.remove(profileId);
-      appLogger.w('Failed to adopt legacy offline watch actions for $profileId', error: e, stackTrace: st);
-    }
+  Future<void> _adoptLegacyWatchActionsForProfile(String profileId, {int? availableProfileCount}) {
+    if (profileId.isEmpty || availableProfileCount != 1) return Future.value();
+    return _legacyAdoptions[profileId] ??= _database.adoptLegacyOfflineWatchActionsForProfile(profileId).catchError((
+      Object error,
+      StackTrace stack,
+    ) {
+      _legacyAdoptions.remove(profileId);
+      appLogger.w('Failed to adopt legacy offline watch actions for $profileId', error: error, stackTrace: stack);
+    });
   }
 
   Future<void> _adoptLegacyWatchActionsForActiveProfile() async {
@@ -315,11 +316,7 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
 
     // Prevent overlapping bidirectional syncs
     if (_bidirectionalSync != null) {
-      // The running pass belongs to a previous profile and stops early once
-      // it notices the switch; replay for the new profile when it settles
-      // rather than dropping this request.
-      if (_bidirectionalSyncGeneration != _profileGeneration) _bidirectionalSyncRerunRequested = true;
-      appLogger.d('Bidirectional sync already in progress, skipping');
+      _nextPullForced = _nextPullForced == true || force || _bidirectionalSyncGeneration != _profileGeneration;
       return;
     }
 
@@ -334,7 +331,7 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
     try {
       // Always push local changes to server (never throttle outbound sync)
       await syncPendingItems();
-      if (_backgroundSyncStopped) return;
+      if (_backgroundSyncStopped || isDisposed || profileGeneration != _profileGeneration) return;
 
       // Only throttle the pull from server
       if (!force && _lastSyncTime != null) {
@@ -354,10 +351,9 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
       _bidirectionalSync = null;
       _bidirectionalSyncGeneration = null;
       pass.complete();
-      if (_bidirectionalSyncRerunRequested) {
-        _bidirectionalSyncRerunRequested = false;
-        if (!isDisposed) unawaited(_performBidirectionalSync(force: true));
-      }
+      final rerun = _nextPullForced;
+      _nextPullForced = null;
+      if (rerun != null && !isDisposed) unawaited(_performBidirectionalSync(force: rerun));
     }
   }
 
@@ -369,6 +365,7 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
   Future<void> stopBackgroundSync() async {
     _backgroundSyncStopped = true;
     await _bidirectionalSync?.future;
+    await _pushes.settled;
   }
 
   /// Called when app becomes active - syncs for cross-device updates.
@@ -388,14 +385,15 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
   /// Triggers the initial sync now that PlexClients are available.
   /// Only runs once per app session.
   void onServersConnected() {
-    if (isDisposed) return;
-    if (_hasPerformedStartupSync) return;
-    _hasPerformedStartupSync = true;
-
-    if (_offlineModeSource?.isOffline != true) {
-      appLogger.i('Servers connected - performing startup sync');
-      _performBidirectionalSync();
+    if (isDisposed ||
+        _backgroundSyncStopped ||
+        _hasPerformedStartupSync ||
+        _offlineModeSource?.isOffline == true ||
+        _serverManager.onlineClients.isEmpty) {
+      return;
     }
+    _hasPerformedStartupSync = true;
+    unawaited(_performBidirectionalSync());
   }
 
   /// Queue a progress update for later sync.
@@ -574,110 +572,23 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
     return epoch == _profileGeneration ? owned : [];
   }
 
-  Future<void> retryWatchAction(OfflineWatchProgressItem row) async {
-    if (!await _canRetry(row)) return;
+  Future<void> retryWatchAction(OfflineWatchProgressItem row) => _pushes.run(() async {
+    if (_backgroundSyncStopped || isDisposed || !await _canRetry(row)) return;
+    if (_backgroundSyncStopped || isDisposed) return;
     if (await _database.resetWatchAttempts(row.id, row.updatedAt, row.profileId!, row.clientScopeId)) {
       safeNotifyListeners();
-      if (_activeProfileId == row.profileId) await syncPendingItems();
+      if (_activeProfileId == row.profileId) await _pushPendingItems();
     }
-  }
+  });
 
-  /// Sync all pending items to their respective servers.
-  ///
-  /// Called automatically when connectivity is restored, or manually.
-  /// Actions are batched by server to reduce connectivity lookups.
-  Future<void> syncPendingItems() async {
-    if (_isSyncing) {
-      appLogger.d('Sync already in progress, skipping');
-      return;
-    }
-
-    _isSyncing = true;
-    safeNotifyListeners();
-
-    try {
-      await _adoptLegacyWatchActionsForActiveProfile();
-      final profileId = _activeProfileId;
-      if (profileId == null || profileId.isEmpty) {
-        // No active profile: dropping the filter would replay EVERY
-        // profile's queued actions through whatever clients happen to be
-        // bound — the wrong user's account. Actions stay queued.
-        appLogger.d('No active profile — deferring pending watch sync');
-        return;
-      }
-      final pendingActions = await _database.getPendingWatchActions(profileId: profileId);
-
-      if (pendingActions.isEmpty) {
-        appLogger.d('No pending watch actions to sync');
-        return;
-      }
-
-      appLogger.i('Syncing ${pendingActions.length} pending watch actions');
-
-      final blocked = <(String, String?, String?)>{};
-      for (final action in pendingActions) {
-        final lineage = (action.globalKey, action.clientScopeId, action.accountScope);
-        if (blocked.contains(lineage)) continue;
-        if (_backgroundSyncStopped) return;
-        if (_activeProfileId != profileId) {
-          // A profile switch mid-loop rebinds server clients to the NEW
-          // user's tokens under the same server ids — replaying the rest
-          // would write this profile's watch history to another account.
-          // Remaining actions stay queued for the next sync.
-          appLogger.i('Active profile changed mid-sync — requeueing remaining watch actions');
-          return;
-        }
-        if (action.syncAttempts >= maxSyncAttempts) {
-          blocked.add(lineage);
-          appLogger.w(
-            'Skipping action ${action.id} - exceeded retry limit '
-            '(${action.syncAttempts} attempts). Last error: ${action.lastError}',
-          );
-          continue;
-        }
-
-        final synced = await serializeWatchWrite(action.globalKey, () async {
-          if (!await _database.watchActionIsCurrent(action.id, action.updatedAt)) return true;
-          return _withOnlineClientForAction(action, (client, clientScopeId) async {
-            try {
-              final result = await _syncAction(client, action, clientScopeId: clientScopeId);
-              if (!result.persisted) {
-                // The write did not land — MediaBrowser drops a stop for a
-                // session its Started never opened. Leave the row queued and
-                // count the attempt so a later pass retries it.
-                blocked.add(lineage);
-                appLogger.d('Action ${action.id} did not persist; keeping it queued');
-                await _database.updateSyncAttemptIfUnchanged(action.id, action.updatedAt, 'write did not persist');
-                return;
-              }
-              final deleted = await _database.deleteWatchActionIfUnchanged(result.rowId, result.revision);
-              if (!deleted) {
-                appLogger.d('Synced action ${action.id} revision ${action.updatedAt}; a newer revision remains queued');
-                return;
-              }
-              WatchPatchPromotionNotifier().promote(
-                WatchPatchId.offlineAction(profileId: result.profileId, rowId: result.rowId, revision: result.revision),
-              );
-              appLogger.d('Successfully synced action ${action.id}: ${action.actionType} for ${action.ratingKey}');
-            } on _RetiredWatchOwner {
-              return;
-            } catch (e) {
-              blocked.add(lineage);
-              appLogger.w('Failed to sync action ${action.id}: $e');
-              await _database.updateSyncAttemptIfUnchanged(action.id, action.updatedAt, e.toString());
-            }
-          });
-        });
-        if (!synced) {
-          blocked.add(lineage);
-          appLogger.d('Keeping action ${action.id} queued until server is available');
-          continue;
-        }
-      }
-    } finally {
-      _isSyncing = false;
-      safeNotifyListeners();
-    }
+  /// A caller arriving during replay needs a fresh database snapshot after
+  /// that pass. All callers waiting for that next snapshot share its result.
+  Future<void> syncPendingItems() {
+    if (_backgroundSyncStopped || isDisposed) return Future.value();
+    return _queuedPush ??= _pushes.run(() {
+      _queuedPush = null;
+      return _pushPendingItems();
+    });
   }
 
   Future<({String? scope, String? account})> _watchOwner(ServerId serverId, String itemId, String? profileId) =>
@@ -794,6 +705,7 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
     MediaServerClient client,
     OfflineWatchProgressItem action, {
     required String? clientScopeId,
+    required int generation,
   }) async {
     // Fetch metadata so tracker writes get enough context — external ids,
     // parent chain and library section. Best-effort: a missed metadata fetch
@@ -819,6 +731,8 @@ class OfflineWatchSyncService extends ChangeNotifier with DisposableChangeNotifi
 
     final scope = resolveActiveClientScopeId(serverId: ServerId(action.serverId), cacheServerId: clientScopeId);
     bool ownerCurrent() =>
+        !isDisposed &&
+        generation == _profileGeneration &&
         _activeProfileId == action.profileId &&
         identical(
           scope == null ? _serverManager.getClient(ServerId(action.serverId)) : _serverManager.getClientByScope(scope),
