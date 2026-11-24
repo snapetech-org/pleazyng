@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -44,6 +45,42 @@ void main() {
     expect(recorder.canExtend, isFalse);
     expect(connections, 1);
     expect(await output.readAsBytes(), [1, 2, 3, 4, 5, 6]);
+  });
+
+  test('stopping a direct recording waits for its last write before closing the file', () async {
+    final directory = await Directory.systemTemp.createTemp('pleazyng-held-recording-');
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final responseDone = Completer<void>();
+    final output = File('${directory.path}/held.ts');
+    final held = _HeldWriteFile(output);
+    server.listen((request) async {
+      request.response.bufferOutput = false;
+      request.response.add([1, 2, 3]);
+      await request.response.flush();
+      await responseDone.future;
+    });
+    final recorder = IptvScheduledStreamRecorder(
+      uri: Uri.parse('http://127.0.0.1:${server.port}/live.ts'),
+      allowHttp: true,
+      outputFile: held,
+      endsAt: DateTime.now().add(const Duration(minutes: 1)),
+    );
+    addTearDown(() async {
+      if (!held.release.isCompleted) held.release.complete();
+      responseDone.complete();
+      await recorder.stop();
+      await server.close(force: true);
+      await directory.delete(recursive: true);
+    });
+
+    final result = recorder.record().then<Object>((extension) => extension, onError: (Object error) => error);
+    await held.started.future;
+    await recorder.stop();
+    await Future<void>.delayed(Duration.zero);
+    held.release.complete();
+
+    expect(await result, '.ts');
+    expect(await output.readAsBytes(), [1, 2, 3]);
   });
 
   test('early direct-stream EOF preserves the captured bytes for salvage', () async {
@@ -156,4 +193,54 @@ void main() {
     expect(recorder.fileExtension, '.m3u8');
     expect(await IptvHlsArchive.retainedBytes(output), 188 * 2);
   });
+}
+
+/// Simulates one asynchronous filesystem write with the overlap checks of IOSink.
+class _HeldWriteFile implements File {
+  _HeldWriteFile(this.file);
+
+  final File file;
+  final started = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  IOSink openWrite({FileMode mode = FileMode.write, Encoding encoding = utf8}) =>
+      _HeldWriteSink(file.openWrite(mode: mode, encoding: encoding), started, release);
+
+  @override
+  Future<int> length() => file.length();
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _HeldWriteSink implements IOSink {
+  _HeldWriteSink(this.sink, this.started, this.release);
+
+  final IOSink sink;
+  final Completer<void> started;
+  final Completer<void> release;
+  bool flushing = false;
+
+  @override
+  void add(List<int> data) => sink.add(data);
+
+  @override
+  Future<void> flush() async {
+    if (flushing) throw StateError('StreamSink is bound to a stream');
+    flushing = true;
+    if (!started.isCompleted) started.complete();
+    try {
+      await release.future;
+      await sink.flush();
+    } finally {
+      flushing = false;
+    }
+  }
+
+  @override
+  Future<void> close() => sink.close();
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

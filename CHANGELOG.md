@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Let the last IPTV recording write finish before closing the file when Stop is pressed or a recording reaches its deadline.
+
 - Preserve playable parts when a stacked download loses a file. Retry fetches the missing parts and marks the item complete once the whole stack is available. Completed downloads show 100% after reopening the app.
 - Refresh orphan-download reviews when download ownership changes, omit files that disappeared or changed while a review was paused, and honor cancellation through the end of the scan.
 

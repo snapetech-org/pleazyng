@@ -5,6 +5,8 @@ import 'iptv_hls_archive.dart';
 
 import '../sources/source_transport.dart';
 
+part 'iptv_direct_stream_recording.dart';
+
 /// Captures direct HTTP streams and AES-128 or clear HLS while Pleazyng is
 /// running. HLS is retained as a self-contained local playlist archive so
 /// separate renditions and initialization changes remain intact.
@@ -96,83 +98,6 @@ class IptvScheduledStreamRecorder {
       directDone.complete();
     }
     _transport?.close();
-  }
-
-  Future<bool> _recordDirect(Uri source) async {
-    final transport = SourceTransport(allowHttp: allowHttp);
-    _transport = transport;
-    final response = await transport.send('GET', source, headers: headers, redirects: true);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      await response.stream.drain<void>();
-      SourceTransport.check(response.statusCode);
-    }
-    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
-    if (contentType.contains('mpegurl') || contentType.contains('x-mpegurl')) {
-      await response.stream.drain<void>();
-      transport.close();
-      _transport = null;
-      return true;
-    }
-    final sink = outputFile.openWrite(mode: FileMode.writeOnly);
-    final done = Completer<void>();
-    _directDone = done;
-    var reachedScheduledEnd = false;
-    late final StreamSubscription<List<int>> subscription;
-    void finish([Object? error, StackTrace? stackTrace]) {
-      if (done.isCompleted) {
-        return;
-      }
-      _finished = true;
-      _onDeadline = null;
-      if (error == null) {
-        done.complete();
-      } else {
-        done.completeError(error, stackTrace ?? StackTrace.current);
-      }
-    }
-
-    subscription = response.stream.listen(
-      (bytes) {
-        subscription.pause();
-        sink.add(bytes);
-        unawaited(
-          sink.flush().then(
-            (_) => subscription.resume(),
-            onError: (Object error, StackTrace stackTrace) {
-              finish(error, stackTrace);
-            },
-          ),
-        );
-      },
-      onError: (Object error, StackTrace stackTrace) => finish(error, stackTrace),
-      onDone: finish,
-      cancelOnError: true,
-    );
-    _subscription = subscription;
-    _onDeadline = () {
-      reachedScheduledEnd = true;
-      _stopped = true;
-      unawaited(subscription.cancel().then((_) => finish()));
-    };
-    _armDeadline();
-    try {
-      await done.future;
-      if (!reachedScheduledEnd && !_stopped && _now().isBefore(endsAt)) {
-        throw const FileSystemException('Stream ended before the scheduled programme ended');
-      }
-    } finally {
-      _stopTimer?.cancel();
-      await subscription.cancel();
-      await sink.flush();
-      await sink.close();
-      transport.close();
-      _transport = null;
-      _directDone = null;
-    }
-    if (_stopped && await outputFile.length() == 0) {
-      throw const FileSystemException('No stream data received');
-    }
-    return false;
   }
 
   Future<String> _recordHls(Uri source) async {
