@@ -1406,14 +1406,21 @@ require(
     "Release assembly requires a qualified candidate, verified standalone tag CI or verified recovery",
 )
 macos_restore = named_step(job("build-macos"), "Restore prior notarization submission checkpoint")
+macos_finish = job("finish-notarization")
+require(
+    "if: ${{ always() && !cancelled() && needs.validate-trusted-ref.result == 'success' "
+    "&& needs.build-macos.result == 'success' "
+    "&& needs.validate-trusted-ref.outputs.prepare_homebrew_cask == 'true' }}" in macos_finish,
+    "Mac notarization finishing must run after successful direct prerequisites even when candidate capture was skipped",
+)
 require(
     "github.run_attempt > 1" in macos_restore
     and "resume_notarization_checkpoint.py" in macos_restore
     and "steps.restore-notarization.outputs.restored != 'true'" in named_step(job("build-macos"), "Build macOS")
-    and "steps.restore-notarization.outputs.attempt != github.run_attempt" in named_step(job("finish-notarization"), "Upload resumed notarization checkpoint")
-    and "steps.restore-notarization.outputs.submission_id" in named_step(job("finish-notarization"), "Wait for notarization acceptance")
-    and "runs-on: macos-26" in job("finish-notarization")
-    and "--include-current" in job("finish-notarization"),
+    and "steps.restore-notarization.outputs.attempt != github.run_attempt" in named_step(macos_finish, "Upload resumed notarization checkpoint")
+    and "steps.restore-notarization.outputs.submission_id" in named_step(macos_finish, "Wait for notarization acceptance")
+    and "runs-on: macos-26" in macos_finish
+    and "--include-current" in macos_finish,
     "Mac reruns must restore and resume a verified earlier notarization submission without recompiling",
 )
 require(

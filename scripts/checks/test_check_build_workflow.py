@@ -582,6 +582,17 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("signing and notary preflights must precede Flutter", result.stderr)
 
+    def test_notarization_finisher_cannot_inherit_the_candidate_capture_skip(self) -> None:
+        workflow = self._workflow()
+        start = workflow.index("  finish-notarization:\n")
+        end = workflow.index("    runs-on:", start)
+        guard = workflow[start:end]
+        changed_guard = guard.replace("always() && !cancelled() && ", "", 1)
+        self.assertNotEqual(changed_guard, guard)
+        result = self._run(workflow[:start] + changed_guard + workflow[end:])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("even when candidate capture was skipped", result.stderr)
+
     def test_readonly_framework_signing_preparation_is_required(self) -> None:
         workflow = self._workflow()
         command = ('          python3 scripts/apple/prepare_macos_app_for_signing.py "$APP_PATH" \\\n'

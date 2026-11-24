@@ -3027,7 +3027,9 @@ jobs:
   finish-notarization:
     name: Finish macOS notarization and DMG
     needs: [validate-trusted-ref, build-macos]
-    if: needs.build-macos.result == 'success' && needs.validate-trusted-ref.outputs.prepare_homebrew_cask == 'true'
+    # Focused validation intentionally skips candidate capture. Test our two
+    # direct prerequisites so that skip cannot suppress the signed packaging.
+    if: ${{ always() && !cancelled() && needs.validate-trusted-ref.result == 'success' && needs.build-macos.result == 'success' && needs.validate-trusted-ref.outputs.prepare_homebrew_cask == 'true' }}
     runs-on: macos-26
     timeout-minutes: 150
     permissions:
