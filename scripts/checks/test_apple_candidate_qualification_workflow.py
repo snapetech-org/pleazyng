@@ -70,10 +70,12 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         consumer = self.workflow.split("  apple-native-ios-compatibility:\n", 1)[1]
         self.assertIn("name: Apple native reliability (iOS)", consumer)
         self.assertIn("needs: apple-native-reliability", consumer)
-        self.assertIn("needs.apple-native-reliability.result == 'success'", consumer)
+        self.assertIn("if: ${{ !cancelled() &&", consumer)
+        self.assertNotIn("needs.apple-native-reliability.result", consumer)
         self.assertIn("inputs.retained_run_id == '' || inputs.retry_platform == 'ios'", consumer)
         self.assertIn("runs-on: macos-26", consumer)
         expected_steps = (
+            "Verify the iOS checkpoint producer",
             "Download candidate iOS app artifact",
             "Verify frozen candidate source",
             "Verify retained Apple siblings",
@@ -89,7 +91,8 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         self.assertIn("for chunk in iter(lambda: archive_file.read(1024 * 1024), b\"\")", consumer)
         self.assertIn('receipt.get("product_source_sha") == product_sha', consumer)
         self.assertIn('receipt["run_id"] == run_id', consumer)
-        self.assertIn('producer.get("run_attempt") == producer_attempt', consumer)
+        self.assertIn('producer_attempt == expected_producer_attempt', consumer)
+        self.assertIn('steps.ios-producer.outputs.attempt !=', consumer)
         self.assertIn('receipt.get("bundle_id") == "org.snapetech.pleazyng"', consumer)
         self.assertIn('verify_retained_apple_siblings(', consumer)
         self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', consumer)

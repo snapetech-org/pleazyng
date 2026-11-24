@@ -477,7 +477,7 @@ jobs:
   apple-native-ios-compatibility:
     name: Apple native reliability (iOS)
     needs: apple-native-reliability
-    if: ${{ needs.apple-native-reliability.result == 'success' && (inputs.retained_run_id == '' || inputs.retry_platform == 'ios') }}
+    if: ${{ !cancelled() && (inputs.retained_run_id == '' || inputs.retry_platform == 'ios') }}
     runs-on: macos-26
     timeout-minutes: 90
     permissions:
@@ -490,7 +490,36 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Verify the iOS checkpoint producer
+        id: ios-producer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: scripts
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          from verify_embedded_release_ci import APPLE_IOS_NATIVE_PRODUCER, fetch_attempt_history
+
+          jobs = fetch_attempt_history(int(os.environ["WORKFLOW_RUN_ID"]),
+                                        int(os.environ["WORKFLOW_RUN_ATTEMPT"]), os.environ["GH_TOKEN"])
+          producer = [job for job in jobs if job.get("name") == APPLE_IOS_NATIVE_PRODUCER]
+          if len(producer) != 1 or producer[0].get("status") != "completed":
+              raise SystemExit("The current run needs one completed iOS app producer.")
+          if producer[0].get("conclusion") != "success":
+              print("The iOS producer did not pass. Its failed job remains the qualification result.")
+          else:
+              with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+                  output.write(f"attempt={producer[0]['run_attempt']}\n")
+          PY
+
       - name: Download candidate iOS app artifact
+        if: steps.ios-producer.outputs.attempt != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ios-compatibility-app-${{ github.run_id }}
@@ -498,14 +527,13 @@ jobs:
 
       - name: Verify frozen candidate source
         id: verify-candidate
+        if: steps.ios-producer.outputs.attempt != ''
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          PYTHONPATH: scripts
           ARTIFACT_DIR: ${{ runner.temp }}/candidate-ios-app
           PRODUCT_SOURCE_SHA: ${{ inputs.product_source_sha }}
           WORKFLOW_RUN_ID: ${{ github.run_id }}
-          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_PRODUCER_ATTEMPT: ${{ steps.ios-producer.outputs.attempt }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -518,14 +546,12 @@ jobs:
           import zipfile
           from pathlib import Path, PurePosixPath
 
-          from verify_embedded_release_ci import fetch_attempt_history
-
           artifact_dir = Path(os.environ["ARTIFACT_DIR"])
           archive_path = artifact_dir / "ios-simulator-app.zip"
           receipt_path = artifact_dir / "ios-simulator-app.json"
           product_sha = os.environ["PRODUCT_SOURCE_SHA"]
           run_id = int(os.environ["WORKFLOW_RUN_ID"])
-          consumer_attempt = int(os.environ["WORKFLOW_RUN_ATTEMPT"])
+          expected_producer_attempt = int(os.environ["WORKFLOW_PRODUCER_ATTEMPT"])
 
           def require(condition, message):
               if not condition:
@@ -542,8 +568,8 @@ jobs:
           require(type(receipt.get("run_id")) is int and receipt["run_id"] == run_id,
                   "The iOS app artifact belongs to a different workflow run.")
           producer_attempt = receipt.get("run_attempt")
-          require(type(producer_attempt) is int and producer_attempt > 0,
-                  "The iOS app artifact producer attempt is invalid.")
+          require(type(producer_attempt) is int and producer_attempt == expected_producer_attempt,
+                  "The iOS app receipt does not match the latest successful producer job attempt.")
           require(receipt.get("bundle_id") == "org.snapetech.pleazyng",
                   "The iOS simulator app artifact has an unexpected bundle ID.")
           expected_digest = receipt.get("sha256")
@@ -556,15 +582,6 @@ jobs:
                   digest.update(chunk)
           require(digest.hexdigest() == expected_digest,
                   "The iOS simulator app archive does not match its SHA-256 receipt.")
-
-          jobs = fetch_attempt_history(run_id, consumer_attempt, os.environ["GH_TOKEN"])
-          producer = [job for job in jobs if job.get("name") == "Build and test candidate iOS app"]
-          require(len(producer) == 1, "The current run does not have one unambiguous iOS app producer.")
-          producer = producer[0]
-          require(producer.get("status") == "completed" and producer.get("conclusion") == "success"
-                  and producer.get("run_attempt") == producer_attempt
-                  and type(producer.get("id")) is int and producer["id"] > 0,
-                  "The iOS app receipt does not match the latest successful producer job attempt.")
 
           try:
               archive = zipfile.ZipFile(archive_path)
@@ -614,7 +631,7 @@ jobs:
           PY
 
       - name: Verify retained Apple siblings
-        if: ${{ inputs.retained_run_id != '' }}
+        if: steps.ios-producer.outputs.attempt != '' && inputs.retained_run_id != ''
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -639,6 +656,7 @@ jobs:
           PY
 
       - name: Require native Apple Silicon host
+        if: steps.ios-producer.outputs.attempt != ''
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -671,6 +689,7 @@ jobs:
           DEVELOPER_DIR="$selected_developer" xcodebuild -version
 
       - name: Extract candidate iOS app
+        if: steps.ios-producer.outputs.attempt != ''
         shell: bash
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/candidate-ios-app
@@ -683,6 +702,7 @@ jobs:
           test -d "$PRODUCTS/$APP_NAME/Frameworks/App.framework"
 
       - name: Qualify Apple native components
+        if: steps.ios-producer.outputs.attempt != ''
         shell: bash
         env:
           PRODUCTS: ${{ runner.temp }}/candidate-ios-products

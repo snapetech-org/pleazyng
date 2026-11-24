@@ -421,12 +421,14 @@ def _qualifying_apple_suites(run, expected_names, token, *, failed_job=None, foc
     if len(producers) > 1 or (producers and ios not in expected_names):
         raise GateError('Supplemental Apple workflow contains an unexpected iOS native producer.')
     required_steps = APPLE_FOCUSED_QUALIFICATION_STEPS if focused else APPLE_QUALIFICATION_STEPS
+    failed = {'failure', 'cancelled', 'timed_out'}
     records = []
     for job in suite_jobs:
         name = job['name']
         if name == failed_job:
-            failed = {'failure', 'cancelled', 'timed_out'}
-            failed_stage = producers[0] if name == ios and producers and job.get('conclusion') == 'skipped' else job
+            failed_stage = job
+            if name == ios and producers and producers[0].get('conclusion') in failed:
+                failed_stage = producers[0]
             if failed_stage.get('status') != 'completed' or failed_stage.get('conclusion') not in failed:
                 raise GateError(f'Retained Apple run did not record the requested failed suite: {name}')
             continue

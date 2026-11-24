@@ -121,9 +121,22 @@ class SupplementalAppleQualificationTests(unittest.TestCase):
         record['native_producer']['run_id'] = 123
         with self.assertRaisesRegex(GateError, 'lacks its passing native test'):
             embedded._supplemental_apple_jobs(proof, SOURCE_SHA, SOURCE_RUN_ID, 3)
+        mac = self.jobs[1]
+        mac['conclusion'] = 'failure'
+        with patch.object(embedded, 'fetch_attempt_history', return_value=self.jobs):
+            retained = embedded._qualifying_apple_suites(
+                self.qualification_run, embedded.APPLE_PLATFORM_JOBS, 'fixture-token', failed_job=mac['name'],
+            )
+        self.assertEqual(retained[0]['native_producer']['id'], 44)
+        mac['conclusion'] = 'success'
         native['conclusion'] = 'failure'
         with self.assertRaisesRegex(GateError, 'Build and test candidate iOS app'):
             self.verify()
+        with patch.object(embedded, 'fetch_attempt_history', return_value=self.jobs):
+            retained = embedded._qualifying_apple_suites(
+                self.qualification_run, embedded.APPLE_PLATFORM_JOBS, 'fixture-token', failed_job=ios['name'],
+            )
+        self.assertEqual({job['name'] for job in retained}, set(embedded.APPLE_PLATFORM_JOBS[1:]))
 
     def _focused_inputs(self):
         previous = {
