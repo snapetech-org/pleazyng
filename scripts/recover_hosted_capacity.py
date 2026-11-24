@@ -11,7 +11,8 @@ from datetime import UTC, datetime, timedelta
 
 MAX_ATTEMPTS = 8
 MAX_WORKER_DISK_ATTEMPTS = 3
-WORKFLOWS = ("build.yml", "ci.yml", "macos-app-store-signed.yml")
+APPLE_QUALIFICATION_WORKFLOW = "apple-candidate-qualification.yml"
+WORKFLOWS = (APPLE_QUALIFICATION_WORKFLOW, "build.yml", "ci.yml", "macos-app-store-signed.yml")
 APPLE_SUITE_GATE_NAMES = ("Apple native reliability", "Release CI / Apple native reliability")
 APPLE_SUITE_PLATFORMS = ("iOS", "macOS", "tvOS")
 WORKER_DISK_ERROR = re.compile(
@@ -96,13 +97,17 @@ def classify_attempt(repository, run_id, attempt):
 
 def recover(repository, run_id, attempt, retry):
     route = f"repos/{repository}/actions/runs/{run_id}"
-    if not trusted_workflow(repository, api(route)):
+    run = api(route)
+    if not trusted_workflow(repository, run):
         return "Outside trusted release and CI workflows"
+    conclusions = {"failure"}
+    if run["path"] == f".github/workflows/{APPLE_QUALIFICATION_WORKFLOW}":
+        conclusions.add("cancelled")
 
     def current_failure():
         latest = api(route)
         return (latest["run_attempt"] == attempt and latest["status"] == "completed"
-                and latest["conclusion"] == "failure")
+                and latest["conclusion"] in conclusions)
 
     if retry and not current_failure():
         return "Run has already advanced"
@@ -133,6 +138,7 @@ def recover_recent(repository, retry):
     """Consider recent failures only, with the same per-attempt checks as manual recovery."""
     cutoff = datetime.now(UTC) - timedelta(hours=12)
     query = f"branch=main&event=workflow_dispatch&created=%3E{cutoff:%Y-%m-%dT%H:%M:%SZ}"
+    supplemental_candidates = set()
     for workflow in WORKFLOWS:
         route = f"repos/{repository}/actions/workflows/{workflow}/runs?{query}&per_page=100"
         latest = {}
@@ -142,8 +148,23 @@ def recover_recent(repository, retry):
                 if title not in latest or run["id"] > latest[title]["id"]:
                     latest[title] = run
         for run in latest.values():
-            if run["conclusion"] == "failure" and run["run_attempt"] < MAX_ATTEMPTS:
+            candidate = None
+            if workflow == APPLE_QUALIFICATION_WORKFLOW and trusted_workflow(repository, run):
+                candidate = re.fullmatch(r"apple-candidate-qualification:([1-9][0-9]*):([0-9a-f]{40})",
+                                         run["display_title"])
+                if candidate is not None and (run["conclusion"] == "success"
+                                               or run["status"] != "completed"):
+                    supplemental_candidates.add((int(candidate[1]), candidate[2]))
+            if workflow == "build.yml" and (run["id"], run.get("head_sha")) in supplemental_candidates:
+                print(f'{run["id"]}: Supplemental Apple qualification is already available or running')
+                continue
+            recoverable = (run["conclusion"] == "failure"
+                           or candidate is not None and run["conclusion"] == "cancelled")
+            if recoverable and run["run_attempt"] < MAX_ATTEMPTS:
                 result = recover(repository, run["id"], run["run_attempt"], retry)
+                if candidate is not None and (result.startswith("Requested retry")
+                                              or result == "Run has already advanced"):
+                    supplemental_candidates.add((int(candidate[1]), candidate[2]))
                 print(f'{run["id"]}: {result}')
 
 

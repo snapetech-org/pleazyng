@@ -207,6 +207,37 @@ class HostedCapacityTests(unittest.TestCase):
 
         recover.assert_called_once_with(self.repository, 50, 2, True)
 
+    def test_running_supplemental_qualification_prevents_a_parallel_source_retry(self):
+        sha = 'a' * 40
+        original = {**self.workflow, 'head_sha': sha, 'display_title': 'action:release:pool:public:tag:v3.0.51'}
+        supplement = {**self.workflow, 'id': 43, 'status': 'queued', 'conclusion': None,
+                      'display_title': f'apple-candidate-qualification:42:{sha}',
+                      'path': f'.github/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}'}
+
+        def list_runs(path, *, pages=False):
+            if f'/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}/' in path:
+                return [{'workflow_runs': [supplement]}]
+            if '/workflows/build.yml/' in path:
+                return [{'workflow_runs': [original]}]
+            return []
+
+        with patch.object(capacity, 'api', side_effect=list_runs), patch.object(capacity, 'recover') as recover:
+            capacity.recover_recent(self.repository, retry=True)
+            recover.assert_not_called()
+            supplement.update(status='completed', conclusion='cancelled')
+            recover.return_value = 'Requested retry for Apple native reliability (iOS)'
+            capacity.recover_recent(self.repository, retry=True)
+            recover.assert_called_once_with(self.repository, 43, self.attempt, True)
+
+    def test_cancelled_supplemental_run_needs_runner_allocation_evidence(self):
+        self.workflow.update(conclusion='cancelled',
+                             path=f'.github/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}')
+        self.assertIn('Requested retry', self.recover())
+        self.mutate.reset_mock()
+        self.annotations[self.tvos['id']] = [[{'message': 'Canceled by user'}]]
+        self.assertIn('No hosted allocation failure recorded', self.recover())
+        self.mutate.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
