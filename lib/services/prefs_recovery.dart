@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences_linux/shared_preferences_linux.dart'
+    show restrictLinuxPreferences, writePrivateLinuxPreferences;
 
 import '../models/seerr/seerr_session.dart';
 import '../utils/app_logger.dart';
@@ -12,12 +14,8 @@ import 'sensitive_prefs.dart';
 import 'trackers/tracker_constants.dart';
 import 'trackers/tracker_session.dart';
 
-/// File-backed preference store used by the desktop `shared_preferences`
-/// implementations. Windows and Linux both persist a single flat JSON object
-/// at `<applicationSupport>/shared_preferences.json`, written with a
-/// non-atomic `writeAsStringSync` and parsed with an unguarded `json.decode`.
-/// A crash, power loss or antivirus interception mid-write therefore leaves a
-/// truncated file that fails every subsequent launch identically.
+/// Default desktop preference document. Recovery also handles damaged files
+/// left by older versions that rewrote the live document in place.
 const String prefsStoreFileName = 'shared_preferences.json';
 
 /// Prefix the legacy `SharedPreferences` API writes into the same store file
@@ -89,12 +87,8 @@ class CorruptPreferenceStoreException implements Exception {
 
   /// Whether the store can be reopened inside this process after a repair.
   ///
-  /// True when [PrefsRecovery.assertStoreReadable] rejected the document
-  /// before either plugin backend touched it, so nothing was memoised. False
-  /// when the preflight passed and the plugin failed anyway: the desktop
-  /// backends cache the parsed document in a private map and never re-read it,
-  /// so reopening would hand back the bad document and write it straight back.
-  /// A repair in that state must be followed by a restart.
+  /// A preflight failure occurs before the app cache opens. A failure during
+  /// migration or cache initialization requires a restart after repair.
   final bool reopenSafe;
 
   /// Measurements of the rejected bytes, when they were available.
@@ -171,7 +165,6 @@ class PrefsRepairOutcome {
   bool get sessionsAffected => sessionsLost > 0;
 
   /// Whether the app must restart before the repaired store can be used.
-  /// Set when the plugin had already memoised the bad document.
   final bool requiresRestart;
 }
 
@@ -225,16 +218,8 @@ abstract final class PrefsRecovery {
 
   /// Rejects a damaged desktop store *before* either plugin backend reads it.
   ///
-  /// This ordering is load-bearing. `shared_preferences_windows` assigns the
-  /// decoded document to a private `_cachedPreferences` map and never re-reads
-  /// it, and the map it stores is the lazy result of `Map.cast<String, Object>`
-  /// — so a document containing a null value caches successfully and only
-  /// throws later, when `Map<String, Object>.from` walks it. Detecting that
-  /// after the fact would be useless: the bad document is already memoised, a
-  /// repair could not reopen onto a clean store, and the first write would
-  /// persist the memoised copy straight back over the repaired file.
-  ///
-  /// Validating here means the plugin only ever sees a document it can hold.
+  /// Classify the original bytes before migration or application cache setup,
+  /// so repair can preserve the damaged file and salvage credential keys.
   ///
   /// No-op on the platforms that use a native store, and on a missing store —
   /// a first launch has nothing to validate.
@@ -336,20 +321,9 @@ abstract final class PrefsRecovery {
     return value is List && value.every((element) => element is String);
   }
 
-  /// Writes a fresh store containing only [salvaged], for the next process.
-  ///
-  /// Used when the plugin already memoised the bad document and cannot be
-  /// reopened in-process. The salvage would otherwise be thrown away: the
-  /// quarantined file is gone, nothing reseeds the vault key, and the next
-  /// launch generates a replacement key that orphans every token stored as
-  /// ciphertext in the database.
-  ///
-  /// Writes the same flat JSON object the desktop backends read, under the
-  /// unprefixed async key names. Staged through a sibling temporary file and
-  /// renamed into place so a crash mid-write cannot leave a second truncated
-  /// store — the exact failure this whole path exists to recover from.
-  ///
-  /// Returns whether the seed landed.
+  /// Stages the recovered credentials on the same volume, then atomically
+  /// publishes a fresh document for the next launch. Keeping the original
+  /// vault key preserves access to the tokens it encrypted.
   static Future<bool> seedStore(SalvagedPrefsCredentials salvaged, {File? storeFileOverride}) async {
     final vaultKey = salvaged.vaultKey;
     if (vaultKey == null && salvaged.sessions.isEmpty) return false;
@@ -358,9 +332,22 @@ abstract final class PrefsRecovery {
     try {
       final file = storeFileOverride ?? await storeFile();
       if (!await file.parent.exists()) await file.parent.create(recursive: true);
-      final staged = File('${file.path}.seed');
-      await staged.writeAsString(jsonEncode(values), flush: true);
-      await staged.rename(file.path);
+      final directory = await file.parent.createTemp('.prefs-repair-');
+      try {
+        final staged = File(p.join(directory.path, 'seed.json'));
+        if (Platform.isLinux) {
+          writePrivateLinuxPreferences(staged.path, utf8.encode(jsonEncode(values)));
+        } else {
+          await staged.writeAsString(jsonEncode(values), flush: true);
+        }
+        await staged.rename(file.path);
+      } finally {
+        try {
+          await directory.delete(recursive: true);
+        } on FileSystemException catch (error) {
+          appLogger.w('Could not remove preference repair staging directory', error: error);
+        }
+      }
       return true;
     } catch (error, stackTrace) {
       appLogger.e('Could not seed a repaired preference store', error: error, stackTrace: stackTrace);
@@ -446,7 +433,11 @@ abstract final class PrefsRecovery {
     if (!await file.exists()) return null;
     final backup = File(p.join(file.parent.path, 'shared_preferences.backup-${_stamp()}.json'));
     try {
-      await file.copy(backup.path);
+      if (Platform.isLinux) {
+        writePrivateLinuxPreferences(backup.path, await file.readAsBytes());
+      } else {
+        await file.copy(backup.path);
+      }
     } on FileSystemException catch (error, stackTrace) {
       appLogger.w('Could not back up the preference store before repair', error: error, stackTrace: stackTrace);
       return null;
@@ -526,6 +517,7 @@ abstract final class PrefsRecovery {
 
     final stamp = _stamp();
     final backup = File(p.join(file.parent.path, 'shared_preferences.corrupt-$stamp.json'));
+    if (Platform.isLinux) restrictLinuxPreferences(file.path);
     try {
       await file.rename(backup.path);
     } on FileSystemException catch (error, stackTrace) {
@@ -536,7 +528,11 @@ abstract final class PrefsRecovery {
         error: error,
         stackTrace: stackTrace,
       );
-      await file.copy(backup.path);
+      if (Platform.isLinux) {
+        writePrivateLinuxPreferences(backup.path, bytes);
+      } else {
+        await file.copy(backup.path);
+      }
       await file.delete();
     }
 

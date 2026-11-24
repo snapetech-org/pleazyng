@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Keep named Linux and Windows settings files separate, preserve simultaneous settings changes, and report failed saves. Linux now gives only the owner access to newly written preferences and credential recovery files.
+- Replay watch changes queued during an existing sync, wait for active replay during shutdown, and retry when the first server actually connects.
+- Release the Extras helper’s SQLite lock when its daily request budget is exhausted and rebuild damaged cached discovery results.
+
 - Allow remote navigation between source-setup fields on Android TV without reopening the keyboard.
 
 - Pass the required virtual-collection type when browsing RomM libraries.

@@ -160,6 +160,27 @@ class ServiceTests(unittest.TestCase):
         self.assertTrue(self.cache.consume('yt', 101))
         self.assertFalse(self.cache.consume('yt', 101))
 
+    def test_damaged_cache_entry_is_evicted_and_rebuilt(self):
+        discovery = self.discovery()
+        expected = self.request(discovery)
+        for body in ("{", "[]"):
+            with self.cache.db:
+                self.cache.db.execute("UPDATE results SET body=?", (body,))
+            before = len(self.calls)
+            self.assertEqual(self.request(discovery), expected)
+            self.assertGreater(len(self.calls), before)
+
+    def test_exhausted_budget_releases_the_database_for_other_connections(self):
+        path = Path(self.directory.name) / "shared.sqlite3"
+        first, second = Cache(path), Cache(path)
+        self.addCleanup(first.db.close)
+        self.addCleanup(second.db.close)
+        second.db.execute("PRAGMA busy_timeout=0")
+        self.assertTrue(first.consume("search", 1))
+        self.assertFalse(first.consume("search", 1))
+        self.assertFalse(first.db.in_transaction)
+        self.assertTrue(second.consume("metadata", 1))
+
     def test_provider_errors_return_partial_not_unverified_candidates(self):
         d = self.discovery()
         d.fetch = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError('provider failed'))

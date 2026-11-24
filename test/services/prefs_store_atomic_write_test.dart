@@ -17,11 +17,8 @@ import 'package:shared_preferences_platform_interface/types.dart';
 /// has a window in which the only copy on disk is empty or half-written, and
 /// the store holds the credential-vault key — the corruption behind #1732.
 ///
-/// `shared_preferences_linux` and `shared_preferences_windows` carry the same
-/// patch and are byte-identical apart from their path-provider type, so the
-/// Linux copy stands in for both here. Windows rename semantics
-/// (`MoveFileExW` with MOVEFILE_REPLACE_EXISTING) cannot be proven on a POSIX
-/// host and are covered by the windows-latest step in CI.
+/// These tests exercise the Linux adapter. The Windows-native CI tests cover
+/// NTFS replacement and the fallback for open readers.
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 

@@ -7,6 +7,7 @@
   },
   "plezyDeltas": [
     "atomic store replacement: stage to a sibling .tmp, flush, then rename over the target",
+    "Read the selected document for each operation and merge each edit under its stable process lock; report failed async writes.",
     "stale staging files are swept once the canonical document has been read cleanly",
     "the published example app is not vendored"
   ],
@@ -15,6 +16,7 @@
     "Never reintroduce a bare writeAsStringSync onto the live document: it truncates before writing, which is the corruption in issue #1732.",
     "Keep the staging name fixed and single. The file is a plaintext copy of the credential-vault key, tracker refresh tokens and Seerr cookies; stamped names would accumulate them.",
     "Keep the flush before the rename. A rename can otherwise publish contents that were never committed.",
-    "Run flutter test test/services/prefs_store_atomic_write_test.dart from the repository root, and the real-Windows step in .github/workflows/ci.yml."
+    "Run flutter test test/services/prefs_store_atomic_write_test.dart from the repository root, and the real-Windows step in .github/workflows/ci.yml.",
+    "Keep legacy and async updates coherent and isolate named documents. Run test/services/desktop_preference_documents_test.dart against both adapters."
   ]
 }

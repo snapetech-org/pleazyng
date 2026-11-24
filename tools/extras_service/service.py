@@ -112,48 +112,52 @@ class Cache:
         self.db.commit()
 
     def get(self, key):
-        with self.lock:
+        with self.lock, self.db:
             # Provider data is refreshed/deleted well before 30 days.
             self.db.execute("DELETE FROM results WHERE created < ?", (time.time() - 86400,))
-            self.db.commit()
             row = self.db.execute("SELECT body FROM results WHERE key = ?", (key,)).fetchone()
-        return json.loads(row[0]) if row else None
+            if row is None:
+                return None
+            try:
+                result = json.loads(row[0])
+                if isinstance(result, dict):
+                    return result
+            except (ValueError, TypeError, RecursionError):
+                pass
+            self.db.execute("DELETE FROM results WHERE key = ?", (key,))
+            return None
 
     def put(self, key, body):
         encoded = json.dumps(body, ensure_ascii=False)
         if len(encoded.encode()) > MAX_RESPONSE:
             raise ValueError("Result too large")
-        with self.lock:
+        with self.lock, self.db:
             self.db.execute("INSERT OR REPLACE INTO results VALUES (?, ?, ?)", (key, time.time(), encoded))
             self.db.execute("DELETE FROM results WHERE key IN (SELECT key FROM results ORDER BY created DESC LIMIT -1 OFFSET 1000)")
-            self.db.commit()
 
     def enqueue(self, video, parent):
         if not isinstance(video, str) or not VIDEO.fullmatch(video):
             return
-        with self.lock:
+        with self.lock, self.db:
             self.db.execute("INSERT OR REPLACE INTO review_queue VALUES (?, ?, ?)", (video, parent, time.time()))
             self.db.execute("DELETE FROM review_queue WHERE created < ?", (time.time() - 86400,))
             self.db.execute("DELETE FROM review_queue WHERE rowid IN (SELECT rowid FROM review_queue ORDER BY created DESC LIMIT -1 OFFSET 200)")
-            self.db.commit()
 
     def review_queue(self):
-        with self.lock:
+        with self.lock, self.db:
             self.db.execute("DELETE FROM review_queue WHERE created < ?", (time.time() - 86400,))
-            self.db.commit()
             return [{"url": f"https://www.youtube.com/watch?v={v}", "proposedParent": p}
                     for v, p in self.db.execute("SELECT video,parent FROM review_queue ORDER BY created DESC")]
 
     def consume(self, kind, limit, cost=1):
         # Conservative rolling UTC bucket; deployment may set a lower budget.
         day = time.strftime("%Y-%m-%d", time.gmtime())
-        with self.lock:
+        with self.lock, self.db:
             self.db.execute("DELETE FROM budget WHERE day <> ?", (day,))
             row = self.db.execute("SELECT calls FROM budget WHERE day=? AND kind=?", (day, kind)).fetchone()
             if (row[0] if row else 0) + cost > limit:
                 return False
             self.db.execute("INSERT INTO budget VALUES (?, ?, ?) ON CONFLICT(day,kind) DO UPDATE SET calls=calls+excluded.calls", (day, kind, cost))
-            self.db.commit()
             return True
 
 

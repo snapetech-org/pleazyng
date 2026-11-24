@@ -30,9 +30,6 @@ import '../test_helpers/playback_report_fakes.dart';
 import '../test_helpers/prefs.dart';
 import '../test_helpers/media_items.dart';
 
-// Direct calls cover retry retention, progress replay, profile interruption, and
-// scoped routing; trigger coalescing and cache/refresh seams remain out of scope.
-
 /// Minimal [OfflineModeSource] that lets tests flip the offline flag and
 /// observe `addListener`/`removeListener` traffic via the protected
 /// [ChangeNotifier.hasListeners] flag.
@@ -146,6 +143,19 @@ class _RecordingPlexClient extends _RecordingMediaClient implements PlexClient, 
 
   @override
   Future<void> closeGracefully({Duration drainTimeout = const Duration(seconds: 2)}) async {}
+}
+
+class _DelayedPlexClient extends _RecordingPlexClient {
+  _DelayedPlexClient() : super(serverId: ServerId('plex-machine'), profileId: 'profile-a');
+  final startedWrite = Completer<void>(), finishWrite = Completer<void>();
+  @override
+  Future<void> markWatched(MediaItem item) async {
+    if (item.id == 'first') {
+      startedWrite.complete();
+      await finishWrite.future;
+    }
+    await super.markWatched(item);
+  }
 }
 
 /// Build a service against an in-memory database and a bare-metal
@@ -422,6 +432,39 @@ void main() {
       expect(client.watched, isEmpty);
       expect(await svc.getPendingSyncCount(), 0);
       expect(await db.getPendingSyncCount(), 1);
+    });
+
+    test('switching away and back during metadata lookup retires the old replay', () async {
+      final (svc: svc, db: db, mgr: mgr) = _makeService();
+      final requested = Completer<void>(), release = Completer<void>();
+      var posts = 0;
+      final client = JellyfinClient.forTesting(
+        connection: _jellyfinConnection('user-a'),
+        httpClient: MockClient((request) async {
+          if (request.method == 'GET') {
+            if (!requested.isCompleted) requested.complete();
+            await release.future;
+            return http.Response('{"Id":"item-1","Type":"Movie","Name":"Movie"}', 200);
+          }
+          if (request.method == 'POST') posts++;
+          return http.Response('', 204);
+        }),
+      );
+      addTearDown(client.close);
+      mgr.debugRegisterJellyfinClientForTesting(client);
+      svc.setActiveProfileId('p1');
+      await svc.queueMarkWatched(serverId: client.serverId, itemId: 'item-1');
+      final stale = svc.syncPendingItems();
+      await requested.future;
+      svc.setActiveProfileId('p2');
+      svc.setActiveProfileId('p1');
+      release.complete();
+      await stale;
+      expect(posts, 0);
+      expect(await db.getPendingSyncCount(), 1);
+      await svc.syncPendingItems();
+      expect(posts, 1);
+      expect(await db.getPendingSyncCount(), 0);
     });
 
     test('requeues remaining actions when the active profile changes mid-sync', () async {
@@ -1465,6 +1508,56 @@ void main() {
     });
   });
 
+  group('overlapping offline replay', () {
+    test('a later caller waits for newly queued work and coalesces concurrent requests', () async {
+      final (svc: svc, db: _, mgr: mgr) = _makeService();
+      final client = _DelayedPlexClient();
+      mgr.debugRegisterClientForTesting(client);
+      svc.setActiveProfileId('profile-a');
+      await svc.queueMarkWatched(serverId: client.serverId, itemId: 'first');
+      final first = svc.syncPendingItems();
+      await client.startedWrite.future;
+      await svc.queueMarkWatched(serverId: client.serverId, itemId: 'second');
+      final second = svc.syncPendingItems(), third = svc.syncPendingItems();
+      client.finishWrite.complete();
+      await Future.wait([first, second, third]);
+      expect(client.watched, ['first', 'second']);
+      expect(await svc.getPendingSyncCount(), 0);
+    });
+
+    test('shutdown waits for manual replay and cancels its queued follow-up', () async {
+      final (svc: svc, db: _, mgr: mgr) = _makeService();
+      final client = _DelayedPlexClient();
+      mgr.debugRegisterClientForTesting(client);
+      svc.setActiveProfileId('profile-a');
+      await svc.queueMarkWatched(serverId: client.serverId, itemId: 'first');
+      final replay = svc.syncPendingItems();
+      await client.startedWrite.future;
+      await svc.queueMarkWatched(serverId: client.serverId, itemId: 'second');
+      final followUp = svc.syncPendingItems();
+      var stopped = false;
+      final shutdown = svc.stopBackgroundSync().then((_) => stopped = true);
+      await pumpEventQueue();
+      final stoppedWhileWriting = stopped;
+      client.finishWrite.complete();
+      await Future.wait([replay, followUp, shutdown]);
+      expect(stoppedWhileWriting, isFalse);
+      expect(client.watched, ['first']);
+      expect(await svc.getPendingSyncCount(), 1);
+    });
+
+    test('an early startup signal leaves the first usable connection eligible for sync', () async {
+      final (svc: svc, db: _, mgr: mgr) = _makeService();
+      svc.setActiveProfileId('profile-a');
+      svc.onServersConnected();
+      final client = _RecordingPlexClient(serverId: ServerId('plex-machine'), profileId: 'profile-a');
+      mgr.debugRegisterClientForTesting(client);
+      await svc.queueMarkWatched(serverId: client.serverId, itemId: 'second');
+      svc.onServersConnected();
+      await pumpEventQueue();
+      expect(client.watched, ['second']);
+    });
+  });
   group('stopBackgroundSync', () {
     // #3012: exit teardown closes the database once this settles, so neither
     // the pass in flight nor a later trigger may query it afterwards.
