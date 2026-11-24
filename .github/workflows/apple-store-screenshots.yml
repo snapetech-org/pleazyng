@@ -667,8 +667,9 @@ jobs:
           fi
           python3 capture-tools/scripts/stores/capture_apple_macos_tvos_storekit.py capture "${args[@]}"
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: inputs.target != 'app-in-use-capture-only' && inputs.target != 'tvos-listing-only' && inputs.target != 'tvos-in-use-capture-only' && inputs.target != 'macos-tvos-in-use-producer-only'
+      - name: Retain standard tvOS app screenshots
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: inputs.target != 'app-in-use-capture-only' && inputs.target != 'tvos-listing-only' && inputs.target != 'tvos-in-use-capture-only' && inputs.target != 'tvos-in-use-producer-only' && inputs.target != 'macos-tvos-in-use-producer-only'
         with:
           name: apple-store-captures-tvos-${{ inputs.product_version || '3.0.37' }}
           path: ${{ runner.temp }}/apple-store-captures-tvos/

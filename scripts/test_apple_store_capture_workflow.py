@@ -232,6 +232,10 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
             named_step_condition(tvos, "Capture the actual tvOS app screen"),
             rf"inputs\.target\s*==\s*'{target}'",
         )
+        self.assertEqual(
+            named_step_condition(tvos, "Retain standard tvOS app screenshots"),
+            named_step_condition(tvos, "Capture the actual tvOS app screen"),
+        )
         capture = named_step_text(tvos, "Capture tvOS app with native LOCALTEST trial history")
         self.assertIn("--dependency-receipt", capture)
         self.assertIn("PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA:", WORKFLOW)
