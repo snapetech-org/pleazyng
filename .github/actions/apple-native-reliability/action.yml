@@ -581,9 +581,12 @@ runs:
       if: inputs.platform == 'iOS' && inputs.build-only != 'true' && inputs.motion-test-only != 'true' && runner.environment == 'github-hosted'
       env:
         PRODUCTS: ${{ steps.scratch.outputs.APPLE_DERIVED_DATA_PATH }}/Build/Products/Debug-iphonesimulator
+        SIMULATOR_RUNTIME: ${{ steps.scratch.outputs.runtime }}
       shell: bash
       working-directory: ${{ steps.scratch.outputs.PLEZYNG_APPLE_WORKSPACE }}
-      run: python3 scripts/apple/smoke_older_iphone.py "$PRODUCTS"
+      run: |
+        python3 scripts/apple/select_test_destination.py --cleanup
+        python3 "$GITHUB_WORKSPACE/scripts/apple/smoke_older_iphone.py" "$PRODUCTS" --discard-intermediates
 
     - name: Build application and XCTest bundle
       if: inputs.platform == 'macOS' || inputs.build-only == 'true'
