@@ -191,9 +191,10 @@ func (p *oauthProxy) handleSteamFamilies(w http.ResponseWriter, r *http.Request)
 	s.Busy = true
 	access, client, requestID := s.Access, s.ClientID, s.RequestID
 	pollAfter := s.PollAfter
+	deadline := steamRequestDeadline(30*time.Second, s.Expires, p.steamCatalogGrants[binding.Catalog].expires)
 	p.mu.Unlock()
 	defer func() { p.mu.Lock(); s.Busy = false; p.mu.Unlock() }()
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	defer cancel()
 	stop := context.AfterFunc(s.Context, cancel)
 	defer stop()
@@ -290,6 +291,11 @@ func (p *oauthProxy) handleSteamFamilies(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if review != nil {
+		var cancelReview context.CancelFunc
+		ctx, cancelReview = context.WithDeadline(ctx, review.Expires)
+		defer cancelReview()
+	}
 	snapshot, err := f.API.snapshot(ctx, access, binding.SteamID)
 	if err != nil {
 		http.Error(w, "Steam Families unavailable; refresh before retrying", 409)
@@ -327,6 +333,10 @@ func (p *oauthProxy) handleSteamFamilies(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	plan, err := planFamilyChange(snapshot, binding.SteamID, review.Plan.Change)
+	if !time.Now().Before(review.Expires) {
+		http.Error(w, "Review expired; refresh", 409)
+		return
+	}
 	if err != nil || snapshot.digest() != review.Digest {
 		http.Error(w, "Family changed; refresh and review again", 409)
 		return

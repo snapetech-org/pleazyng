@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Preserve explicit word-to-cue links when caching generated subtitles. Keep cached transcripts within their profile and protect concurrent saves.
+- Keep karaoke preparation moving after a job-state write fails, allow a removed job ID to be used again, and recover healthy jobs when another snapshot is damaged.
+- Honor Steam Cloud and Steam Families authorization deadlines during requests, require a fresh review if a family change expires during refresh, and stop stale save downloads at the listed size.
+- Confirm Steam Cloud setting changes on a Decky host only when the final observed setting matches the request.
+
 - Keep named Linux and Windows settings files separate, preserve simultaneous settings changes, and report failed saves. Linux now gives only the owner access to newly written preferences and credential recovery files.
 - Replay watch changes queued during an existing sync, wait for active replay during shutdown, and retry when the first server actually connects.
 - Release the Extras helper’s SQLite lock when its daily request budget is exhausted and rebuild damaged cached discovery results.

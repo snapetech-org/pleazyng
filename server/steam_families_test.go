@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -330,4 +331,25 @@ func TestFamilyOnlyOneSessionPerSteamAccount(t *testing.T) {
 	if familyRequestTest(p, secondCatalog, familyRequest{Operation: "start", Consent: true}).Code != 409 || count.Load() != 0 {
 		t.Fatal("same-account parallel authorization admitted")
 	}
+}
+
+func TestFamilyReviewExpiresDuringRefresh(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p, catalog, session, _, changes := familyTestProxy(t)
+		review := familyReviewTest(t, p, catalog, session)
+		s := p.steamFamilies.Sessions[sha256.Sum256([]byte(session))]
+		s.Review.Expires = time.Now().Add(time.Second)
+		api := p.steamFamilies.API.client
+		previous := api.Transport
+		api.Transport = cloudTransport(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet {
+				time.Sleep(2 * time.Second)
+			}
+			return previous.RoundTrip(r)
+		})
+		w := familyRequestTest(p, catalog, familyRequest{Operation: "commit", Session: session, Review: review})
+		if w.Code != http.StatusConflict || changes.Load() != 0 {
+			t.Fatal("expired review should request a fresh review before submission")
+		}
+	})
 }

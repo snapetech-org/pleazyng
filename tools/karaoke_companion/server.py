@@ -50,7 +50,7 @@ class Jobs:
         self.assets = root / "assets"; self.assets.mkdir(parents=True, exist_ok=True)
         self.jobs = root / "jobs"; self.jobs.mkdir(exist_ok=True)
         self.lock = threading.RLock(); self.condition = threading.Condition(self.lock)
-        self.states = {}; self.processes = {}; self.process_job_handles = {}
+        self.states = {}; self.processes = {}
         self.canceled = set(); self.preempted = set(); self.upload_reserved = 0
         self.pending = {}; self.dispatcher_running = False; self.current_job_id = None; self.performance_leases = {}
         self.stopping = False
@@ -58,9 +58,17 @@ class Jobs:
         for file in self.jobs.glob("*/state.json"):
             try:
                 state = json.loads(file.read_text())
-                if state["status"] in {"queued", "running"}: state["status"] = "interrupted"
-                self.states[file.parent.name] = state
-                atomic_json(file, state)
+                job_id = file.parent.name
+                if (not isinstance(state, dict) or state.get("id") != job_id
+                        or not JOB_ID.fullmatch(job_id)
+                        or state.get("status") not in ("queued", "running", "completed", "interrupted", "failed", "canceled")
+                        or not isinstance(state.get("fingerprint"), str)
+                        or not isinstance(state.get("result", {}), dict)):
+                    continue
+                self.states[job_id] = state
+                if state["status"] in ("queued", "running"):
+                    state["status"] = "interrupted"
+                    atomic_json(file, state)
             except (OSError, ValueError, KeyError): continue
 
     def usage(self):
@@ -195,23 +203,26 @@ class Jobs:
             "qualification": "Runtime dependencies detected; model accuracy, DSP filters and hardware are not device-qualified"}
 
     def submit(self, body):
+        if not isinstance(body, dict): raise ValueError("Expected a job object")
         request_id, kind, assets = body.get("id", ""), body.get("kind"), body.get("assets")
         priority = body.get("priority", 50)
-        if not JOB_ID.fullmatch(request_id) or kind not in KINDS or not isinstance(assets, list) or not 1 <= len(assets) <= 8:
+        if not isinstance(request_id, str) or not JOB_ID.fullmatch(request_id) or not isinstance(kind, str) or kind not in KINDS or not isinstance(assets, list) or not 1 <= len(assets) <= 8:
             raise ValueError("Invalid job request")
         if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 100:
             raise ValueError("Job priority must be between 0 and 100")
         if not isinstance(body.get("params", {}), dict): raise ValueError("Invalid job parameters")
-        for asset in assets:
-            if not isinstance(asset, str) or not IDENTITY.fullmatch(asset) or not (self.assets / asset).is_file():
-                raise ValueError("Upload every input asset first")
+        if not all(isinstance(asset, str) and IDENTITY.fullmatch(asset) for asset in assets):
+            raise ValueError("Invalid input asset")
         request = {"kind": kind, "assets": assets, "params": body.get("params", {}), "worker": VERSION, "modelRevision": self.model_revision}
         fingerprint = hashlib.sha256(json.dumps({**request, "priority": priority}, sort_keys=True).encode()).hexdigest()
         with self.condition:
             if request_id in self.states:
                 old = self.states[request_id]
                 if old["fingerprint"] != fingerprint: raise ValueError("Job ID reused for different inputs")
-                return old
+                return dict(old)
+            if self.stopping: raise ValueError("Companion is stopping")
+            if any(not (self.assets / asset).is_file() for asset in assets):
+                raise ValueError("Upload every input asset first")
             if sum(s["status"] in {"queued", "running"} for s in self.states.values()) >= 8: raise ValueError("Preparation queue is full")
             copy_bytes = sum((self.assets / asset).stat().st_size for asset in assets)
             if copy_bytes > 4*MAX_ASSET: raise ValueError("Job inputs exceed the 2 GiB work-directory limit")
@@ -232,6 +243,7 @@ class Jobs:
                 self._start_dispatcher_locked()
                 return dict(state)
             except Exception:
+                self.pending.pop(request_id, None)
                 self.states.pop(request_id, None)
                 shutil.rmtree(directory, ignore_errors=True)
                 raise
@@ -253,13 +265,14 @@ class Jobs:
             self.condition.notify_all()
         for process in processes:
             self.kill(process)
-        self.pool.shutdown(wait=False, cancel_futures=True)
+        self.pool.shutdown(wait=True, cancel_futures=True)
 
     def _performance_active_locked(self):
         now = time.monotonic()
         return any(lease["activeUntil"] > now for lease in self.performance_leases.values())
 
     def update_performance(self, body):
+        if not isinstance(body, dict): raise ValueError("Expected a performance object")
         client_id, sequence, active = body.get("clientId"), body.get("sequence"), body.get("active")
         if not isinstance(client_id, str) or not JOB_ID.fullmatch(client_id):
             raise ValueError("Invalid performance client ID")
@@ -320,11 +333,25 @@ class Jobs:
                         continue
                     self.current_job_id = job_id
                     break
-            self.execute(job_id)
-            with self.condition:
-                if self.current_job_id == job_id:
+            try:
+                self.execute(job_id)
+            except OSError as error:
+                # A snapshot write can fail even while recording a terminal state.
+                # Keep serving the queue and let restart mark any old snapshot interrupted.
+                with self.condition:
+                    self.pending.pop(job_id, None)
+                    state = self.states[job_id]
+                    if job_id not in self.canceled:
+                        state.update(status="failed", error=str(error))
+                    try:
+                        atomic_json(self.jobs / job_id / "state.json", state)
+                    except OSError:
+                        print("Could not persist karaoke job status", file=sys.stderr)
+            finally:
+                with self.condition:
                     self.current_job_id = None
-                self.condition.notify_all()
+                    self.preempted.discard(job_id)
+                    self.condition.notify_all()
 
     def _requeue_preempted_locked(self, job_id, directory):
         if job_id not in self.preempted or job_id in self.canceled:
@@ -343,13 +370,14 @@ class Jobs:
         with self.condition:
             state = self.states.get(job_id)
             if state is None: raise KeyError(job_id)
-            if state["status"] in {"queued", "running"} or job_id in self.processes:
+            if state["status"] in {"queued", "running"} or job_id == self.current_job_id or job_id in self.processes:
                 raise ValueError("Cancel and wait for the worker to stop before removing this job")
             request_path = self.jobs / job_id / "request.json"
             try: assets = json.loads(request_path.read_text()).get("assets", [])
             except (OSError, ValueError): assets = []
             shutil.rmtree(self.jobs / job_id, ignore_errors=False)
             self.states.pop(job_id, None)
+            self.canceled.discard(job_id)
             used = {asset for state in self.states.values() for asset in state.get("result", {}).get("inputAssets", [])}
             # Request inputs remain in per-job snapshots; retain any digest still referenced by a job.
             for directory in self.jobs.iterdir():
@@ -375,28 +403,22 @@ class Jobs:
         if self.soundfont: command += ["--soundfont", str(self.soundfont)]
         errors = bytearray()
         memory_job = None
+        process = reader = None
         try:
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 start_new_session=os.name != "nt", creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
             try:
                 memory_job = self._apply_memory_limit(process)
             except Exception as error:
-                self.kill(process)
-                try:
-                    process.wait(timeout=5)
-                finally:
-                    if process.stderr:
-                        process.stderr.close()
                 raise RuntimeError("Could not enforce the karaoke worker memory limit") from error
             with self.condition:
                 self.processes[job_id] = process
-                if memory_job is not None:
-                    self.process_job_handles[job_id] = memory_job
                 if self.stopping or job_id in self.canceled or job_id in self.preempted or self._performance_active_locked(): self.kill(process)
             def drain():
-                while data := process.stderr.read(4096):
-                    errors.extend(data)
-                    if len(errors) > 16384: del errors[:-16384]
+                with process.stderr as stream:
+                    while data := stream.read(4096):
+                        errors.extend(data)
+                        if len(errors) > 16384: del errors[:-16384]
             reader = threading.Thread(target=drain, daemon=True); reader.start()
             deadline = time.monotonic() + self.timeout
             while process.poll() is None:
@@ -421,17 +443,30 @@ class Jobs:
                     self.states[job_id].update(status="canceled" if job_id in self.canceled else "failed", error=str(error))
                     atomic_json(directory / "state.json", self.states[job_id])
         finally:
+            self._close_memory_job(memory_job)
+            if process is not None:
+                self.kill(process)
+                process.wait()
+                if reader is not None:
+                    reader.join(timeout=2)
+                elif process.stderr:
+                    process.stderr.close()
             with self.condition:
                 self.processes.pop(job_id, None)
-                memory_job = self.process_job_handles.pop(job_id, None)
                 self.preempted.discard(job_id)
                 self.condition.notify_all()
-            self._close_memory_job(memory_job)
 
     @staticmethod
     def kill(process):
         if process.poll() is not None: return
-        if os.name == "nt": subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.name == "nt":
+            try:
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], timeout=5,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if process.poll() is None:
+                process.kill()
         else:
             try: os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError: pass

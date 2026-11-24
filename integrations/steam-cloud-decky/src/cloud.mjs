@@ -51,7 +51,7 @@ export function createCloudController(steam, timeoutMs = 4000) {
     // Source-pinned ELoginState.Success = 7; progress/logout invalidates identity.
     if (!disposed && state !== 7) { invalidate(); account = undefined; }
   });
-  steam.User.RegisterForCurrentUserChanges(user => {
+  const userSubscription = steam.User.RegisterForCurrentUserChanges(user => {
     if (disposed) return;
     const next = /^7656119\d{10}$/.test(user?.strSteamID ?? '') && !user.bIsOfflineMode ? user.strSteamID : undefined;
     if (next === account) return;
@@ -95,12 +95,12 @@ export function createCloudController(steam, timeoutMs = 4000) {
             expired,
           ]);
           check();
-          if (accepted !== true || !await observed || !valid() || epoch !== generation) return {status: 'unknown'};
+          if (accepted !== true || !await observed || !valid() || epoch !== generation || value !== request.enabled) return {status: 'unknown'};
           return {status: 'observed', steamId: account, enabled: value};
         } catch { return {status: 'unknown'}; }
         finally { clearTimeout(timer); wake = undefined; }
       } finally { busy = false; }
     },
-    dispose() { disposed = true; invalidate(); loginSubscription?.unregister(); },
+    dispose() { if (disposed) return; disposed = true; invalidate(); userSubscription?.unregister?.(); loginSubscription?.unregister(); },
   };
 }

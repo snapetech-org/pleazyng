@@ -367,3 +367,45 @@ func TestSteamCloudConfigurationFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestSteamCloudTransferHonorsEarlierAuthorizationDeadline(t *testing.T) {
+	for _, kind := range []string{"catalog", "cloud"} {
+		t.Run(kind, func(t *testing.T) {
+			p, catalog, grant := cloudTestProxy(t)
+			expires := time.Now().Add(10 * time.Second)
+			if kind == "catalog" {
+				p.steamCatalogGrants[sha256.Sum256([]byte(catalog))].expires = expires
+			} else {
+				p.steamCloud.grants[sha256.Sum256([]byte(grant))].expires = expires
+			}
+			p.steamCloud.api.api.Transport = cloudTransport(func(r *http.Request) (*http.Response, error) {
+				deadline, ok := r.Context().Deadline()
+				if !ok || deadline.After(expires) {
+					t.Error("file request outlives its authorization")
+				}
+				return cloudReply(`{"response":{"files":[],"total_files":0}}`), nil
+			})
+			if w := cloudRequest(p, "/files", grant, `{"action":"list"}`); w.Code != http.StatusOK {
+				t.Fatalf("valid request returned %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestSteamCloudChecksInventoryAndBoundsDownloadByListedSize(t *testing.T) {
+	api, _ := cloudTestAPI(t, "")
+	api.api = &http.Client{Transport: cloudTransport(func(*http.Request) (*http.Response, error) {
+		return cloudReply(`{"response":null}`), nil
+	})}
+	if _, err := api.files(context.Background(), "fixture-token", cloudTestID, 620); err == nil {
+		t.Error("null inventory was accepted as an empty library")
+	}
+	data := strings.NewReader("outdated file")
+	api.storage = &http.Client{Transport: cloudTransport(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, ContentLength: -1, Body: io.NopCloser(data)}, nil
+	})}
+	file := steamCloudFile{Size: 2, URL: "https://storage.steam.test/save"}
+	if _, err := api.download(context.Background(), file); err == nil || data.Len() < len("outdated file")-3 {
+		t.Error("download continued beyond the size needed to detect an outdated listing")
+	}
+}

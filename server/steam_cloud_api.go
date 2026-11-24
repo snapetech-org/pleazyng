@@ -205,7 +205,7 @@ func (a *steamCloudAPI) call(ctx context.Context, token, method string, params m
 	var envelope struct {
 		Response json.RawMessage `json:"response"`
 	}
-	if json.Unmarshal(data, &envelope) != nil || len(envelope.Response) == 0 || json.Unmarshal(envelope.Response, result) != nil {
+	if json.Unmarshal(data, &envelope) != nil || len(envelope.Response) == 0 || envelope.Response[0] != '{' || json.Unmarshal(envelope.Response, result) != nil {
 		return errSteamCloud
 	}
 	return nil
@@ -274,10 +274,10 @@ func (a *steamCloudAPI) download(ctx context.Context, file steamCloudFile) ([]by
 		return nil, err
 	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusOK || response.ContentLength > int64(file.Size) {
 		return nil, errSteamCloud
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, steamCloudMaxFile+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, int64(file.Size)+1))
 	if err != nil || len(data) != int(file.Size) {
 		return nil, errSteamCloud
 	}

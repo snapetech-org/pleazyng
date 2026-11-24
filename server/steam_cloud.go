@@ -355,6 +355,19 @@ func (p *oauthProxy) cleanupSteamCloudLocked(now time.Time) {
 		}
 	}
 }
+
+// An upstream request can use only the remaining lifetime of both grants.
+func steamRequestDeadline(timeout time.Duration, session, catalog time.Time) time.Time {
+	deadline := time.Now().Add(timeout)
+	if session.Before(deadline) {
+		deadline = session
+	}
+	if catalog.Before(deadline) {
+		deadline = catalog
+	}
+	return deadline
+}
+
 func (p *oauthProxy) handleSteamCloudFiles(w http.ResponseWriter, r *http.Request) {
 	cloudHeaders(w)
 	if (r.Method != http.MethodPost && r.Method != http.MethodDelete) || r.URL.RawQuery != "" {
@@ -395,7 +408,8 @@ func (p *oauthProxy) handleSteamCloudFiles(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Cloud operation already in progress", 429)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	deadline := steamRequestDeadline(90*time.Second, grant.expires, p.steamCatalogGrants[binding.Catalog].expires)
+	ctx, cancel := context.WithDeadline(r.Context(), deadline)
 	grant.cancel = cancel
 	token := grant.token
 	c.active++
@@ -472,15 +486,16 @@ func (p *oauthProxy) handleSteamCloudFiles(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Invalid Cloud action", 400)
 		return
 	}
-	if err != nil {
-		writeJSON(w, 409, map[string]any{"error": "refresh_required"})
-		return
-	}
 	p.mu.Lock()
-	current := c.grants[digest] == grant && p.steamCatalogGrants[binding.Catalog] != nil && time.Now().Before(grant.expires)
+	p.cleanupSteamCloudLocked(time.Now())
+	current := c.grants[digest] == grant
 	p.mu.Unlock()
 	if !current {
 		http.Error(w, "Cloud authorization retired", 401)
+		return
+	}
+	if err != nil {
+		writeJSON(w, 409, map[string]any{"error": "refresh_required"})
 		return
 	}
 	writeJSON(w, 200, result)

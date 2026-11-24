@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:collection';
+import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,10 +7,13 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../utils/bounded_json_bytes.dart';
 import 'subtitle_ai_service.dart';
 import 'subtitle_placement_evidence.dart';
 import 'subtitle_retimer.dart';
 import 'subtitle_word_timing.dart';
+
+part 'subtitle_transcript_cache_files.dart';
 
 /// Source-language speech recognition tied to the exact WAV bytes and model
 /// identity. The target language and translation glossary deliberately do not
@@ -77,17 +80,18 @@ final class SubtitleSourceTranscriptCacheIdentity {
     'pipelineVersion': pipelineVersion,
   };
 
+  static String scopeFor(String? profileId) {
+    final bytes = utf8.encode(profileId?.trim() ?? '');
+    if (bytes.length > 1024) throw ArgumentError('Profile identity exceeds 1024 UTF-8 bytes.');
+    return bytes.isEmpty ? 'unscoped' : sha256.convert(bytes).toString();
+  }
+
   static SubtitleSourceTranscriptCacheIdentity create({
     required String? profileId,
     required String audioSha256,
     required SubtitleInferenceProvider provider,
     required String? languageCode,
   }) {
-    final suppliedProfile = profileId?.trim();
-    if (suppliedProfile != null && utf8.encode(suppliedProfile).length > 1024) {
-      throw ArgumentError.value(profileId, 'profileId', 'Profile identity must contain no more than 1024 UTF-8 bytes.');
-    }
-    final profile = suppliedProfile == null || suppliedProfile.isEmpty ? null : suppliedProfile;
     final normalizedLanguage = languageCode?.trim().toLowerCase().split(RegExp(r'[-_]')).first;
     final sourceLanguage = normalizedLanguage == null || normalizedLanguage.isEmpty || normalizedLanguage == 'auto'
         ? 'auto'
@@ -95,7 +99,7 @@ final class SubtitleSourceTranscriptCacheIdentity {
     if (sourceLanguage != 'auto' && !RegExp(r'^[a-z]{2,3}$').hasMatch(sourceLanguage)) {
       throw ArgumentError.value(languageCode, 'languageCode', 'Use a two or three letter language code or auto.');
     }
-    final profileScopeHash = profile == null ? 'unscoped' : sha256.convert(utf8.encode(profile)).toString();
+    final profileScopeHash = scopeFor(profileId);
     const sourceRepresentation = 'wav-file-bytes-v1';
     const task = 'source-language-transcription-v1';
     const pipelineVersion = 'subtitle-transcript-cues-v1';
@@ -176,8 +180,7 @@ abstract final class SubtitleSourceTranscriptCacheService {
   static const int _maximumAudioHours = 8;
   static const int _maximumWordTimings = 250000;
 
-  static final LinkedHashMap<String, SubtitleCachedSourceTranscript> _recentMemory =
-      LinkedHashMap<String, SubtitleCachedSourceTranscript>();
+  static ({String key, SubtitleCachedSourceTranscript value})? _recent;
   static Future<void> _writeTail = Future<void>.value();
 
   static Future<String> audioSha256(String wavPath) async {
@@ -272,41 +275,35 @@ abstract final class SubtitleSourceTranscriptCacheService {
     required String? profileId,
     required SubtitleSourceTranscriptCacheIdentity identity,
   }) async {
-    final recent = _recentMemory.remove(identity.key);
-    if (recent != null) {
-      final reused = _copyWithCacheState(recent, cacheHit: true, persisted: recent.persisted);
-      _recentMemory[identity.key] = reused;
-      return reused;
+    if (identity.profileScopeHash != SubtitleSourceTranscriptCacheIdentity.scopeFor(profileId)) return null;
+    final recent = _recent;
+    if (recent != null && recent.key == identity.key) {
+      return _copyWithCacheState(recent.value, cacheHit: true, persisted: recent.value.persisted);
     }
     if (profileId == null || profileId.trim().isEmpty) return null;
-    File? file;
     try {
-      file = await _entryFile(profileId, identity.key, createDirectory: false);
+      final file = await _entryFile(profileId, identity.key, createDirectory: false);
       if (file == null || !await file.exists()) return null;
-      final length = await file.length();
-      if (length <= 0 || length > maximumTranscriptBytes) {
-        throw const FormatException('Transcript cache entry is oversized.');
+      final input = await file.open();
+      final SubtitleCachedSourceTranscript transcript;
+      try {
+        final length = await input.length();
+        if (length <= 0 || length > maximumTranscriptBytes) throw const FormatException('Invalid transcript size.');
+        transcript = _decodeTranscript(jsonDecode(utf8.decode(await input.read(length))), identity);
+      } finally {
+        await input.close();
       }
-      final decoded = jsonDecode(await file.readAsString());
-      final transcript = _decodeTranscript(decoded, identity);
       try {
         await file.setLastModified(DateTime.now());
       } on FileSystemException {
         // A read-only cache entry remains valid; it simply will not be LRU-hot.
       }
       final reused = _copyWithCacheState(transcript, cacheHit: true, persisted: true);
-      _recentMemory
-        ..clear()
-        ..[identity.key] = reused;
+      _recent = (key: identity.key, value: reused);
       return reused;
     } on Object {
-      if (file != null) {
-        try {
-          await file.delete();
-        } on FileSystemException {
-          // Ignore a cache cleanup failure and recompute from the WAV.
-        }
-      }
+      // Recompute on a cache miss or unreadable entry. A successful store
+      // replaces it; deleting by name here could remove a newer writer's file.
       return null;
     }
   }
@@ -318,6 +315,9 @@ abstract final class SubtitleSourceTranscriptCacheService {
     required SubtitleSourceTranscriptCacheIdentity identity,
     required SubtitleTranscriptionResult result,
   }) async {
+    if (identity.profileScopeHash != SubtitleSourceTranscriptCacheIdentity.scopeFor(profileId)) {
+      throw ArgumentError('Transcript cache identity belongs to a different profile.');
+    }
     if (result.translatedToEnglish) {
       throw ArgumentError('English-translated speech is not a source-language transcript cache entry.');
     }
@@ -325,49 +325,38 @@ abstract final class SubtitleSourceTranscriptCacheService {
     final cueTextBytes = transcript.cues.fold<int>(0, (total, cue) => total + utf8.encode(cue.text).length);
     if (cueTextBytes > maximumCachedCueTextBytes) return transcript;
     var cacheRecord = transcript;
-    var jsonText = jsonEncode(_encodeTranscript(cacheRecord, identity));
-    if (utf8.encode(jsonText).length > maximumTranscriptBytes) {
-      cacheRecord = _copyWithCacheState(cacheRecord, cacheHit: false, persisted: false, wordTimings: const []);
-      jsonText = jsonEncode(_encodeTranscript(cacheRecord, identity));
+    Uint8List? encode() {
+      try {
+        return boundedJsonBytes(
+          _encodeTranscript(cacheRecord, identity),
+          maximumTranscriptBytes,
+          invalid: const FormatException('Transcript exceeds the cache limit.'),
+        );
+      } on FormatException {
+        return null;
+      }
     }
-    if (utf8.encode(jsonText).length > maximumTranscriptBytes) return transcript;
-    _recentMemory
-      ..clear()
-      ..[identity.key] = cacheRecord;
+
+    var bytes = encode();
+    if (bytes == null) {
+      cacheRecord = _copyWithCacheState(cacheRecord, cacheHit: false, persisted: false, wordTimings: const []);
+      bytes = encode();
+    }
+    if (bytes == null) return transcript;
+    _recent = (key: identity.key, value: cacheRecord);
     if (profileId == null || profileId.trim().isEmpty) {
       return transcript;
     }
     try {
+      var persisted = false;
       await _exclusive(() async {
         final file = await _entryFile(profileId, identity.key, createDirectory: true);
         if (file == null) return;
-        if (!await _removePendingEntries(file.parent.parent)) {
-          throw FileSystemException(
-            'Cannot remove abandoned subtitle transcript cache writes.',
-            file.parent.parent.path,
-          );
-        }
-        final temporary = File('${file.path}.pending');
-        try {
-          if (await temporary.exists()) await temporary.delete();
-          await temporary.writeAsString(jsonText, flush: true);
-          if (await temporary.length() > maximumTranscriptBytes) return;
-          if (await file.exists()) await file.delete();
-          await temporary.rename(file.path);
-          await _evictProfileEntries(file.parent);
-          await _evictGlobalEntries(file.parent.parent);
-        } finally {
-          try {
-            if (await temporary.exists()) await temporary.delete();
-          } on FileSystemException {
-            // A later store refuses to write until abandoned temporary files are removed.
-          }
-        }
+        await _publishTranscriptFile(file, bytes!);
+        persisted = await file.exists();
       });
-      final file = await _entryFile(profileId, identity.key, createDirectory: false);
-      final persisted = file != null && await file.exists();
       final saved = _copyWithCacheState(cacheRecord, cacheHit: false, persisted: persisted);
-      _recentMemory[identity.key] = saved;
+      if (identical(_recent?.value, cacheRecord)) _recent = (key: identity.key, value: saved);
       return _copyWithCacheState(transcript, cacheHit: false, persisted: persisted);
     } on Object {
       return _copyWithCacheState(transcript, cacheHit: false, persisted: false);
@@ -391,7 +380,10 @@ abstract final class SubtitleSourceTranscriptCacheService {
     ]);
     return SubtitleCachedSourceTranscript(
       cues: cues,
-      wordTimings: SubtitleWordTimingBuilder.attachCueReferences(result.wordTimings, cues),
+      wordTimings: List.unmodifiable([
+        for (final word in SubtitleWordTimingBuilder.attachCueReferences(result.wordTimings, result.cues))
+          if (word.cueIndex case final index?) word.withCueReference(cues[index - 1].id, index) else word,
+      ]),
       durationMs: result.durationMs,
       requestedProvider: result.requestedProvider,
       runtimeProvider: result.runtimeProvider,
@@ -603,7 +595,8 @@ abstract final class SubtitleSourceTranscriptCacheService {
         throw const FormatException('Source transcript contains an invalid cue.');
       }
     }
-    if (cues.map((cue) => cue.id).toSet().length != cues.length) {
+    final cueIds = cues.map((cue) => cue.id).toSet();
+    if (cueIds.length != cues.length) {
       throw const FormatException('Source transcript cue identities are invalid or duplicated.');
     }
     for (final timing in wordTimings) {
@@ -614,7 +607,7 @@ abstract final class SubtitleSourceTranscriptCacheService {
           timing.text.isEmpty ||
           timing.text.length > 4096 ||
           (confidence != null && (!confidence.isFinite || confidence < 0 || confidence > 1)) ||
-          (timing.cueId != null && !cues.any((cue) => cue.id == timing.cueId))) {
+          (timing.cueId != null && !cueIds.contains(timing.cueId))) {
         throw const FormatException('Source transcript contains invalid word timing.');
       }
     }
@@ -630,85 +623,6 @@ abstract final class SubtitleSourceTranscriptCacheService {
     final directory = Directory(p.join(root.path, sha256.convert(utf8.encode(profile)).toString()));
     if (createDirectory) await directory.create(recursive: true);
     return File(p.join(directory.path, '$key.json'));
-  }
-
-  static Future<bool> _removePendingEntries(Directory root) async {
-    if (!await root.exists()) return true;
-    var removedAll = true;
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (entity is! File || !entity.path.endsWith('.pending')) continue;
-      try {
-        await entity.delete();
-      } on FileSystemException {
-        removedAll = false;
-      }
-    }
-    return removedAll;
-  }
-
-  static Future<void> _evictProfileEntries(Directory directory) async {
-    if (!await directory.exists()) return;
-    final entries = <File>[];
-    for (final entity in directory.listSync(followLinks: false)) {
-      if (entity is File && entity.path.endsWith('.pending')) {
-        try {
-          await entity.delete();
-        } on FileSystemException {
-          // Keep going; temporary files are ignored by the entry bounds.
-        }
-      } else if (entity is File && entity.path.endsWith('.json')) {
-        entries.add(entity);
-      }
-    }
-    entries.sort((left, right) => left.lastModifiedSync().compareTo(right.lastModifiedSync()));
-    var totalBytes = entries.fold<int>(0, (total, file) => total + file.lengthSync());
-    while (entries.length > maximumEntriesPerProfile || totalBytes > maximumBytesPerProfile) {
-      final oldest = entries.removeAt(0);
-      totalBytes -= oldest.lengthSync();
-      try {
-        await oldest.delete();
-      } on FileSystemException {
-        // The store remains bounded on the next successful write.
-      }
-    }
-  }
-
-  static Future<void> _evictGlobalEntries(Directory root) async {
-    if (!await root.exists()) return;
-    final entries = <File>[];
-    final emptyDirectories = <Directory>[];
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (entity is File && entity.path.endsWith('.json')) {
-        entries.add(entity);
-      } else if (entity is File && entity.path.endsWith('.pending')) {
-        try {
-          await entity.delete();
-        } on FileSystemException {
-          // Ignore abandoned temporary files; they do not count as entries.
-        }
-      }
-    }
-    await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (entity is Directory && entity.listSync(followLinks: false).isEmpty) emptyDirectories.add(entity);
-    }
-    entries.sort((left, right) => left.lastModifiedSync().compareTo(right.lastModifiedSync()));
-    var totalBytes = entries.fold<int>(0, (total, file) => total + file.lengthSync());
-    while (entries.length > maximumTotalEntries || totalBytes > maximumTotalBytes) {
-      final oldest = entries.removeAt(0);
-      totalBytes -= oldest.lengthSync();
-      try {
-        await oldest.delete();
-      } on FileSystemException {
-        // The store remains bounded on the next successful write.
-      }
-    }
-    for (final directory in emptyDirectories.reversed) {
-      try {
-        if (directory.existsSync() && directory.listSync(followLinks: false).isEmpty) await directory.delete();
-      } on FileSystemException {
-        // Directory cleanup is best-effort after entry eviction.
-      }
-    }
   }
 
   static Future<void> _exclusive(Future<void> Function() action) async {

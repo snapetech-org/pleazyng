@@ -57,3 +57,14 @@ test('callback from retired account and disposed controller is ignored',async()=
   const f=fixture();const old=f.setting; f.controller.dispose(); old(bytes(false));
   assert.equal((await f.controller.execute(read,async()=>true,()=>true)).status,'unavailable');
 });
+test('a setting that changes back before acknowledgement is not confirmed', async () => {
+  const f = fixture();
+  f.steam.Settings.SetSetting = async () => {
+    f.setting(bytes(false));
+    f.setting(bytes(true));
+    return true;
+  };
+  try {
+    assert.equal((await f.controller.execute(disable, async () => true, () => true)).status, 'unknown');
+  } finally { f.controller.dispose(); }
+});

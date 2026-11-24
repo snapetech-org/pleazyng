@@ -83,6 +83,61 @@ class JobsTest(unittest.TestCase):
         self.assertFalse((self.jobs.assets / self.asset).exists())
 
 
+    def test_removed_canceled_id_can_prepare_again(self):
+        with patch.object(self.jobs, "capabilities", return_value={"capabilities": {"waveform": True}}), \
+                patch.object(self.jobs.pool, "submit"):
+            self.jobs.submit(self.request())
+            self.jobs.cancel("request_0001")
+            self.jobs.remove("request_0001")
+            (self.jobs.assets / self.asset).write_bytes(b"backing")
+            self.jobs.submit(self.request())
+        with patch("server.subprocess.Popen", side_effect=OSError("fixture worker")) as start:
+            self.jobs._dispatch()
+        start.assert_called_once()
+        self.assertEqual("failed", self.jobs.states["request_0001"]["status"])
+
+    def test_state_write_failure_releases_dispatcher_and_next_job_runs(self):
+        from server import atomic_json
+        def write(path, state):
+            if state.get("id") == "request_0002" and state.get("status") == "running":
+                raise OSError("fixture state write failed")
+            atomic_json(path, state)
+        with patch.object(self.jobs, "capabilities", return_value={"capabilities": {"waveform": True}}), \
+                patch.object(self.jobs.pool, "submit"):
+            self.jobs.submit(self.request())
+            self.jobs.submit(self.request(id="request_0002", priority=90))
+        with patch("server.atomic_json", side_effect=write), patch("server.subprocess.Popen", side_effect=OSError("fixture worker")) as start:
+            self.jobs._dispatch()
+        self.assertEqual(start.call_count, 1)
+        self.assertFalse(self.jobs.dispatcher_running)
+        self.assertIsNone(self.jobs.current_job_id)
+        self.assertEqual("failed", self.jobs.states["request_0002"]["status"])
+
+    def test_cancel_while_starting_keeps_work_directory_until_dispatcher_retires(self):
+        with patch.object(self.jobs, "capabilities", return_value={"capabilities": {"waveform": True}}), patch.object(self.jobs.pool, "submit"):
+            self.jobs.submit(self.request())
+        def starting(*args, **kwargs):
+            self.jobs.cancel("request_0001")
+            with self.assertRaises(ValueError):
+                self.jobs.remove("request_0001")
+            raise OSError("fixture worker")
+        with patch("server.subprocess.Popen", side_effect=starting):
+            self.jobs._dispatch()
+        self.assertEqual("removed", self.jobs.remove("request_0001")["status"])
+
+    def test_one_damaged_snapshot_does_not_block_recovery_of_other_jobs(self):
+        with patch.object(self.jobs, "capabilities", return_value={"capabilities": {"waveform": True}}), patch.object(self.jobs.pool, "submit"):
+            self.jobs.submit(self.request())
+        damaged = self.jobs.jobs / "damaged_01"
+        damaged.mkdir()
+        (damaged / "state.json").write_text("[]")
+        restored = Jobs(Path(self.tmp.name), None, None, None, 30)
+        self.addCleanup(restored.shutdown)
+        self.assertEqual("interrupted", restored.states["request_0001"]["status"])
+        self.assertNotIn("damaged_01", restored.states)
+        self.assertEqual("[]", (damaged / "state.json").read_text())
+
+
 class TransportTest(unittest.TestCase):
     def test_drip_fed_headers_have_an_absolute_deadline(self):
         server = Server(('127.0.0.1', 0), Handler)
