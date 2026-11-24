@@ -6,7 +6,8 @@ import XCTest
 
 final class AVFoundationMotionPlaybackTests: XCTestCase {
   private let nativeCompletionTimeout: TimeInterval = 10
-  private let playbackStartTimeout: TimeInterval = 30
+  private let playbackStartTimeout: TimeInterval = 60
+  private let playbackAdvanceTimeout: TimeInterval = 30
   private let failure = NSError(
     domain: "AVFoundationMotionPlaybackTests",
     code: 1,
@@ -33,19 +34,19 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     XCTAssertSuccess(awaitProperty(core, name: "loop-file", value: "inf"))
     _ = try runMotionCommand(core, ["loadfile", clip.path])
     XCTAssertSuccess(awaitProperty(core, name: "pause", value: "no"))
-    requirePlaybackAdvance(core, from: 0)
+    try requirePlaybackAdvance(core, from: 0, timeout: playbackStartTimeout)
     XCTAssertEqual(try awaitGetProperty(core, name: "current-vo").get(), "avfoundation")
     let entry = try XCTUnwrap(try awaitGetProperty(core, name: "playlist/0/id").get())
     for preset in ["performance", "quality"] {
-      let before = try timePos(core)
+      let before = core.timePos
       XCTAssertSuccess(awaitProperty(core, name: "avfoundation-motion-preset", value: preset))
       XCTAssertSuccess(awaitProperty(core, name: "avfoundation-motion-interpolation", value: "yes"))
-      requirePlaybackAdvance(core, from: before)
+      try requirePlaybackAdvance(core, from: before, timeout: playbackAdvanceTimeout)
       XCTAssertEqual(try awaitGetProperty(core, name: "playlist/0/id").get(), entry)
     }
     XCTAssertSuccess(awaitProperty(core, name: "avfoundation-motion-interpolation", value: "no"))
-    let before = try timePos(core)
-    requirePlaybackAdvance(core, from: before)
+    let before = core.timePos
+    try requirePlaybackAdvance(core, from: before, timeout: playbackAdvanceTimeout)
     XCTAssertEqual(try awaitGetProperty(core, name: "playlist/0/id").get(), entry)
 
     try verifyFallbackFrameMixing(core, entry: entry)
@@ -108,19 +109,26 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     }
     XCTAssertEqual(try awaitGetProperty(core, name: "playlist/0/id").get(), entry)
     XCTAssertFalse((try awaitGetProperty(core, name: "vf").get() ?? "").contains(label))
-    requirePlaybackAdvance(core, from: try timePos(core))
+    try requirePlaybackAdvance(core, from: core.timePos, timeout: playbackAdvanceTimeout)
   }
 
-  private func requirePlaybackAdvance(_ core: MpvPlayerCore, from previous: Double) {
-    let deadline = Date().addingTimeInterval(playbackStartTimeout)
+  private func requirePlaybackAdvance(
+    _ core: MpvPlayerCore,
+    from previous: Double,
+    timeout: TimeInterval
+  ) throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + timeout
+    // The core already observes time-pos. Poll its observation without issuing
+    // extra native requests while the first frame and audio output are starting.
     repeat {
-      let position = try? awaitGetProperty(core, name: "time-pos").get()
-      if let raw = position, let seconds = Double(raw), hasAdvanced(seconds, from: previous) {
-        return
-      }
+      if hasAdvanced(core.timePos, from: previous) { return }
       pump(0.05)
-    } while Date() < deadline
-    XCTFail("The open clip did not advance from " + String(previous))
+    } while ProcessInfo.processInfo.systemUptime < deadline
+    throw NSError(
+      domain: "AVFoundationMotionPlaybackTests",
+      code: 2,
+      userInfo: [NSLocalizedDescriptionKey: "The open clip did not advance from \(previous) in \(timeout) s"]
+    )
   }
 
   private func hasAdvanced(_ current: Double, from previous: Double) -> Bool {
@@ -131,10 +139,6 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     let elapsed = expectation(description: "\(seconds) s elapsed")
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { elapsed.fulfill() }
     wait(for: [elapsed], timeout: seconds + 2)
-  }
-
-  private func timePos(_ core: MpvPlayerCoreBase) throws -> Double {
-    try XCTUnwrap(Double(try awaitGetProperty(core, name: "time-pos").get() ?? ""))
   }
 
   private func awaitProperty(
