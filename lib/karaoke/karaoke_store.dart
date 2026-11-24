@@ -4,13 +4,18 @@ import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../utils/serial_future_queue.dart';
+import 'karaoke_snapshot.dart';
+
 /// Profile isolation and serialized, recoverable snapshots. No provider tokens.
 class KaraokeStore {
   KaraokeStore(this.profileId);
   final String profileId;
-  Future<Directory>? _directory;
-  Future<void> _writes = Future.value();
-  Future<Directory> get directory => _directory ??= _open();
+  Directory? _directory;
+  static final _writes = SerialFutureQueue();
+
+  Future<Directory> get directory async => _directory ??= await _open();
+
   Future<Directory> _open() async {
     final root = await getApplicationSupportDirectory();
     final key = sha256.convert(utf8.encode(profileId)).toString();
@@ -21,49 +26,20 @@ class KaraokeStore {
     _validateName(name);
     final dir = await directory;
     for (final suffix in ['', '.previous']) {
-      final file = File(p.join(dir.path, '$name.json$suffix'));
-      if (!await file.exists()) {
-        continue;
-      }
-      try {
-        if (await file.length() > 32 * 1024 * 1024) {
-          continue;
-        }
-        final value = jsonDecode(await file.readAsString());
-        if (value is Map<String, dynamic>) {
-          return value;
-        }
-      } on FormatException {
-        continue;
-      } on FileSystemException {
-        continue;
-      }
+      final data = await readKaraokeSnapshot(File(p.join(dir.path, '$name.json$suffix')));
+      if (data != null) return data;
     }
     return null;
   }
 
   Future<void> write(String name, Map<String, dynamic> value) {
     _validateName(name);
-    final encoded = jsonEncode(value);
-    if (utf8.encode(encoded).length > 32 * 1024 * 1024) {
-      throw const FormatException('Karaoke state limit exceeded');
-    }
-    final result = _writes.then((_) async {
+    final bytes = utf8.encode(jsonEncode(value));
+    if (bytes.length > karaokeSnapshotLimit) throw const FormatException('Karaoke state limit exceeded');
+    return _writes.run(() async {
       final dir = await directory;
-      final file = File(p.join(dir.path, '$name.json'));
-      final temp = File('${file.path}.pending');
-      final backup = File('${file.path}.previous');
-      await temp.writeAsString(encoded, flush: true);
-      if (await file.exists()) {
-        if (await backup.exists()) {
-          await backup.delete();
-        }
-        await file.rename(backup.path);
-      }
-      await temp.rename(file.path);
+      await writeKaraokeSnapshot(File(p.join(dir.path, '$name.json')), bytes);
     });
-    _writes = result.catchError((Object _) {});
-    return result;
   }
 
   static void _validateName(String name) {

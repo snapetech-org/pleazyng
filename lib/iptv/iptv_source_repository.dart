@@ -17,6 +17,7 @@ import '../sources/source_models.dart';
 import '../sources/source_transport.dart';
 import '../sources/universal_media_input.dart';
 import 'iptv_guide_merge.dart';
+import 'iptv_synced_vod_progress.dart';
 import 'iptv_backup_match.dart';
 import 'iptv_lineup_export.dart';
 import 'iptv_series_rules.dart';
@@ -1086,7 +1087,7 @@ class IptvSourceRepository {
           '''
       SELECT p.source_id, p.kind, p.item_id, p.episode_id, p.position_ms, p.duration_ms, p.updated_at, p.finished
       FROM iptv_vod_progress p JOIN iptv_sources s ON s.id=p.source_id
-      WHERE s.profile_id=? ORDER BY p.updated_at DESC LIMIT 1000
+      WHERE s.profile_id=? ORDER BY p.updated_at DESC, p.source_id, p.kind, p.item_id, p.episode_id LIMIT $maxSyncedVodRows
     ''',
           variables: [Variable(profileId)],
         )
@@ -1094,8 +1095,8 @@ class IptvSourceRepository {
     final fingerprints = <String, String>{};
     for (final sourceId in rows.map((row) => row.read<String>('source_id')).toSet()) {
       final config = await configuration(profileId, sourceId);
-      if (config != null) {
-        fingerprints[sourceId] = _progressSourceFingerprint(config);
+      if (config != null && config.supportsXtreamCatalog) {
+        fingerprints[sourceId] = vodProgressSourceFingerprint(config);
       }
     }
     return [
@@ -1116,84 +1117,50 @@ class IptvSourceRepository {
 
   /// Merge remote progress by timestamp. A more recent local or remote update
   /// wins; provider IDs remain scoped by a matching per-device source.
-  Future<void> mergeVodProgressFromSync(String profileId, List<dynamic> remoteRows) async {
-    final fingerprints = <String, String>{};
+  Future<void> mergeVodProgressFromSync(
+    String profileId,
+    List<SyncedVodProgress> rows, {
+    required bool Function() isCurrent,
+  }) async {
+    final fingerprints = <String, List<String>>{};
     for (final source in await sources(profileId)) {
+      if (!source.kind.supportsXtreamVod) continue;
       final config = await configuration(profileId, source.id);
-      if (config != null) {
-        fingerprints.putIfAbsent(_progressSourceFingerprint(config), () => source.id);
+      if (config != null && config.supportsXtreamCatalog) {
+        (fingerprints[vodProgressSourceFingerprint(config)] ??= []).add(source.id);
       }
     }
-    for (final raw in remoteRows.take(1000)) {
-      if (raw is! Map) {
-        continue;
+    if (!isCurrent()) return;
+    await _database.transaction(() async {
+      for (final row in rows) {
+        for (final id in fingerprints[row.key.source] ?? const <String>[]) {
+          await _database.customStatement(
+            '''
+            INSERT INTO iptv_vod_progress(source_id, kind, item_id, episode_id, position_ms, duration_ms, updated_at, finished)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, kind, item_id, episode_id) DO UPDATE SET
+              position_ms=excluded.position_ms, duration_ms=excluded.duration_ms,
+              updated_at=excluded.updated_at, finished=excluded.finished
+            WHERE excluded.updated_at > iptv_vod_progress.updated_at
+               OR (excluded.updated_at = iptv_vod_progress.updated_at AND
+                 (excluded.position_ms != iptv_vod_progress.position_ms OR
+                  excluded.duration_ms != iptv_vod_progress.duration_ms OR excluded.finished != iptv_vod_progress.finished))
+            ''',
+            [
+              id,
+              row.key.kind,
+              row.key.item,
+              row.key.episode,
+              row.position,
+              row.duration,
+              row.updated,
+              row.finished ? 1 : 0,
+            ],
+          );
+        }
+        if (!isCurrent()) throw StateError('IPTV progress sync cancelled');
       }
-      final row = Map<String, dynamic>.from(raw);
-      final fingerprint = row['source'];
-      final kind = row['kind'];
-      final item = row['item'];
-      final episode = row['episode'];
-      final position = row['position'];
-      final duration = row['duration'];
-      final updated = row['updated'];
-      final finished = row['finished'];
-      if (fingerprint is! String ||
-          fingerprint.length != 64 ||
-          kind is! String ||
-          !const {'movie', 'series'}.contains(kind) ||
-          item is! String ||
-          item.isEmpty ||
-          item.length > 180 ||
-          episode is! String ||
-          episode.length > 180 ||
-          position is! int ||
-          position < 0 ||
-          duration is! int ||
-          duration < 0 ||
-          updated is! int ||
-          updated < 0 ||
-          finished is! bool) {
-        continue;
-      }
-      final sourceId = fingerprints[fingerprint];
-      if (sourceId == null) {
-        continue;
-      }
-      await _database.customStatement(
-        '''
-        INSERT INTO iptv_vod_progress(source_id, kind, item_id, episode_id, position_ms, duration_ms, updated_at, finished)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id, kind, item_id, episode_id) DO UPDATE SET
-          position_ms=excluded.position_ms, duration_ms=excluded.duration_ms,
-          updated_at=excluded.updated_at, finished=excluded.finished
-        WHERE excluded.updated_at > iptv_vod_progress.updated_at
-      ''',
-        [
-          sourceId,
-          kind,
-          item,
-          episode,
-          position.clamp(0, 14 * 24 * 60 * 60 * 1000).toInt(),
-          duration.clamp(0, 14 * 24 * 60 * 60 * 1000).toInt(),
-          updated,
-          finished ? 1 : 0,
-        ],
-      );
-    }
-  }
-
-  String _progressSourceFingerprint(IptvSourceConfiguration config) {
-    final endpoint = Uri.tryParse(config.endpoint);
-    final canonicalEndpoint = endpoint == null
-        ? config.endpoint.trim()
-        : endpoint.replace(query: '', fragment: '').toString().toLowerCase();
-    final identity = [
-      config.kind.name,
-      config.displayName.trim().toLowerCase(),
-      canonicalEndpoint,
-      config.username.trim().toLowerCase(),
-    ].join('\n');
-    return sha256.convert(utf8.encode(identity)).toString();
+    });
   }
 
   IptvVodProgress _vodProgressFromRow(QueryRow row) => IptvVodProgress(

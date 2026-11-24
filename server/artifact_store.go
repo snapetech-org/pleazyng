@@ -166,6 +166,53 @@ type artifactStore struct {
 func (as *artifactStore) filePath(filename string) string {
 	return filepath.Join(as.dir, filename)
 }
+
+// Readers verify the indexed size on the open handle. Keep path resolution
+// inside the configured store even if a directory changes during the lookup.
+func (as *artifactStore) openEntry(entry artifactEntry) (*os.File, error) {
+	root, err := os.OpenRoot(as.dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	original, err := root.Lstat(entry.Filename)
+	if err != nil {
+		return nil, err
+	}
+	if !original.Mode().IsRegular() || original.Size() != entry.Size {
+		return nil, fs.ErrInvalid
+	}
+	f, err := root.Open(entry.Filename)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(original, opened) || opened.Size() != entry.Size {
+		f.Close()
+		return nil, fs.ErrInvalid
+	}
+	return f, nil
+}
+
+// A collision can be retried. A filesystem failure applies to the store and
+// must release the upload lock so the caller can retry after recovery.
+func (as *artifactStore) availableIDLocked(ext string) (string, error) {
+	for range 32 {
+		id := as.generateID()
+		if _, exists := as.entries[id]; exists {
+			continue
+		}
+		_, err := os.Lstat(as.filePath(id + ext))
+		if errors.Is(err, fs.ErrNotExist) {
+			return id, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", errors.New("unable to allocate artifact ID")
+}
+
 func (as *artifactStore) accountedLocked() int64 {
 	return as.used + as.pendingDebt
 }
@@ -237,6 +284,10 @@ func (as *artifactStore) put(owner string, data []byte, ext, contentType string,
 	// Removal failures stay accounted as debt instead of blocking the write.
 	_ = as.retryPendingLocked(as.retryKnownDebtOnPut)
 	_ = as.cleanupExpiredLocked(now)
+	id, err := as.availableIDLocked(ext)
+	if err != nil {
+		return "", artifactEntry{}, err
+	}
 	if owner != "" && as.ownerLimit > 0 {
 		switch {
 		case cost > as.ownerLimit:
@@ -260,25 +311,9 @@ func (as *artifactStore) put(owner string, data []byte, ext, contentType string,
 		return "", artifactEntry{}, as.errFull
 	}
 
-	id := as.generateID()
-	for {
-		if _, exists := as.entries[id]; !exists {
-			if _, err := os.Stat(as.filePath(id + ext)); errors.Is(err, fs.ErrNotExist) {
-				break
-			}
-		}
-		id = as.generateID()
-	}
-
 	filename := id + ext
 	path := as.filePath(filename)
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		as.cleanupFailedTempLocked(tmpPath)
-		return "", artifactEntry{}, err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		as.cleanupFailedTempLocked(tmpPath)
+	if err := as.publishFileLocked(path, data); err != nil {
 		return "", artifactEntry{}, err
 	}
 	_ = os.Chtimes(path, now, now)
@@ -439,6 +474,24 @@ func (as *artifactStore) retryPendingLocked(knownDebtOnly bool) error {
 		as.dropPendingLocked(filename)
 	}
 	return removalErr
+}
+
+// Stage in a newly created owner-only file. Cleanup debt belongs only to a
+// temporary file this upload actually created.
+func (as *artifactStore) publishFileLocked(path string, data []byte) error {
+	f, err := os.CreateTemp(as.dir, ".upload-*.tmp")
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(data)
+	err = errors.Join(writeErr, f.Close())
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	if err != nil {
+		as.cleanupFailedTempLocked(f.Name())
+	}
+	return err
 }
 
 func (as *artifactStore) cleanupFailedTempLocked(tmpPath string) {

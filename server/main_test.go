@@ -8624,19 +8624,24 @@ func TestLogStoreErrNotExistCommitsDeletionOnce(t *testing.T) {
 
 func TestLogStoreTracksFailedTempCleanup(t *testing.T) {
 	dir := t.TempDir()
-	remover := newDeterministicRemover()
-	ls := newLogStoreWithRemover(dir, remover.remove)
-	logID := strings.Repeat("a", logIDLength)
-	ls.generateID = func() string { return logID }
-	tmpPath := ls.filePath(logID) + ".tmp"
-	if err := os.Mkdir(tmpPath, 0755); err != nil {
-		t.Fatalf("seed temp directory: %v", err)
+	var tmpPath string
+	failCleanup := true
+	ls := newLogStoreWithRemover(dir, func(path string) error {
+		if failCleanup && strings.HasSuffix(path, ".tmp") {
+			tmpPath = path
+			return errors.New("synthetic temp removal failure")
+		}
+		return os.Remove(path)
+	})
+	occupied := filepath.Join(dir, "occupied")
+	if err := os.Mkdir(occupied, 0700); err != nil {
+		t.Fatal(err)
 	}
-	cleanupErr := errors.New("synthetic temp removal failure")
-	remover.fail(tmpPath, cleanupErr)
-
-	if _, _, err := ls.store("", []byte("payload"), time.Now()); err == nil {
-		t.Fatal("store succeeded despite temp write failure")
+	ls.mu.Lock()
+	err := ls.publishFileLocked(occupied, []byte("payload"))
+	ls.mu.Unlock()
+	if err == nil || tmpPath == "" {
+		t.Fatal("expected failed publication and temporary file cleanup")
 	}
 	ls.mu.RLock()
 	_, pending := ls.pendingRemovals[filepath.Base(tmpPath)]
@@ -8646,7 +8651,7 @@ func TestLogStoreTracksFailedTempCleanup(t *testing.T) {
 		t.Fatalf("temp cleanup not tracked: pending=%v artifacts=%d", pending, artifacts)
 	}
 
-	remover.recover(tmpPath)
+	failCleanup = false
 	if err := ls.cleanup(time.Now()); err != nil {
 		t.Fatalf("retry temp cleanup: %v", err)
 	}

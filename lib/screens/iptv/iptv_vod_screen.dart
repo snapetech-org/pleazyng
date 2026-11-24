@@ -450,27 +450,27 @@ class _IptvVodDetailsScreenState extends State<IptvVodDetailsScreen> {
   Future<void> _play(String id, String extension, String title, int? durationSeconds, {required bool series}) async {
     if (_playing) return;
     setState(() => _playing = true);
+    final profileId = widget.profileId, item = widget.item;
     try {
       final repository = context.read<IptvSourceRepository>();
       await IptvVodProgressSyncService.instance.syncActiveProfile(
         context,
-        profileId: widget.profileId,
+        profileId: profileId,
         repository: repository,
       );
       if (!mounted) return;
       final uri = await repository.vodPlaybackUri(
-        widget.profileId,
-        widget.item.sourceId,
+        profileId,
+        item.sourceId,
         itemId: id,
         extension: extension,
         series: series,
       );
       final ext = extension.toLowerCase();
-      final fileId = 'iptv-vod:${widget.item.sourceId}:$id';
-      final fileName = '$title.$ext';
+      final fileId = 'iptv-vod:${item.sourceId}:$id';
       final file = PublicationFile(
         id: fileId,
-        name: fileName,
+        name: '$title.$ext',
         mimeType: switch (ext) {
           'ts' => 'video/mp2t',
           'mkv' => 'video/x-matroska',
@@ -480,25 +480,25 @@ class _IptvVodDetailsScreenState extends State<IptvVodDetailsScreen> {
         streamOnly: true,
       );
       final entry = SourceEntry(
-        sourceId: 'iptv-vod:${widget.item.sourceId}',
-        id: '${widget.item.kind.name}:${widget.item.id}:$id',
+        sourceId: 'iptv-vod:${item.sourceId}',
+        id: '${item.kind.name}:${item.id}:$id',
         title: title,
         kind: SourceItemKind.video,
-        releaseYear: widget.item.year,
-        description: widget.item.plot ?? '',
+        releaseYear: item.year,
+        description: item.plot ?? '',
         files: [file],
       );
       final episodeId = series ? id : '';
       final savedProgress = await repository.vodProgress(
-        widget.profileId,
-        widget.item.sourceId,
-        kind: widget.item.kind,
-        itemId: widget.item.id,
+        profileId,
+        item.sourceId,
+        kind: item.kind,
+        itemId: item.id,
         episodeId: episodeId,
       );
       final durationMs = durationSeconds == null ? 0 : durationSeconds * 1000;
       final resumePositionMs = savedProgress == null || savedProgress.finished ? 0 : savedProgress.positionMs;
-      if (!mounted || context.read<ActiveProfileProvider>().activeId != widget.profileId) return;
+      if (!mounted || context.read<ActiveProfileProvider>().activeId != profileId) return;
       await context.read<SourcePlayback>().start(
         entry,
         [file],
@@ -507,30 +507,30 @@ class _IptvVodDetailsScreenState extends State<IptvVodDetailsScreen> {
         persistProgress: false,
         initialPositionMs: resumePositionMs,
         onTransientProgress: (progress) => repository.saveVodProgress(
-          widget.profileId,
-          sourceId: widget.item.sourceId,
-          kind: widget.item.kind,
-          itemId: widget.item.id,
+          profileId,
+          sourceId: item.sourceId,
+          kind: item.kind,
+          itemId: item.id,
           episodeId: episodeId,
           positionMs: progress.positionMs,
           durationMs: durationMs,
           finished: progress.finished,
         ),
       );
-      if (!mounted) return;
+      if (!mounted || context.read<ActiveProfileProvider>().activeId != profileId) return;
       await Navigator.push<void>(context, MaterialPageRoute(builder: (_) => const SourcePlayerScreen()));
       if (mounted) {
         await IptvVodProgressSyncService.instance.syncActiveProfile(
           context,
-          profileId: widget.profileId,
+          profileId: profileId,
           repository: repository,
         );
       }
-      if (mounted) setState(() => _playing = false);
     } on Object {
       if (!mounted) return;
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(content: Text(t.iptv.vodPlaybackFailed)));
-      setState(() => _playing = false);
+    } finally {
+      if (mounted) setState(() => _playing = false);
     }
   }
 

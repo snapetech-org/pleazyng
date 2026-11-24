@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- Keep IPTV watch positions separate for same-named profiles. Plex Home users sync across devices after a rename. The new settings start from each device’s saved positions because older cloud entries identify profiles only by display name.
+- Preserve progress for IPTV providers configured on another device, keep overlapping sync requests, and stop pending syncs when the profile changes or sharing turns off.
+- Preserve Home layout preferences added by newer clients and pause uploads when the account uses an unsupported layout version.
+- Keep the last readable karaoke session backup after recovery and serialize saves from overlapping sessions.
+
+- Make relay log and poster uploads recover from storage lookup failures. Publish uploads from private temporary files, verify file type and size on download, and apply the poster upload size limit when restoring the cache.
+
 - Use Ubuntu’s patched libssh libraries in the Linux Snap and check both runtime copies before Store publication. [USN-9187-1](https://ubuntu.com/security/notices/USN-9187-1)
 
 - Update release packaging to version 3.0.51 on all supported platforms.

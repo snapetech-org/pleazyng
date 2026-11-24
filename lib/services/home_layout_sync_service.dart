@@ -11,6 +11,8 @@ import 'base_shared_preferences_service.dart';
 import 'plex_auth_service.dart';
 import 'settings_service.dart';
 
+part 'home_layout_synced_pref.dart';
+
 /// Keeps the Home layout (row order, which rows show, Hero and Auto-slide per
 /// row, per-library row order) the same on every Plezy signed in to the same
 /// Plex account.
@@ -106,6 +108,7 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
   String? _owner;
   int _generation = 0;
   bool _initialized = false;
+  Map<String, Object?> _unknownPrefs = const {};
   final _operations = SerialFutureQueue();
   bool _current(int generation) => generation == _generation && _owner != null && enabled;
 
@@ -178,6 +181,7 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
     _initialized = false;
     _owner = owner;
     _token = owner == null ? null : token;
+    _unknownPrefs = const {};
     _lastPull = null;
     _pushTimer?.cancel();
     _pushTimer = null;
@@ -376,11 +380,12 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
       if (!_current(generation)) return;
       final entries = await auth.getUserSettings(token);
       if (!_current(generation)) return;
-      final entry = entries.firstWhere((e) => e['id'] == settingId, orElse: () => const {});
+      final entry = entries.singleWhere((e) => e['id'] == settingId, orElse: () => const {});
       final raw = entry['value'];
       final local = _snapshot(settings);
       final dirty = state.snapshot.isNotEmpty && changedSinceSnapshot(state.snapshot, local);
-      if (raw == null || raw == '') {
+      if (entry.isEmpty) {
+        _unknownPrefs = const {};
         _initialized = true;
         if (_prefs.any((p) => !p.isDefault(settings))) {
           await _push(generation, force: true, modifiedAt: dirty || state.appliedAt == 0 ? null : state.appliedAt);
@@ -390,8 +395,15 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
         return;
       }
       final remote = jsonDecode(raw as String) as Map<String, dynamic>;
-      final stamp = (remote['modifiedAt'] as num).toInt();
+      if (remote.containsKey('v') && remote['v'] != 1) throw const FormatException('Unsupported home layout version');
+      final stamp = remote['modifiedAt'] as int;
+      if (stamp < 0) throw const FormatException('Invalid home layout timestamp');
       final prefs = Map<String, Object?>.from(remote['prefs'] as Map);
+      for (final synced in _prefs) {
+        final key = synced.pref.key;
+        if (prefs.containsKey(key)) prefs[key] = synced.normalize(prefs[key]);
+      }
+      _unknownPrefs = Map.of(prefs)..removeWhere((key, _) => local.containsKey(key));
       if (_pushTimer != null) return;
       if (state.snapshot.isNotEmpty && (dirty || stamp <= state.appliedAt)) {
         _initialized = true;
@@ -417,6 +429,7 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
       _trace('applied $stamp', statusText: 'Got the latest layout from your Plex account');
     } catch (e) {
       if (!_current(generation)) return;
+      _initialized = false;
       appLogger.w('HomeLayoutSync: pull failed', error: e);
       _trace('pull failed: $e', statusText: 'Sync failed ($e)');
     }
@@ -440,7 +453,15 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
       final stamp = modifiedAt ?? DateTime.now().millisecondsSinceEpoch;
       final auth = await _authService();
       if (!_current(generation)) return;
-      await auth.putUserSetting(token, settingId, jsonEncode({'v': 1, 'modifiedAt': stamp, 'prefs': snapshot}));
+      await auth.putUserSetting(
+        token,
+        settingId,
+        jsonEncode({
+          'v': 1,
+          'modifiedAt': stamp,
+          'prefs': {..._unknownPrefs, ...snapshot},
+        }),
+      );
       if (!_current(generation)) return;
       await _writeState(settings, owner, stamp, encoded);
       if (_current(generation)) _trace('pushed $stamp', statusText: 'Saved your layout to your Plex account');
@@ -450,35 +471,4 @@ class HomeLayoutSyncService with WidgetsBindingObserver {
       _trace('push failed: $e', statusText: 'Sync failed ($e)');
     }
   }
-}
-
-/// One synced pref with its JSON round trip.
-class _SyncedPref<T> {
-  _SyncedPref._(this.pref, this._toJson, this._fromJson, this._defaultJson);
-
-  // Non-generic return type on purpose: a `_SyncedPref<V>` return lets the
-  // list's `_SyncedPref<dynamic>` context infer V = dynamic, which erases the
-  // pref's real type and fails the runtime check on `JsonPref.encode`.
-  static _SyncedPref<dynamic> json<V>(JsonPref<V> pref) => _SyncedPref<V>._(
-    pref,
-    (v) => jsonDecode(pref.encode(v)),
-    (raw) => pref.decode(raw),
-    jsonDecode(pref.encode(pref.defaultValue)),
-  );
-
-  static _SyncedPref<dynamic> boolean(BoolPref pref) =>
-      _SyncedPref<bool>._(pref, (v) => v, (raw) => raw as bool? ?? pref.defaultValue, pref.defaultValue);
-
-  final Pref<T> pref;
-  final Object? Function(T) _toJson;
-  final T Function(Object?) _fromJson;
-  final Object? _defaultJson;
-
-  Object? encode(BaseSharedPreferencesService settings) => _toJson(settings.read(pref));
-
-  Object? normalize(Object? raw) => _toJson(_fromJson(raw));
-
-  bool isDefault(BaseSharedPreferencesService settings) => jsonEncode(encode(settings)) == jsonEncode(_defaultJson);
-
-  Future<void> apply(BaseSharedPreferencesService settings, Object? raw) => settings.write(pref, _fromJson(raw));
 }

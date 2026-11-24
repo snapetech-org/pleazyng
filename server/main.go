@@ -534,7 +534,7 @@ func newLogStore(dir string) *logStore {
 }
 
 func newLogStoreWithRemover(dir string, removeFile func(string) error) *logStore {
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		log.Fatalf("failed to create log dir %s: %v", dir, err)
 	}
 	ls := &logStore{
@@ -697,7 +697,10 @@ func newPosterStoreWithRemover(
 		removeFile:      removeFile,
 		generateID:      generatePosterID,
 		idFromFilename:  posterIDFromFilename,
-		acceptLoaded: func(filename string, _ int64) (string, bool) {
+		acceptLoaded: func(filename string, size int64) (string, bool) {
+			if size <= 0 || size > maxPosterSize {
+				return "", false
+			}
 			return posterContentTypeForExt(filepath.Ext(filename))
 		},
 		limit: maxBytes,
@@ -777,7 +780,7 @@ func (ps *posterStore) store(source string, data []byte, contentType string, now
 	if entrySize <= 0 {
 		return "", artifactEntry{}, errors.New("empty poster")
 	}
-	if entrySize > ps.limit {
+	if entrySize > ps.limit || entrySize > maxPosterSize {
 		return "", artifactEntry{}, errors.New("poster exceeds store size")
 	}
 	ext, ok := posterExtForContentType(contentType)
@@ -1200,27 +1203,31 @@ func (s *Server) logRemovalError(store, operation string, err error) {
 		s.removalErrors.lastLog = make(map[string]time.Time)
 	}
 	s.removalErrors.lastLog[key] = time.Now()
-	category := "other"
-	switch {
-	case errors.Is(err, errArtifactOutsideStore):
-		category = "confinement"
-	case errors.Is(err, fs.ErrPermission):
-		category = "permission"
-	case errors.Is(err, syscall.ENOSPC):
-		category = "capacity"
-	case errors.Is(err, syscall.EROFS):
-		category = "read_only"
-	case errors.Is(err, syscall.EBUSY):
-		category = "busy"
-	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
-		category = "not_empty"
-	}
+	category := artifactErrorCategory(err)
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		log.Printf("%s: %s removal failed: category=%s errno=%d", store, operation, category, errno)
 		return
 	}
 	log.Printf("%s: %s removal failed: category=%s errno=unknown", store, operation, category)
+}
+
+func artifactErrorCategory(err error) string {
+	switch {
+	case errors.Is(err, errArtifactOutsideStore):
+		return "confinement"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission"
+	case errors.Is(err, syscall.ENOSPC):
+		return "capacity"
+	case errors.Is(err, syscall.EROFS):
+		return "read_only"
+	case errors.Is(err, syscall.EBUSY):
+		return "busy"
+	case errors.Is(err, syscall.ENOTEMPTY), errors.Is(err, syscall.EEXIST):
+		return "not_empty"
+	}
+	return "other"
 }
 
 type Server struct {
@@ -1701,7 +1708,7 @@ func (s *Server) handlePostLogs(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &removalErr) {
 			s.logRemovalError("logs", "store", err)
 		} else {
-			log.Printf("logs: failed to store from %s: %v", ip, err)
+			log.Printf("logs: failed to store upload (%s)", artifactErrorCategory(err))
 		}
 		http.Error(w, "Failed to store log", http.StatusInternalServerError)
 		return
@@ -1763,8 +1770,13 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Read the entry's own file: the request may use a look-alike spelling.
-		data, err := os.ReadFile(s.logs.artifactStore.filePath(entry.Filename))
+		f, err := s.logs.openEntry(entry)
 		if err != nil {
+			return lookupResult{status: http.StatusNotFound, message: "Not found"}
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, entry.Size+1))
+		if err != nil || int64(len(data)) != entry.Size {
 			return lookupResult{status: http.StatusNotFound, message: "Not found"}
 		}
 		return lookupResult{entry: entry, data: data}
@@ -1892,7 +1904,7 @@ func (s *Server) handlePostPosters(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &removalErr) {
 			s.logRemovalError("posters", "store", err)
 		} else {
-			log.Printf("posters: failed to store from %s: %v", ip, err)
+			log.Printf("posters: failed to store upload (%s)", artifactErrorCategory(err))
 		}
 		http.Error(w, "Failed to store poster", http.StatusInternalServerError)
 		return
@@ -1943,7 +1955,7 @@ func (s *Server) handleGetPosters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(s.posters.filePath(entry.Filename))
+	f, err := s.posters.openEntry(entry)
 	if err != nil {
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
@@ -1958,7 +1970,7 @@ func (s *Server) handleGetPosters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", entry.ContentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(entry.Size, 10))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	http.ServeContent(w, r, entry.Filename, entry.CreatedAt, f)
+	http.ServeContent(w, r, entry.Filename, entry.CreatedAt, io.NewSectionReader(f, 0, entry.Size))
 }
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if rejectUntrustedBrowserOrigin(w, r) {

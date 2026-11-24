@@ -8,7 +8,7 @@ import 'package:plezy/profiles/active_plex_token.dart';
 import 'package:plezy/profiles/profile.dart';
 import 'package:plezy/profiles/profile_connection.dart';
 import 'package:plezy/profiles/profile_connection_registry.dart';
-import 'package:plezy/services/home_layout_sync_binder.dart';
+import 'package:plezy/profiles/profile_plex_settings_account.dart';
 import 'package:plezy/services/home_layout_sync_service.dart';
 
 import 'package:plezy/services/settings_service.dart';
@@ -34,6 +34,9 @@ class _LocalLinks extends Fake implements ProfileConnectionRegistry {
 class _Accounts implements PlexAuthService {
   final settings = <String, (int, bool)>{'A': (300, false), 'B': (200, true)};
   final writes = <String>[];
+  final extraPrefs = <String, Object?>{};
+  Map<String, dynamic>? lastPayload;
+  int version = 1;
   final readStarted = Completer<void>();
   Completer<void>? delay;
   @override
@@ -47,9 +50,9 @@ class _Accounts implements PlexAuthService {
             {
               'id': HomeLayoutSyncService.settingId,
               'value': jsonEncode({
-                'v': 1,
+                'v': version,
                 'modifiedAt': layout.$1,
-                'prefs': {'show_hero_section': layout.$2},
+                'prefs': {'show_hero_section': layout.$2, ...extraPrefs},
               }),
             },
           ];
@@ -58,6 +61,7 @@ class _Accounts implements PlexAuthService {
   @override
   Future<void> putUserSetting(String token, String id, String value) async {
     final decoded = jsonDecode(value) as Map<String, dynamic>;
+    lastPayload = decoded;
     writes.add(token);
     settings[token] = (decoded['modifiedAt'] as int, decoded['prefs']['show_hero_section'] as bool);
   }
@@ -82,7 +86,7 @@ void main() {
     final other = ProfileConnection(profileId: profile.id, connectionId: alternate.id, userIdentifier: '');
     final links = _LocalLinks([named, other]);
     Future<ActivePlexToken?> resolve() =>
-        resolveHomeLayoutAccount(profile: profile, connections: connections, profileConnections: links);
+        resolveProfilePlexSettingsAccount(profile: profile, connections: connections, profileConnections: links);
 
     expect(await resolve(), isNull);
     links.rows = [named.copyWith(userToken: ''), other];
@@ -112,6 +116,32 @@ void main() {
         await sync.settled;
       });
     });
+    test('a future schema blocks pending writes until a compatible pull succeeds', () async {
+      sync.bind('A', accountId: 'one');
+      await sync.settled;
+      accounts.version = 2;
+      accounts.settings['A'] = (400, true);
+      await sync.pull(force: true);
+      expect(settings.read(SettingsService.showHeroSection), false);
+      await sync.push(force: true);
+      expect(accounts.writes, isEmpty);
+      accounts.version = 1;
+      await sync.pull(force: true);
+      expect(settings.read(SettingsService.showHeroSection), true);
+      await sync.push(force: true);
+      expect(accounts.writes, ['A']);
+    });
+
+    test('a local edit preserves settings from newer clients using the same schema', () async {
+      accounts.extraPrefs['future_row'] = ['kids'];
+      sync.bind('A', accountId: 'one');
+      await sync.settled;
+      await settings.write(SettingsService.showHeroSection, true);
+      await sync.push();
+      expect(accounts.lastPayload!['prefs']['future_row'], ['kids']);
+      expect(accounts.settings['A']!.$2, true);
+    });
+
     test('an older revision belongs to the incoming account and an empty account starts clean', () async {
       sync.bind('A', accountId: 'one');
       await sync.settled;
