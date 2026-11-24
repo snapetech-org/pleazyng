@@ -35,8 +35,18 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     // uses a separate clock and does not populate the core's playback cache.
     core.observeProperty("time-pos", format: "double")
     XCTAssertSuccess(awaitProperty(core, name: "loop-file", value: "inf"))
-    _ = try runMotionCommand(core, ["loadfile", clip.path])
+    #if targetEnvironment(simulator)
+      // The hosted simulator's VideoToolbox and host-audio services have been
+      // unstable during startup. Keep this video-only integration check on the
+      // real AVFoundation output path while decoding in software and omitting
+      // an audio track that the test does not exercise.
+      XCTAssertSuccess(awaitProperty(core, name: "aid", value: "no"))
+      XCTAssertSuccess(awaitProperty(core, name: "hwdec", value: "no"))
+    #endif
+    // Set play intent before loading so the first decoded frame does not race
+    // AVFoundation output startup against a pause-property write.
     XCTAssertSuccess(awaitProperty(core, name: "pause", value: "no"))
+    _ = try runMotionCommand(core, ["loadfile", clip.path])
     try requirePlaybackAdvance(core, from: 0, timeout: playbackStartTimeout)
     XCTAssertEqual(try awaitGetProperty(core, name: "current-vo").get(), "avfoundation")
     let entry = try XCTUnwrap(try awaitGetProperty(core, name: "playlist/0/id").get())
