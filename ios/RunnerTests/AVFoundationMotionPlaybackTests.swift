@@ -31,6 +31,9 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
       window.isHidden = true
     }
     core.setVisible(true)
+    // The app subscribes through the plugin. Its visualization-only observer
+    // uses a separate clock and does not populate the core's playback cache.
+    core.observeProperty("time-pos", format: "double")
     XCTAssertSuccess(awaitProperty(core, name: "loop-file", value: "inf"))
     _ = try runMotionCommand(core, ["loadfile", clip.path])
     XCTAssertSuccess(awaitProperty(core, name: "pause", value: "no"))
@@ -118,8 +121,8 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     timeout: TimeInterval
   ) throws {
     let deadline = ProcessInfo.processInfo.systemUptime + timeout
-    // The core already observes time-pos. Poll its observation without issuing
-    // extra native requests while the first frame and audio output are starting.
+    // Read the subscribed cache without issuing extra native requests while
+    // the first frame and audio output are starting.
     repeat {
       if hasAdvanced(core.timePos, from: previous) { return }
       pump(0.05)
@@ -136,9 +139,7 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
   }
 
   private func pump(_ seconds: TimeInterval) {
-    let elapsed = expectation(description: "\(seconds) s elapsed")
-    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { elapsed.fulfill() }
-    wait(for: [elapsed], timeout: seconds + 2)
+    RunLoop.current.run(until: Date(timeIntervalSinceNow: seconds))
   }
 
   private func awaitProperty(
