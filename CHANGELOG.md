@@ -6,6 +6,7 @@
 - Restore the remote-stream settings reset for unreadable journals, preserve settings another engine already repaired, and let the worker process healthy profiles after a damaged one.
 
 - Let the last IPTV recording write finish before closing the file when Stop is pressed or a recording reaches its deadline.
+- Play 4K Dolby Vision Profile 8.1 titles on players that can use their HDR10 base layer, without requiring a server SDR conversion.
 
 - Preserve playable parts when a stacked download loses a file. Retry fetches the missing parts and marks the item complete once the whole stack is available. Completed downloads show 100% after reopening the app.
 - Refresh orphan-download reviews when download ownership changes, omit files that disappeared or changed while a review was paused, and honor cancellation through the end of the scan.

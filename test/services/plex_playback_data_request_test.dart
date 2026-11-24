@@ -2185,95 +2185,132 @@ void main() {
       await expectLater(client.resolveDownload(item), throwsA(isA<MediaServerHttpException>()));
     });
 
-    test('a DV profile requests a full Plex video encode at Original quality', () async {
-      late Uri decisionUri;
-      final client = makeClient((request) async {
-        if (request.url.path == '/library/metadata/42') {
-          return http.Response(
-            jsonEncode({
-              'MediaContainer': {
-                'Metadata': [
-                  {
-                    'ratingKey': '42',
-                    'type': 'movie',
-                    'Media': [
-                      {
-                        'id': 7,
-                        'container': 'mkv',
-                        'videoCodec': 'hevc',
-                        'width': 3840,
-                        'height': 2160,
-                        'Part': [
-                          {
-                            'id': 99,
-                            'key': '/library/parts/99/dv.mkv',
-                            'Stream': [
-                              {
-                                'streamType': 1,
-                                'codec': 'hevc',
-                                'DOVIPresent': 1,
-                                'DOVIProfile': 7,
-                                'DOVIBLCompatID': 6,
-                              },
-                            ],
-                          },
-                        ],
-                      },
-                    ],
-                  },
-                ],
-              },
-            }),
-            200,
-            headers: {'content-type': 'application/json'},
+    for (final (description, profile, compatibilityId, forceServer, manifestSdr) in [
+      ('P7 requests a full Plex video encode at Original quality', 7, 6, false, true),
+      ('P8.1 plays the original HDR10-compatible source', 8, 1, false, false),
+      ('a required P8.1 server retry still rejects an unverified encode', 8, 1, true, false),
+    ]) {
+      test(description, () async {
+        final decisions = <Uri>[];
+        var manifestRequests = 0;
+        var stopped = false;
+        final client = makeClient((request) async {
+          if (request.url.path == '/library/metadata/42') {
+            return http.Response(
+              jsonEncode({
+                'MediaContainer': {
+                  'Metadata': [
+                    {
+                      'ratingKey': '42',
+                      'type': 'movie',
+                      'Media': [
+                        {
+                          'id': 7,
+                          'container': 'mkv',
+                          'videoCodec': 'hevc',
+                          'width': 3840,
+                          'height': 2160,
+                          'Part': [
+                            {
+                              'id': 99,
+                              'key': '/library/parts/99/dv.mkv',
+                              'Stream': [
+                                {
+                                  'streamType': 1,
+                                  'codec': 'hevc',
+                                  'DOVIPresent': 1,
+                                  'DOVIProfile': profile,
+                                  'DOVIBLCompatID': compatibilityId,
+                                  'DOVIBLPresent': 1,
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }
+          if (request.url.path == '/video/:/transcode/universal/decision') {
+            decisions.add(request.url);
+            return http.Response(
+              jsonEncode({
+                'MediaContainer': {
+                  'generalDecisionCode': 1001,
+                  'transcodeDecisionCode': 1001,
+                  'Metadata': [
+                    {
+                      'Media': [
+                        {'container': 'mp4', 'protocol': 'hls', 'selected': true},
+                      ],
+                    },
+                  ],
+                },
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            );
+          }
+          if (request.url.path == '/video/:/transcode/universal/start.m3u8') {
+            manifestRequests++;
+            final range = manifestSdr ? ',VIDEO-RANGE=SDR' : '';
+            return http.Response(
+              '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000$range,CODECS="avc1.640028,mp4a.40.2"\nstream.m3u8\n',
+              200,
+              headers: {'content-type': 'application/vnd.apple.mpegurl'},
+            );
+          }
+          if (request.url.path == '/video/:/transcode/universal/stop') {
+            expect(request.url.queryParameters['session'], 'transcode-id');
+            stopped = true;
+            return http.Response('', 200);
+          }
+          return http.Response('unexpected request', 500);
+        });
+        addTearDown(client.close);
+
+        final playback = client.getPlaybackInitialization(
+          PlaybackInitializationOptions(
+            metadata: testMediaItem(id: '42', backend: MediaBackend.plex, kind: MediaKind.movie, serverId: 'server-id'),
+            selectedMediaIndex: 0,
+            requestCompatibleDolbyVisionRendition: true,
+            forceServerPlayback: forceServer,
+            sessionIdentifier: 'session-id',
+            transcodeSessionId: 'transcode-id',
+          ),
+        );
+
+        if (forceServer) {
+          await expectLater(
+            playback,
+            throwsA(
+              isA<PlaybackException>().having(
+                (error) => error.reason,
+                'reason',
+                PlaybackFailureReason.noPlayableSource,
+              ),
+            ),
+          );
+          expect(stopped, isTrue);
+        } else {
+          final result = await playback;
+          expect(result.isTranscoding, manifestSdr);
+          expect(result.playMethod, manifestSdr ? 'Transcode' : 'DirectPlay');
+          expect(
+            result.videoUrl,
+            contains(manifestSdr ? '/video/:/transcode/universal/start.m3u8' : '/library/parts/99/dv.mkv'),
           );
         }
-        if (request.url.path == '/video/:/transcode/universal/decision') {
-          decisionUri = request.url;
-          return http.Response(
-            jsonEncode({
-              'MediaContainer': {
-                'generalDecisionCode': 1001,
-                'transcodeDecisionCode': 1001,
-                'Metadata': [
-                  {
-                    'Media': [
-                      {'container': 'mp4', 'protocol': 'hls', 'selected': true},
-                    ],
-                  },
-                ],
-              },
-            }),
-            200,
-            headers: {'content-type': 'application/json'},
-          );
-        }
-        if (request.url.path == '/video/:/transcode/universal/start.m3u8') {
-          return http.Response(
-            '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,VIDEO-RANGE=SDR,CODECS="avc1.640028,mp4a.40.2"\nstream.m3u8\n',
-            200,
-            headers: {'content-type': 'application/vnd.apple.mpegurl'},
-          );
-        }
-        return http.Response('unexpected request', 500);
+        final wantedTranscode = manifestSdr || forceServer;
+        expect(decisions.single.queryParameters['directPlay'], wantedTranscode ? '0' : '1');
+        expect(decisions.single.queryParameters['directStream'], wantedTranscode ? '0' : '1');
+        expect(manifestRequests, wantedTranscode ? 1 : 0);
       });
-      addTearDown(client.close);
-
-      final result = await client.getPlaybackInitialization(
-        PlaybackInitializationOptions(
-          metadata: testMediaItem(id: '42', backend: MediaBackend.plex, kind: MediaKind.movie, serverId: 'server-id'),
-          selectedMediaIndex: 0,
-          requestCompatibleDolbyVisionRendition: true,
-          sessionIdentifier: 'session-id',
-          transcodeSessionId: 'transcode-id',
-        ),
-      );
-
-      expect(decisionUri.queryParameters['directPlay'], '0');
-      expect(decisionUri.queryParameters['directStream'], '0');
-      expect(result.isTranscoding, isTrue);
-      expect(result.playMethod, 'Transcode');
-      expect(result.videoUrl, contains('/video/:/transcode/universal/start.m3u8'));
-    });
+    }
   });
 }

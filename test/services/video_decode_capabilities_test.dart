@@ -76,10 +76,27 @@ void main() {
       expect(VideoDecodeCapabilities.directPlayVideoCodecs, containsAll(['hevc', 'vp9']));
       expect(VideoDecodeCapabilities.transcodeVideoCodecs, [RankedVideoCodec.hevc, RankedVideoCodec.h264]);
       expect(VideoDecodeCapabilities.systemContainers, {'mp4', 'mkv'});
+      expect(VideoDecodeCapabilities.canOpenHdr10BaseLayer('MKV'), isTrue);
+      expect(VideoDecodeCapabilities.canOpenHdr10BaseLayer('ts'), isFalse);
       expect(VideoDecodeCapabilities.sourceDecoderUnavailable('av1'), isTrue);
       expect(VideoDecodeCapabilities.sourceDecoderUnavailable('h265'), isFalse);
       expect(VideoDecodeCapabilities.sourceDecoderUnavailable('theora'), isFalse);
     });
+  });
+
+  test('HDR10 base-layer routing uses the active backend rather than the desktop host', () {
+    bool canOpen(String engine, String container) => RuntimePlaybackCapabilities.withVideoEngine(
+      engine,
+      () => VideoDecodeCapabilities.canOpenHdr10BaseLayer(container),
+    );
+
+    expect(canOpen('mpv', 'mkv'), isTrue);
+    expect(canOpen('tvmpv', 'mkv'), isTrue);
+    expect(canOpen('tizen', 'mkv'), isTrue);
+    expect(canOpen('tizen', 'webm'), isFalse);
+    expect(canOpen('gstreamer', 'mkv'), isFalse);
+    expect(canOpen('mediaplayer', 'mkv'), isFalse);
+    expect(canOpen('webos', 'mkv'), isFalse);
   });
 
   test('a missing codec entry counts as no hardware decoder', () async {
@@ -158,6 +175,8 @@ void main() {
     addTearDown(() => binding.defaultBinaryMessenger.setMockMethodCallHandler(deviceChannel, null));
     await VideoDecodeCapabilities.getInstance();
     expect(VideoDecodeCapabilities.directPlayVideoCodecs, ['h264', 'hevc', 'vp9']);
+    expect(VideoDecodeCapabilities.canOpenHdr10BaseLayer('mkv'), isTrue);
+    expect(VideoDecodeCapabilities.canOpenHdr10BaseLayer('avi'), isFalse);
     expect(
       await VideoDecodeCapabilities.sourceFormatUnavailable(
         'h265',

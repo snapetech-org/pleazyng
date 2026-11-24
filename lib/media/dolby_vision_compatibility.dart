@@ -15,6 +15,7 @@ bool shouldRequestCompatibleDolbyVisionRendition({
   required MediaDisplayCriteria? source,
   Set<int> supportedNativeProfiles = const {},
   bool allowExperimentalProfile7 = false,
+  bool allowHdr10BaseLayer = false,
   bool? webosDolbyVision,
   bool webosHdr10 = false,
   String? container,
@@ -24,6 +25,10 @@ bool shouldRequestCompatibleDolbyVisionRendition({
   final profile = source!.doviProfile;
   if (profile != null && supportedNativeProfiles.contains(profile)) return false;
   if (profile == 7 && allowExperimentalProfile7) return false;
+  // Profile 8.1 carries an HDR10-compatible HEVC picture even on players
+  // which cannot use its Dolby Vision metadata. A forced server retry after
+  // a decoder failure deliberately withholds this local route.
+  if (allowHdr10BaseLayer && _hasProfile81BaseLayer(source)) return false;
   // LG's device API measures the set's DV capability, not individual
   // profiles. Limit the native trial to the LG media player's DV containers.
   // Its P7 base layer can be ordinary HDR10; never imply FEL composition.
@@ -41,6 +46,9 @@ bool shouldRequestCompatibleDolbyVisionRendition({
   }
   return true;
 }
+
+bool _hasProfile81BaseLayer(MediaDisplayCriteria source) =>
+    source.doviProfile == 8 && source.doviCompatibilityId == 1 && source.doviBaseLayerPresent != false;
 
 /// Whether this backend has a known SDR route for this source profile.
 ///
@@ -68,7 +76,7 @@ bool serverHasDolbyVisionSdrRoute({required DolbyVisionSdrBackend backend, requi
       _ => false,
     },
     DolbyVisionSdrBackend.plex || DolbyVisionSdrBackend.emby =>
-      hasBaseLayer && ((profile == 7 && compatibilityId == 6) || (profile == 8 && compatibilityId == 1)),
+      (profile == 7 && compatibilityId == 6 && hasBaseLayer) || _hasProfile81BaseLayer(source),
   };
 }
 

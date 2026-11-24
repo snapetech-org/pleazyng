@@ -9,6 +9,7 @@ import '../models/audio_quality_preset.dart';
 import '../models/transcode_quality_preset.dart';
 import '../mpv/mpv.dart';
 import 'subtitle_preference.dart';
+import 'video_decode_capabilities.dart';
 
 /// Inputs for [MediaServerClient.getPlaybackInitialization]. Most fields
 /// are backend-specific knobs (transcode preset, audio stream, session ids).
@@ -99,19 +100,21 @@ class PlaybackInitializationOptions {
   /// takes precedence and never sets this flag.
   final bool forceServerPlayback;
 
-  bool requestsCompatibleDolbyVisionRendition(MediaSourceInfo? source, {String? container}) =>
-      shouldRequestCompatibleDolbyVisionRendition(
-        requested: requestCompatibleDolbyVisionRendition,
-        container: container,
-        webosDolbyVision: forceServerPlayback && !forceAudioConversion ? null : webosDolbyVision,
-        webosHdr10: webosHdr10 && !(forceServerPlayback && !forceAudioConversion),
-        source: source?.displayCriteria,
-        supportedNativeProfiles: forceServerPlayback && !forceAudioConversion
-            ? const {}
-            : supportedNativeDolbyVisionProfiles,
-        allowExperimentalProfile7:
-            allowExperimentalDolbyVisionProfile7 && !(forceServerPlayback && !forceAudioConversion),
-      );
+  bool requestsCompatibleDolbyVisionRendition(MediaSourceInfo? source, {String? container}) {
+    final display = source?.displayCriteria;
+    if (!requestCompatibleDolbyVisionRendition || display?.hasDolbyVision != true) return false;
+    final requireServerVideo = forceServerPlayback && !forceAudioConversion;
+    return shouldRequestCompatibleDolbyVisionRendition(
+      requested: true,
+      container: container,
+      webosDolbyVision: requireServerVideo ? null : webosDolbyVision,
+      webosHdr10: webosHdr10 && !requireServerVideo,
+      source: display,
+      supportedNativeProfiles: requireServerVideo ? const {} : supportedNativeDolbyVisionProfiles,
+      allowExperimentalProfile7: allowExperimentalDolbyVisionProfile7 && !requireServerVideo,
+      allowHdr10BaseLayer: !requireServerVideo && VideoDecodeCapabilities.canOpenHdr10BaseLayer(container),
+    );
+  }
 
   bool hasServerDolbyVisionSdrRoute(MediaSourceInfo? source, {required DolbyVisionSdrBackend backend}) =>
       serverHasDolbyVisionSdrRoute(backend: backend, source: source?.displayCriteria);

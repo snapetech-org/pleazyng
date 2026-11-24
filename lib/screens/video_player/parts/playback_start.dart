@@ -250,6 +250,9 @@ extension _VideoPlayerPlaybackStartMethods on VideoPlayerScreenState {
                     SettingsService.experimentalDolbyVision.defaultValue),
           ),
           offlineLibraryMode: true,
+          videoEngine: currentPlayer is PlayerAndroid && currentPlayer.usingMpvFallback
+              ? 'mpv'
+              : currentPlayer.playerType,
         );
         if (playbackContext.result.videoUrl == null) {
           throw PlaybackException(t.messages.fileInfoNotAvailable);

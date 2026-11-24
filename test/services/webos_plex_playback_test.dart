@@ -28,26 +28,37 @@ void main() {
       (
         decisionWorks: true,
         selectedAudio: 301,
+        dv81: false,
         conversion: true,
         label: 'rejected DTS converts while preserving HEVC/HDR',
       ),
       (
         decisionWorks: false,
         selectedAudio: 301,
+        dv81: false,
         conversion: true,
         label: 'failed conversion cannot fall back to DTS original',
       ),
       (
         decisionWorks: true,
         selectedAudio: 302,
+        dv81: false,
         conversion: false,
         label: 'explicit compatible AAC track remains direct play',
       ),
       (
         decisionWorks: true,
         selectedAudio: 301,
+        dv81: false,
         conversion: false,
         label: 'DTS initial attempt preserves direct play and passthrough',
+      ),
+      (
+        decisionWorks: true,
+        selectedAudio: 302,
+        dv81: true,
+        conversion: false,
+        label: 'HDR10-capable LG plays the Dolby Vision Profile 8.1 base layer',
       ),
     ]) {
       test(scenario.label, () async {
@@ -75,7 +86,18 @@ void main() {
                                 'id': 99,
                                 'key': '/library/parts/99/file.mkv',
                                 'Stream': [
-                                  {'streamType': 1, 'id': 300, 'codec': 'hevc', 'colorTrc': 'smpte2084'},
+                                  {
+                                    'streamType': 1,
+                                    'id': 300,
+                                    'codec': 'hevc',
+                                    'colorTrc': 'smpte2084',
+                                    if (scenario.dv81) ...{
+                                      'DOVIPresent': 1,
+                                      'DOVIProfile': 8,
+                                      'DOVIBLCompatID': 1,
+                                      'DOVIBLPresent': 1,
+                                    },
+                                  },
                                   {'streamType': 2, 'id': 301, 'codec': 'dca', 'channels': 8, 'selected': true},
                                   {'streamType': 2, 'id': 302, 'codec': 'aac', 'channels': 2},
                                 ],
@@ -120,6 +142,8 @@ void main() {
           PlaybackInitializationOptions(
             metadata: testMediaItem(id: '42', backend: MediaBackend.plex, kind: MediaKind.movie, serverId: 'tv-server'),
             selectedMediaIndex: 0,
+            requestCompatibleDolbyVisionRendition: scenario.dv81,
+            webosHdr10: scenario.dv81,
             selectedAudioStreamId: scenario.selectedAudio,
             forceAudioConversion: scenario.conversion,
             qualityPreset: TranscodeQualityPreset.original,

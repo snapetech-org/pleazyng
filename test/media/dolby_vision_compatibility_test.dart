@@ -65,6 +65,30 @@ void main() {
     expect(shouldRequestCompatibleDolbyVisionRendition(requested: true, source: null), isFalse);
   });
 
+  test('local HDR10 playback bypasses server conversion only for a compatible Profile 8.1 base layer', () {
+    bool requestsServer(int? profile, int? compatibility, {bool? baseLayer, bool localHdr10 = true}) =>
+        shouldRequestCompatibleDolbyVisionRendition(
+          requested: true,
+          source: MediaDisplayCriteria(
+            dolbyVisionPresent: true,
+            doviProfile: profile,
+            doviCompatibilityId: compatibility,
+            doviBaseLayerPresent: baseLayer,
+          ),
+          allowHdr10BaseLayer: localHdr10,
+        );
+
+    expect(requestsServer(8, 1, baseLayer: true), isFalse);
+    expect(requestsServer(8, 1), isFalse);
+    expect(requestsServer(8, 1, baseLayer: false), isTrue);
+    expect(requestsServer(8, 1, localHdr10: false), isTrue);
+    expect(requestsServer(8, 4), isTrue);
+    expect(requestsServer(8, null), isTrue);
+    expect(requestsServer(5, null), isTrue);
+    expect(requestsServer(7, 6), isTrue);
+    expect(requestsServer(null, 1), isTrue);
+  });
+
   test('LG negotiates validated native DV containers and compatible HDR10 base layers', () {
     bool convert(int profile, String container, {bool? dv, bool hdr10 = false, int? compatibility}) =>
         shouldRequestCompatibleDolbyVisionRendition(

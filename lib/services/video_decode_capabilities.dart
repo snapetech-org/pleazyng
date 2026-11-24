@@ -193,6 +193,26 @@ class VideoDecodeCapabilities {
       engine == 'webos' ? _singleton.instance?._webosDolbyVision : null;
   static bool webosNativeHdr10(String engine) => engine == 'webos' && _singleton.instance?._webosHdr10 == true;
 
+  /// An HDR10-compatible HEVC base layer can be played by the active
+  /// backend even when it does not advertise Dolby Vision.
+  static bool canOpenHdr10BaseLayer(String? container) {
+    if (isRefusedByUser(RankedVideoCodec.hevc)) return false;
+    final format = container?.toLowerCase();
+    return switch (videoEngine) {
+      'mpv' || 'tvmpv' => !sourceDecoderUnavailable('hevc'),
+      'tizen' => tizenVideoContainers.entries.any(
+        (entry) => entry.key.split(',').contains(format) && entry.value.contains('hevc'),
+      ),
+      'exoplayer' || 'mediaplayer' =>
+        const {'mp4', 'm4v', 'mkv', 'ts', 'mpegts'}.contains(format) && directPlayVideoCodecs.contains('hevc'),
+      'avplayer' ||
+      'mediafoundation' ||
+      'gstreamer' => systemContainers.contains(format) && directPlayVideoCodecs.contains('hevc'),
+      // LG's native route requires HDR10 capability from the television.
+      _ => false,
+    };
+  }
+
   static bool get _webosModernUhd =>
       _singleton.instance?._webosUhd == true && (_singleton.instance?._webosSdkMajor ?? 0) >= 9;
 

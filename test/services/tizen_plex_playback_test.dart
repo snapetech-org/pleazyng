@@ -25,9 +25,10 @@ void main() {
     tearDown(() => db.close());
 
     for (final decisionWorks in [true, false]) {
-      for (final source in ['h264', 'hevc', 'hevc-truehd']) {
+      for (final source in ['h264', 'hevc', 'hevc-dv81', 'hevc-truehd']) {
         final compatible = source != 'hevc-truehd';
         final uhd = source != 'h264';
+        final isDv81 = source == 'hevc-dv81';
         test(
           compatible
               ? 'Original preserves compatible $source video ($decisionWorks)'
@@ -60,7 +61,18 @@ void main() {
                                     'id': 99,
                                     'key': '/library/parts/99/file.mkv',
                                     'Stream': [
-                                      {'streamType': 1, 'id': 300, 'codec': uhd ? 'hevc' : 'h264'},
+                                      {
+                                        'streamType': 1,
+                                        'id': 300,
+                                        'codec': uhd ? 'hevc' : 'h264',
+                                        if (isDv81) ...{
+                                          'bitDepth': 10,
+                                          'DOVIPresent': 1,
+                                          'DOVIProfile': 8,
+                                          'DOVIBLCompatID': 1,
+                                          'DOVIBLPresent': 1,
+                                        },
+                                      },
                                       {
                                         'streamType': 2,
                                         'id': 301,
@@ -115,6 +127,7 @@ void main() {
                   serverId: 'tv-server',
                 ),
                 selectedMediaIndex: 0,
+                requestCompatibleDolbyVisionRendition: isDv81,
                 qualityPreset: TranscodeQualityPreset.original,
                 sessionIdentifier: 'session',
                 transcodeSessionId: 'transcode',
