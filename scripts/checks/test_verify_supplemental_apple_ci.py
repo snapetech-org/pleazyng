@@ -73,10 +73,10 @@ class SupplementalAppleQualificationTests(unittest.TestCase):
 
     def _pages(self, url, _token, collection, **_options):
         self.assertEqual(collection, 'jobs')
-        self.assertIn(
-            f'/actions/runs/{QUALIFICATION_RUN_ID}/attempts/1/jobs', url
-        )
-        return deepcopy(self.jobs)
+        for attempt in range(1, self.qualification_run['run_attempt'] + 1):
+            if f'/actions/runs/{QUALIFICATION_RUN_ID}/attempts/{attempt}/jobs' in url:
+                return deepcopy([job for job in self.jobs if job['run_attempt'] == attempt])
+        raise AssertionError(f'Unexpected jobs URL {url}')
 
     def verify(self, *, repository=embedded.REPOSITORY, source_sha=SOURCE_SHA,
                source_run_id=SOURCE_RUN_ID, qualification_run_id=QUALIFICATION_RUN_ID):
@@ -101,6 +101,29 @@ class SupplementalAppleQualificationTests(unittest.TestCase):
         self.jobs[0]['labels'] = ['macos-26']
         proof = self.verify()
         self.assertEqual(proof['jobs'][0]['labels'], ['macos-26'])
+
+    def test_separate_ios_compatibility_requires_a_passing_native_producer(self):
+        ios = self.jobs[0]
+        ios['labels'] = ['macos-26']
+        ios['steps'].extend(
+            {'name': step, 'status': 'completed', 'conclusion': 'success'}
+            for step in embedded.APPLE_IOS_COMPATIBILITY_STEPS
+        )
+        native = _suite(embedded.APPLE_IOS_NATIVE_PRODUCER, 44)
+        self.qualification_run['run_attempt'] = 2
+        ios['run_attempt'] = 2
+        self.jobs.append(native)
+        proof = self.verify()
+        record = embedded._supplemental_apple_jobs(proof, SOURCE_SHA, SOURCE_RUN_ID, 3)[ios['name']]
+        self.assertEqual(record['labels'], ['macos-26'])
+        self.assertEqual(record['native_producer']['id'], 44)
+        self.assertEqual(record['native_producer']['attempt'], 1)
+        record['native_producer']['run_id'] = 123
+        with self.assertRaisesRegex(GateError, 'lacks its passing native test'):
+            embedded._supplemental_apple_jobs(proof, SOURCE_SHA, SOURCE_RUN_ID, 3)
+        native['conclusion'] = 'failure'
+        with self.assertRaisesRegex(GateError, 'Build and test candidate iOS app'):
+            self.verify()
 
     def _focused_inputs(self):
         previous = {

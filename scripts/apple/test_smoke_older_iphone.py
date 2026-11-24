@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,20 @@ import smoke_older_iphone as smoke
 
 
 class OlderIPhoneSmokeTests(unittest.TestCase):
+    def test_legacy_runner_never_downloads_a_missing_preinstalled_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            products = Path(temp)
+            app = products / 'Pleazyng.app'
+            (app / 'Frameworks' / 'App.framework').mkdir(parents=True)
+            (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'org.snapetech.pleazyng'}))
+            with (
+                patch.object(smoke, 'sim', return_value='{"runtimes": []}'),
+                patch.object(smoke.subprocess, 'run') as command,
+                self.assertRaisesRegex(RuntimeError, 'installed iOS 26 phone runtime'),
+            ):
+                smoke.main(products, require_installed_runtime=True)
+            command.assert_not_called()
+
     def test_retries_only_the_observed_install_promise_error_on_a_fresh_device(self):
         error = subprocess.CalledProcessError(
             2, ['simctl', 'install'],

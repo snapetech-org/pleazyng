@@ -66,6 +66,7 @@ def install_and_launch(app, bundle, runtime, model):
                     print('Retrying the failed installation promise on a fresh simulator.', flush=True)
                     continue
                 raise
+            print(f'Installed {bundle}; launching it on the compatibility simulator.', flush=True)
             launch = sim('launch', udid, bundle)
             pid = int(launch.rsplit(':', 1)[1].strip())
             # A launch request can succeed before a delayed engine or dyld crash.
@@ -78,7 +79,7 @@ def install_and_launch(app, bundle, runtime, model):
             sim('delete', udid)
 
 
-def main(products, *, discard_intermediates=False):
+def main(products, *, discard_intermediates=False, require_installed_runtime=False):
     apps = [path for path in products.glob('*.app') if (path / 'Frameworks/App.framework').is_dir()]
     if len(apps) != 1:
         raise ValueError(f'Expected one built Flutter simulator app, found {apps}')
@@ -87,6 +88,8 @@ def main(products, *, discard_intermediates=False):
         discard_hosted_intermediates(products)
     report_free_space('before selecting the legacy runtime')
     target = older_iphone(json.loads(sim('list', '-j')))
+    if target is None and require_installed_runtime:
+        raise RuntimeError('The compatibility runner must provide an installed iOS 26 phone runtime')
     if target is None:
         subprocess.run(['xcodebuild', '-downloadPlatform', 'iOS', '-buildVersion', '26.5'], check=True, timeout=900)
         target = older_iphone(json.loads(sim('list', '-j')))
@@ -100,5 +103,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('products', type=Path)
     parser.add_argument('--discard-intermediates', action='store_true')
+    parser.add_argument('--require-installed-runtime', action='store_true')
     options = parser.parse_args()
-    main(options.products, discard_intermediates=options.discard_intermediates)
+    main(options.products, discard_intermediates=options.discard_intermediates,
+         require_installed_runtime=options.require_installed_runtime)

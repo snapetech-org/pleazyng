@@ -24,6 +24,7 @@ APPLE_PLATFORM_JOBS = (
     'Apple native reliability (tvOS)',
 )
 APPLE_JOB_BY_SLUG = dict(zip(('ios', 'macos', 'tvos'), APPLE_PLATFORM_JOBS, strict=True))
+APPLE_IOS_NATIVE_PRODUCER = 'Build and test candidate iOS app'
 APPLE_AGGREGATE_JOB = 'Apple native reliability'
 APPLE_QUALIFICATION_STEPS = (
     'Verify frozen candidate source',
@@ -35,6 +36,7 @@ APPLE_FOCUSED_QUALIFICATION_STEPS = (
     'Verify retained Apple siblings',
     *APPLE_QUALIFICATION_STEPS[1:],
 )
+APPLE_IOS_COMPATIBILITY_STEPS = ('Download candidate iOS app artifact', 'Extract candidate iOS app')
 APPLE_HOSTED_RUNNER_LABELS = {('xcode-27',), ('macos-26',)}
 
 
@@ -151,6 +153,19 @@ def _supplemental_apple_jobs(proof, sha, run_id, attempt):
             raise GateError(f'Supplemental Apple suite lacks public Apple Silicon runner evidence: {name}')
         passed_steps = record.get('passed_steps')
         expected_steps = APPLE_FOCUSED_QUALIFICATION_STEPS if name == retry_job else APPLE_QUALIFICATION_STEPS
+        native = record.get('native_producer')
+        if native is not None:
+            if (name != APPLE_JOB_BY_SLUG['ios'] or normalized != ('macos-26',)
+                    or not isinstance(native, dict) or native.get('name') != APPLE_IOS_NATIVE_PRODUCER
+                    or type(native.get('id')) is not int or native['id'] < 1 or native['id'] == record['id']
+                    or native.get('run_id') != origin or native.get('qualification_attempt') != origin_attempt
+                    or native.get('tooling_sha') != record['tooling_sha']
+                    or type(native.get('attempt')) is not int or not 1 <= native['attempt'] <= record['attempt']
+                    or native.get('labels') != ['xcode-27'] or native.get('runner_group_name') != 'GitHub Actions'
+                    or native.get('status') != 'completed' or native.get('conclusion') != 'success'
+                    or native.get('passed_steps') != list(expected_steps)):
+                raise GateError('The iOS compatibility proof lacks its passing native test execution.')
+            expected_steps = (*expected_steps, *APPLE_IOS_COMPATIBILITY_STEPS)
         if not isinstance(passed_steps, list) or passed_steps != list(expected_steps):
             raise GateError(f'Supplemental Apple suite omitted its required passing steps: {name}')
         result[name] = record
@@ -366,44 +381,65 @@ def _validate_apple_qualification_run(run, run_id, expected_title, token, *, con
     _require_main_ancestor(tooling_sha, token, 'Supplemental Apple workflow source')
 
 
+def _passing_apple_job_record(run, job, required_steps, runner_labels=APPLE_HOSTED_RUNNER_LABELS):
+    name = job['name']
+    if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
+            or type(job.get('id')) is not int or job['id'] < 1
+            or type(job.get('run_attempt')) is not int
+            or not 1 <= job['run_attempt'] <= run['run_attempt']):
+        raise GateError(f'Supplemental Apple suite did not pass in its latest attempt: {name}')
+    labels = job.get('labels')
+    normalized = tuple(str(label).lower() for label in labels) if isinstance(labels, list) else ()
+    if normalized not in runner_labels or job.get('runner_group_name') != 'GitHub Actions':
+        raise GateError(f'Supplemental Apple suite did not use a public hosted Apple Silicon runner: {name}')
+    steps = job.get('steps')
+    if not isinstance(steps, list):
+        raise GateError(f'Supplemental Apple suite omitted step evidence: {name}')
+    for step_name in required_steps:
+        matches = [step for step in steps if step.get('name') == step_name]
+        if (len(matches) != 1 or matches[0].get('status') != 'completed'
+                or matches[0].get('conclusion') != 'success'):
+            raise GateError(f'Supplemental Apple suite step did not pass uniquely: {name}: {step_name}')
+    return {
+        'id': job['id'], 'name': name, 'attempt': job['run_attempt'],
+        'run_id': run['id'], 'qualification_attempt': run['run_attempt'], 'tooling_sha': run['head_sha'],
+        'status': job['status'], 'conclusion': job['conclusion'],
+        'labels': labels, 'runner_group_name': job['runner_group_name'],
+        'passed_steps': list(required_steps),
+    }
+
+
 def _qualifying_apple_suites(run, expected_names, token, *, failed_job=None, focused=False):
     jobs = fetch_attempt_history(run['id'], run['run_attempt'], token)
-    suite_jobs = [job for job in jobs if str(job.get('name', '')).startswith('Apple native reliability')]
+    ios = APPLE_JOB_BY_SLUG['ios']
+    suite_jobs = [job for job in jobs if str(job.get('name', '')).startswith('Apple native reliability')
+                  and not (focused and ios not in expected_names and job.get('name') == ios
+                           and job.get('conclusion') == 'skipped')]
     if len(suite_jobs) != len(expected_names) or {job.get('name') for job in suite_jobs} != set(expected_names):
         raise GateError('Supplemental Apple workflow does not contain exactly its expected platform suites.')
+    producers = [job for job in jobs if job.get('name') == APPLE_IOS_NATIVE_PRODUCER]
+    if len(producers) > 1 or (producers and ios not in expected_names):
+        raise GateError('Supplemental Apple workflow contains an unexpected iOS native producer.')
     required_steps = APPLE_FOCUSED_QUALIFICATION_STEPS if focused else APPLE_QUALIFICATION_STEPS
     records = []
     for job in suite_jobs:
         name = job['name']
         if name == failed_job:
-            if job.get('status') != 'completed' or job.get('conclusion') not in {'failure', 'cancelled', 'timed_out'}:
+            failed = {'failure', 'cancelled', 'timed_out'}
+            failed_stage = producers[0] if name == ios and producers and job.get('conclusion') == 'skipped' else job
+            if failed_stage.get('status') != 'completed' or failed_stage.get('conclusion') not in failed:
                 raise GateError(f'Retained Apple run did not record the requested failed suite: {name}')
             continue
-        if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
-                or type(job.get('id')) is not int or job['id'] < 1
-                or type(job.get('run_attempt')) is not int
-                or not 1 <= job['run_attempt'] <= run['run_attempt']):
-            raise GateError(f'Supplemental Apple suite did not pass in its latest attempt: {name}')
-        labels = job.get('labels')
-        normalized = tuple(str(label).lower() for label in labels) if isinstance(labels, list) else ()
-        if (normalized not in APPLE_HOSTED_RUNNER_LABELS
-                or job.get('runner_group_name') != 'GitHub Actions'):
-            raise GateError(f'Supplemental Apple suite did not use a public hosted Apple Silicon runner: {name}')
-        steps = job.get('steps')
-        if not isinstance(steps, list):
-            raise GateError(f'Supplemental Apple suite omitted step evidence: {name}')
-        for step_name in required_steps:
-            matches = [step for step in steps if step.get('name') == step_name]
-            if (len(matches) != 1 or matches[0].get('status') != 'completed'
-                    or matches[0].get('conclusion') != 'success'):
-                raise GateError(f'Supplemental Apple suite step did not pass uniquely: {name}: {step_name}')
-        records.append({
-            'id': job['id'], 'name': name, 'attempt': job['run_attempt'],
-            'run_id': run['id'], 'qualification_attempt': run['run_attempt'], 'tooling_sha': run['head_sha'],
-            'status': job['status'], 'conclusion': job['conclusion'],
-            'labels': labels, 'runner_group_name': job['runner_group_name'],
-            'passed_steps': list(required_steps),
-        })
+        if name == ios and producers:
+            compatibility_steps = (*required_steps, *APPLE_IOS_COMPATIBILITY_STEPS)
+            record = _passing_apple_job_record(run, job, compatibility_steps, {('macos-26',)})
+            native = _passing_apple_job_record(run, producers[0], required_steps, {('xcode-27',)})
+            if native['attempt'] > record['attempt'] or native['id'] == record['id']:
+                raise GateError('The iOS compatibility job does not follow its native test execution.')
+            record['native_producer'] = native
+        else:
+            record = _passing_apple_job_record(run, job, required_steps)
+        records.append(record)
     return records
 
 

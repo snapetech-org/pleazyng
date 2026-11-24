@@ -30,6 +30,10 @@ inputs:
   motion-test-only:
     description: Run the iPhone live motion XCTest on its own.
     default: 'false'
+  defer-older-iphone-smoke:
+    description: Publish a verified tested iOS app checkpoint before running the older iPhone simulator smoke.
+    required: false
+    default: 'false'
   candidate-source-sha:
     description: Optional exact frozen product source SHA for supplemental candidate qualification.
     required: false
@@ -97,6 +101,10 @@ runs:
         APPLE_LOCAL_BUILD_DIR: ${{ steps.scratch.outputs.APPLE_LOCAL_BUILD_DIR }}
         APPLE_SCRATCH_JOB: ${{ steps.scratch.outputs.project }}
         RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        PLATFORM: ${{ inputs.platform }}
+        BUILD_ONLY: ${{ inputs.build-only }}
+        MOTION_TEST_ONLY: ${{ inputs.motion-test-only }}
+        DEFER_OLDER_IPHONE_SMOKE: ${{ inputs.defer-older-iphone-smoke }}
         CANDIDATE_SOURCE_SHA: ${{ inputs.candidate-source-sha }}
         CANDIDATE_TEST_HARNESS_SHA: ${{ inputs.candidate-test-harness-sha }}
         CANDIDATE_TEST_HARNESS_IN_PRODUCT: ${{ inputs.candidate-test-harness-in-product }}
@@ -108,6 +116,12 @@ runs:
         dv_build_tool_blob_sha=''
         harness_overlay_applied=false
         dv_build_tool_overlay_applied=false
+        [[ "$DEFER_OLDER_IPHONE_SMOKE" == true || "$DEFER_OLDER_IPHONE_SMOKE" == false ]]
+        if [[ "$DEFER_OLDER_IPHONE_SMOKE" == true ]]; then
+          [[ "$PLATFORM" == iOS && -n "$CANDIDATE_SOURCE_SHA" ]]
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
+          [[ "$BUILD_ONLY" == false && "$MOTION_TEST_ONLY" == false ]]
+        fi
         if [[ -n "$CANDIDATE_SOURCE_SHA" ]]; then
           [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
           [[ "$CANDIDATE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -577,8 +591,120 @@ runs:
         fi
         exit "$test_status"
 
+    - name: Create verified iOS compatibility app checkpoint
+      id: compatibility-checkpoint
+      if: inputs.defer-older-iphone-smoke == 'true' && inputs.platform == 'iOS' && steps.native-tests.outcome == 'success'
+      env:
+        APPLE_DERIVED_DATA_PATH: ${{ steps.scratch.outputs.APPLE_DERIVED_DATA_PATH }}
+        APP_PRODUCTS: ${{ steps.scratch.outputs.APPLE_DERIVED_DATA_PATH }}/Build/Products/Debug-iphonesimulator
+        PRODUCT_SOURCE_SHA: ${{ steps.checkout.outputs.product_source_sha }}
+        CANDIDATE_SOURCE_SHA: ${{ inputs.candidate-source-sha }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$PRODUCT_SOURCE_SHA" = "$CANDIDATE_SOURCE_SHA"
+        checkpoint_dir="$RUNNER_TEMP/ios-compatibility-app-checkpoint"
+        test ! -e "$checkpoint_dir" && test ! -L "$checkpoint_dir"
+        mkdir -m 700 "$checkpoint_dir"
+        archive="$checkpoint_dir/ios-simulator-app.zip"
+        receipt="$checkpoint_dir/ios-simulator-app.json"
+        python3 - "$GITHUB_WORKSPACE/scripts/apple/smoke_older_iphone.py" "$APP_PRODUCTS" <<'PY'
+        import importlib.util
+        import sys
+        from pathlib import Path
+
+        helper_path, products = sys.argv[1:]
+        spec = importlib.util.spec_from_file_location("smoke_older_iphone", helper_path)
+        if spec is None or spec.loader is None:
+            raise SystemExit("Unable to load the hosted iOS scratch cleanup helper.")
+        smoke = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(smoke)
+        smoke.discard_hosted_intermediates(Path(products))
+        PY
+        app_path="$(python3 - <<'PY'
+        import os
+        import plistlib
+        from pathlib import Path
+
+        derived_data = Path(os.environ["APPLE_DERIVED_DATA_PATH"]).resolve(strict=True)
+        products = Path(os.environ["APP_PRODUCTS"]).resolve(strict=True)
+        runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+        expected_products = (derived_data / "Build/Products/Debug-iphonesimulator").resolve(strict=True)
+        if products != expected_products or not products.is_relative_to(runner_temp):
+            raise SystemExit("iOS compatibility app did not come from this job's scoped DerivedData.")
+        apps = [path for path in products.glob("*.app")
+                if not path.is_symlink() and (path / "Frameworks/App.framework").is_dir()]
+        if len(apps) != 1:
+            raise SystemExit(f"Expected exactly one tested Flutter simulator app, found {len(apps)}.")
+        app = apps[0]
+        info_path = app / "Info.plist"
+        if info_path.is_symlink() or not info_path.is_file():
+            raise SystemExit("Tested iOS simulator app has no regular Info.plist.")
+        info = plistlib.loads(info_path.read_bytes())
+        bundle_id = info.get("CFBundleIdentifier")
+        executable = info.get("CFBundleExecutable")
+        if not isinstance(bundle_id, str) or not bundle_id or not isinstance(executable, str) or not executable:
+            raise SystemExit("Tested iOS simulator app identity is incomplete.")
+        if not (app / executable).is_file():
+            raise SystemExit("Tested iOS simulator app executable is missing.")
+        print(app)
+        PY
+        )"
+        ditto -c -k --norsrc --keepParent "$app_path" "$archive"
+        python3 - "$app_path" "$archive" "$receipt" <<'PY'
+        import hashlib
+        import json
+        import os
+        import plistlib
+        import re
+        import sys
+        import zipfile
+        from pathlib import Path
+
+        app, archive, receipt = (Path(value) for value in sys.argv[1:])
+        product_sha = os.environ["PRODUCT_SOURCE_SHA"]
+        run_id = os.environ["RUN_ID"]
+        run_attempt = os.environ["RUN_ATTEMPT"]
+        if not re.fullmatch(r"[0-9a-f]{40}", product_sha):
+            raise SystemExit("Checkpoint product source SHA is invalid.")
+        if not run_id.isdecimal() or not run_attempt.isdecimal():
+            raise SystemExit("Checkpoint GitHub run identity is invalid.")
+        with zipfile.ZipFile(archive) as zipped:
+            names = [name for name in zipped.namelist() if name]
+            roots = {name.split("/", 1)[0] for name in names}
+            if roots != {app.name} or f"{app.name}/Info.plist" not in names:
+                raise SystemExit("Checkpoint archive does not contain exactly the tested app bundle.")
+        info = plistlib.loads((app / "Info.plist").read_bytes())
+        digest = hashlib.sha256()
+        with archive.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        value = {
+            "sha256": digest.hexdigest(),
+            "product_source_sha": product_sha,
+            "run_id": int(run_id),
+            "run_attempt": int(run_attempt),
+            "bundle_id": info["CFBundleIdentifier"],
+        }
+        receipt.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        print(f"Verified tested iOS simulator app checkpoint for source {product_sha}.")
+        PY
+
+    - name: Upload tested iOS compatibility app checkpoint
+      if: inputs.defer-older-iphone-smoke == 'true' && inputs.platform == 'iOS' && steps.native-tests.outcome == 'success' && steps.compatibility-checkpoint.outcome == 'success'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      with:
+        name: ios-compatibility-app-${{ github.run_id }}
+        path: ${{ runner.temp }}/ios-compatibility-app-checkpoint/
+        if-no-files-found: error
+        overwrite: true
+        compression-level: 0
+        retention-days: 14
+
     - name: Launch the same iOS app on an older phone runtime
-      if: inputs.platform == 'iOS' && inputs.build-only != 'true' && inputs.motion-test-only != 'true' && runner.environment == 'github-hosted'
+      if: inputs.platform == 'iOS' && inputs.build-only != 'true' && inputs.motion-test-only != 'true' && inputs.defer-older-iphone-smoke != 'true' && runner.environment == 'github-hosted'
       env:
         PRODUCTS: ${{ steps.scratch.outputs.APPLE_DERIVED_DATA_PATH }}/Build/Products/Debug-iphonesimulator
         SIMULATOR_RUNTIME: ${{ steps.scratch.outputs.runtime }}

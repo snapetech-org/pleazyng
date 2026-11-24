@@ -19,6 +19,7 @@ APPLE_QUALIFICATION_TITLE = re.compile(
 WORKFLOWS = (APPLE_QUALIFICATION_WORKFLOW, "build.yml", "ci.yml", "macos-app-store-signed.yml")
 APPLE_SUITE_GATE_NAMES = ("Apple native reliability", "Release CI / Apple native reliability")
 APPLE_SUITE_PLATFORMS = ("iOS", "macOS", "tvOS")
+IOS_NATIVE_PRODUCER = "Build and test candidate iOS app"
 WORKER_DISK_ERROR = re.compile(
     r"System\.IO\.IOException: No space left on device : "
     r"'/Users/runner/actions-runner/(?:cached/)?_diag/Worker_[\w.-]+\.log'",
@@ -52,7 +53,8 @@ def failed_apple_suite_gate(job):
 
 
 def interrupted_hosted_ios_suite(job):
-    return (job.get("name") in {f"{name} (iOS)" for name in APPLE_SUITE_GATE_NAMES}
+    ios_names = {IOS_NATIVE_PRODUCER, *(f"{name} (iOS)" for name in APPLE_SUITE_GATE_NAMES)}
+    return (job.get("name") in ios_names
             and job.get("status") == "completed" and job.get("conclusion") == "failure"
             and bool(job.get("runner_id")) and job.get("labels") == ["xcode-27"]
             and not any(step.get("conclusion") == "failure" for step in job["steps"])
@@ -78,6 +80,8 @@ def retained_siblings_verified(repository, run, retry_platform):
     jobs = [job for page in pages for job in page["jobs"] if isinstance(job, dict)]
     for platform in expected_platforms:
         name = f"Apple native reliability ({platform})"
+        if platform == "iOS" and any(job.get("name") == IOS_NATIVE_PRODUCER for job in jobs):
+            name = IOS_NATIVE_PRODUCER
         matches = [job for job in jobs if job.get("name") == name]
         if len(matches) != 1:
             return False

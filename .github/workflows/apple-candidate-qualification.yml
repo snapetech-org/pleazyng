@@ -45,7 +45,7 @@ env:
 
 jobs:
   apple-native-reliability:
-    name: Apple native reliability (${{ matrix.platform }})
+    name: ${{ matrix.platform == 'iOS' && 'Build and test candidate iOS app' || format('Apple native reliability ({0})', matrix.platform) }}
     timeout-minutes: 360
     runs-on: xcode-27
     permissions:
@@ -360,6 +360,7 @@ jobs:
           candidate-test-harness-in-product: ${{ steps.verify-candidate.outputs.test_harness_in_product }}
           candidate-dv-build-tool-sha: ${{ env.PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA }}
           candidate-dv-build-tool-in-product: ${{ steps.verify-candidate.outputs.dv_build_tool_in_product }}
+          defer-older-iphone-smoke: ${{ matrix.platform == 'iOS' && 'true' || 'false' }}
         env:
           PUB_CACHE: ${{ env.PUB_CACHE }}
 
@@ -441,7 +442,10 @@ jobs:
               "workflow_ref": os.environ["WORKFLOW_REF"],
               "qualification_run_id": int(os.environ["WORKFLOW_RUN_ID"]),
               "qualification_run_attempt": int(os.environ["WORKFLOW_RUN_ATTEMPT"]),
-              "qualification_job": f"Apple native reliability ({platform_name})",
+              "qualification_job": (
+                  "Build and test candidate iOS app"
+                  if platform_name == "iOS" else f"Apple native reliability ({platform_name})"
+              ),
               "platform": platform_name,
               "runner_environment": os.environ.get("RUNNER_ENVIRONMENT", ""),
               "runner_os": os.environ.get("RUNNER_OS", ""),
@@ -452,7 +456,10 @@ jobs:
               "sdk_version": command(["xcrun", "--sdk", sdk, "--show-sdk-version"]),
               "native_test_outcome": os.environ["NATIVE_TEST_OUTCOME"],
               "test_mode": "build-for-testing" if platform_name == "macOS" else "simulator-tests",
-              "required_additional_steps": ["Launch the same iOS app on an older phone runtime"] if platform_name == "iOS" else [],
+              "required_additional_steps": (
+                  ["Apple native reliability (iOS): Launch the same iOS app on an older phone runtime"]
+                  if platform_name == "iOS" else []
+              ),
           }
           pathlib.Path(sys.argv[1]).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
           print(f"Recorded candidate qualification source receipt for {platform_name}.")
@@ -466,3 +473,219 @@ jobs:
           path: ${{ runner.temp }}/apple-candidate-qualification/${{ matrix.slug }}.json
           if-no-files-found: error
           retention-days: 14
+
+  apple-native-ios-compatibility:
+    name: Apple native reliability (iOS)
+    needs: apple-native-reliability
+    if: ${{ needs.apple-native-reliability.result == 'success' && (inputs.retained_run_id == '' || inputs.retry_platform == 'ios') }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out current trusted main tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download candidate iOS app artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ios-compatibility-app-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate-ios-app
+
+      - name: Verify frozen candidate source
+        id: verify-candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: scripts
+          ARTIFACT_DIR: ${{ runner.temp }}/candidate-ios-app
+          PRODUCT_SOURCE_SHA: ${{ inputs.product_source_sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import posixpath
+          import re
+          import stat
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          from verify_embedded_release_ci import fetch_attempt_history
+
+          artifact_dir = Path(os.environ["ARTIFACT_DIR"])
+          archive_path = artifact_dir / "ios-simulator-app.zip"
+          receipt_path = artifact_dir / "ios-simulator-app.json"
+          product_sha = os.environ["PRODUCT_SOURCE_SHA"]
+          run_id = int(os.environ["WORKFLOW_RUN_ID"])
+          consumer_attempt = int(os.environ["WORKFLOW_RUN_ATTEMPT"])
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          require(re.fullmatch(r"[0-9a-f]{40}", product_sha) is not None,
+                  "Candidate product SHA must be a full lowercase commit SHA.")
+          require(archive_path.is_file() and receipt_path.is_file(),
+                  "The current workflow run omitted its iOS simulator app archive or receipt.")
+          receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+          require(isinstance(receipt, dict), "The iOS simulator app receipt is malformed.")
+          require(receipt.get("product_source_sha") == product_sha,
+                  "The iOS app artifact was built from a different product source SHA.")
+          require(type(receipt.get("run_id")) is int and receipt["run_id"] == run_id,
+                  "The iOS app artifact belongs to a different workflow run.")
+          producer_attempt = receipt.get("run_attempt")
+          require(type(producer_attempt) is int and producer_attempt > 0,
+                  "The iOS app artifact producer attempt is invalid.")
+          require(receipt.get("bundle_id") == "org.snapetech.pleazyng",
+                  "The iOS simulator app artifact has an unexpected bundle ID.")
+          expected_digest = receipt.get("sha256")
+          require(isinstance(expected_digest, str)
+                  and re.fullmatch(r"[0-9a-f]{64}", expected_digest) is not None,
+                  "The iOS simulator app archive does not match its SHA-256 receipt.")
+          digest = hashlib.sha256()
+          with archive_path.open("rb") as archive_file:
+              for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          require(digest.hexdigest() == expected_digest,
+                  "The iOS simulator app archive does not match its SHA-256 receipt.")
+
+          jobs = fetch_attempt_history(run_id, consumer_attempt, os.environ["GH_TOKEN"])
+          producer = [job for job in jobs if job.get("name") == "Build and test candidate iOS app"]
+          require(len(producer) == 1, "The current run does not have one unambiguous iOS app producer.")
+          producer = producer[0]
+          require(producer.get("status") == "completed" and producer.get("conclusion") == "success"
+                  and producer.get("run_attempt") == producer_attempt
+                  and type(producer.get("id")) is int and producer["id"] > 0,
+                  "The iOS app receipt does not match the latest successful producer job attempt.")
+
+          try:
+              archive = zipfile.ZipFile(archive_path)
+          except (OSError, zipfile.BadZipFile):
+              raise SystemExit("The iOS simulator app archive is not a valid ZIP file.") from None
+          with archive:
+              members = archive.infolist()
+              member_names = [member.filename for member in members]
+              require(bool(members) and len(member_names) == len(set(member_names)),
+                      "The iOS simulator app ZIP is empty or has duplicate paths.")
+              roots = set()
+              for member in members:
+                  path = PurePosixPath(member.filename)
+                  require(not path.is_absolute() and ".." not in path.parts and path.parts,
+                          "The iOS simulator app ZIP contains an unsafe path.")
+                  roots.add(path.parts[0])
+              require(roots == {"Pleazyng.app"},
+                      "The iOS simulator app ZIP must contain only the exact Pleazyng.app bundle.")
+              app_root = "Pleazyng.app"
+              info_path = f"{app_root}/Info.plist"
+              require(info_path in member_names, "Pleazyng.app has no Info.plist in the ZIP.")
+              try:
+                  import plistlib
+                  info = plistlib.loads(archive.read(info_path))
+              except (KeyError, ValueError, plistlib.InvalidFileException):
+                  raise SystemExit("Pleazyng.app has an invalid Info.plist in the ZIP.") from None
+              require(info.get("CFBundleIdentifier") == receipt["bundle_id"],
+                      "Pleazyng.app Info.plist does not match the receipt bundle ID.")
+              require(any(name.startswith(f"{app_root}/Frameworks/App.framework/")
+                          for name in member_names),
+                      "Pleazyng.app is missing Frameworks/App.framework.")
+              for member in members:
+                  mode = (member.external_attr >> 16) & 0o170000
+                  if not stat.S_ISLNK(mode):
+                      continue
+                  link_target = archive.read(member).decode("utf-8")
+                  resolved = posixpath.normpath(posixpath.join(
+                      posixpath.dirname(member.filename), link_target
+                  ))
+                  require(not posixpath.isabs(link_target)
+                          and (resolved == app_root or resolved.startswith(app_root + "/")),
+                          "Pleazyng.app contains a ZIP symlink that escapes the app bundle.")
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"app_name={app_root}\n")
+          print(f"Verified the same-run iOS app artifact from producer attempt {producer_attempt}.")
+          PY
+
+      - name: Verify retained Apple siblings
+        if: ${{ inputs.retained_run_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: scripts
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PRODUCT_SOURCE_SHA: ${{ inputs.product_source_sha }}
+          RETAINED_RUN_ID: ${{ inputs.retained_run_id }}
+          RETRY_PLATFORM: ${{ inputs.retry_platform }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from verify_embedded_release_ci import verify_retained_apple_siblings
+
+          verify_retained_apple_siblings(
+              os.environ["SOURCE_RUN_ID"],
+              os.environ["PRODUCT_SOURCE_SHA"],
+              os.environ["RETAINED_RUN_ID"],
+              os.environ["RETRY_PLATFORM"],
+              os.environ["GH_TOKEN"],
+          )
+          PY
+
+      - name: Require native Apple Silicon host
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = arm64
+          selected_developer=''
+          for developer in \
+            /Applications/Xcode_26.5.app/Contents/Developer \
+            /Applications/Xcode_26.6.app/Contents/Developer; do
+            [[ -d "$developer" ]] || continue
+            if DEVELOPER_DIR="$developer" xcrun simctl list -j | python3 -c '
+          import json, sys
+          inventory = json.load(sys.stdin)
+          sys.exit(0 if any(runtime.get("isAvailable") is True
+                            and runtime.get("version") == "26.5"
+                            and ".iOS-" in runtime.get("identifier", "")
+                            for runtime in inventory.get("runtimes", [])) else 1)
+          '; then
+              selected_developer="$developer"
+              break
+            fi
+          done
+          [[ -n "$selected_developer" ]] || {
+            echo 'The macos-26 runner must provide a preinstalled iOS 26.5 simulator runtime.' >&2
+            exit 1
+          }
+          echo "DEVELOPER_DIR=$selected_developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$selected_developer" xcodebuild -version
+
+      - name: Extract candidate iOS app
+        shell: bash
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/candidate-ios-app
+          PRODUCTS: ${{ runner.temp }}/candidate-ios-products
+          APP_NAME: ${{ steps.verify-candidate.outputs.app_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRODUCTS"
+          ditto -x -k "$ARTIFACT_DIR/ios-simulator-app.zip" "$PRODUCTS"
+          test -d "$PRODUCTS/$APP_NAME/Frameworks/App.framework"
+
+      - name: Qualify Apple native components
+        shell: bash
+        env:
+          PRODUCTS: ${{ runner.temp }}/candidate-ios-products
+        run: |
+          set -euo pipefail
+          python3 scripts/apple/smoke_older_iphone.py "$PRODUCTS" --require-installed-runtime

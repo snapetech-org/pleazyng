@@ -36,7 +36,11 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         self.assertIn("group: apple-candidate-qualification-${{ inputs.source_run_id }}", self.workflow)
 
     def test_native_matrix_is_public_arm64_and_runs_every_platform_suite(self):
-        self.assertIn("name: Apple native reliability (${{ matrix.platform }})", self.workflow)
+        self.assertIn(
+            "name: ${{ matrix.platform == 'iOS' && 'Build and test candidate iOS app' || format('",
+            self.workflow,
+        )
+        self.assertIn("format('Apple native reliability ({0})', matrix.platform)", self.workflow)
         self.assertIn("runs-on: xcode-27", self.workflow)
         self.assertIn("inputs.retained_run_id == '' || inputs.retry_platform == 'all'", self.workflow)
         self.assertIn("inputs.retry_platform == 'ios' &&", self.workflow)
@@ -51,9 +55,47 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         self.assertIn('test "$(uname -m)" = arm64', self.workflow)
         self.assertIn("hosted-xcode-version: '27.1'", self.workflow)
         self.assertIn("require-duo-sdk: ${{ matrix.platform == 'iOS'", self.workflow)
-        self.assertIn('"Launch the same iOS app on an older phone runtime"', self.workflow)
+        self.assertIn(
+            "defer-older-iphone-smoke: ${{ matrix.platform == 'iOS' && 'true' || 'false' }}",
+            self.workflow,
+        )
+        self.assertIn(
+            '"Apple native reliability (iOS): Launch the same iOS app on an older phone runtime"',
+            self.workflow,
+        )
         self.assertNotIn("build-only: 'true'", self.workflow)
         self.assertNotIn("motion-test-only: 'true'", self.workflow)
+
+    def test_legacy_iphone_smoke_is_a_separate_retained_artifact_consumer(self):
+        consumer = self.workflow.split("  apple-native-ios-compatibility:\n", 1)[1]
+        self.assertIn("name: Apple native reliability (iOS)", consumer)
+        self.assertIn("needs: apple-native-reliability", consumer)
+        self.assertIn("needs.apple-native-reliability.result == 'success'", consumer)
+        self.assertIn("inputs.retained_run_id == '' || inputs.retry_platform == 'ios'", consumer)
+        self.assertIn("runs-on: macos-26", consumer)
+        expected_steps = (
+            "Download candidate iOS app artifact",
+            "Verify frozen candidate source",
+            "Verify retained Apple siblings",
+            "Require native Apple Silicon host",
+            "Extract candidate iOS app",
+            "Qualify Apple native components",
+        )
+        positions = [consumer.index(f"- name: {step}") for step in expected_steps]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("name: ios-compatibility-app-${{ github.run_id }}", consumer)
+        self.assertIn("ios-simulator-app.zip", consumer)
+        self.assertIn("ios-simulator-app.json", consumer)
+        self.assertIn("for chunk in iter(lambda: archive_file.read(1024 * 1024), b\"\")", consumer)
+        self.assertIn('receipt.get("product_source_sha") == product_sha', consumer)
+        self.assertIn('receipt["run_id"] == run_id', consumer)
+        self.assertIn('producer.get("run_attempt") == producer_attempt', consumer)
+        self.assertIn('receipt.get("bundle_id") == "org.snapetech.pleazyng"', consumer)
+        self.assertIn('verify_retained_apple_siblings(', consumer)
+        self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', consumer)
+        self.assertIn('test "$(uname -m)" = arm64', consumer)
+        self.assertIn('runtime.get("version") == "26.5"', consumer)
+        self.assertIn("--require-installed-runtime", consumer)
 
     def test_runner_scratch_is_configured_after_the_job_starts(self):
         job_setup = self.workflow.split('\njobs:\n', 1)[1].split('\n    steps:\n', 1)[0]
@@ -134,6 +176,11 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 self.assertIn(field, self.workflow)
+        self.assertIn('"Build and test candidate iOS app"', self.workflow)
+        self.assertIn(
+            '"Apple native reliability (iOS): Launch the same iOS app on an older phone runtime"',
+            self.workflow,
+        )
         self.assertIn("actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9", self.workflow)
         self.assertIn("apple-candidate-qualification-${{ matrix.slug }}-${{ github.run_id }}", self.workflow)
 

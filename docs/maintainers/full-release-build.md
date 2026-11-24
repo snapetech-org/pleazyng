@@ -139,6 +139,12 @@ Silicon against the same frozen source. Use the new run ID in
 `qualification:QUALIFICATION_RUN_ID`. The assembly receipt records the
 actual run, attempt and tooling commit for each reused suite.
 
+Supplemental iOS qualification saves the simulator app after native XCTest
+passes. Its separate iOS 26 launch check restores the verified app on a hosted
+`macos-26` runner with the runtime already installed. If only that launch
+check fails, retry its job within the same run to reuse the existing app and
+passing native tests.
+
 Android developer, Play, Fire TV and Automotive jobs each retain their outputs.
 Linux compiles the bundle once per architecture. Each architecture's distro,
 Flatpak, Snap and portable jobs consume its verified bundle independently.
