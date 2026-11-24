@@ -18,13 +18,18 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
 
     def test_workflow_is_main_only_dispatch_with_exact_recovery_identity(self):
         self.assertIn(
-            "run-name: apple-candidate-qualification:${{ inputs.source_run_id }}:${{ inputs.product_source_sha }}",
+            "run-name: apple-candidate-qualification:${{ inputs.source_run_id }}:${{ inputs.product_source_sha }}"
+            "${{ inputs.retained_run_id != '' && format(':resume:{0}:{1}', inputs.retained_run_id, inputs.retry_platform) || '' }}",
             self.workflow,
         )
         self.assertRegex(self.workflow, r"(?m)^on:\n  workflow_dispatch:\n")
         self.assertNotRegex(self.workflow, r"(?m)^  (?:push|pull_request|schedule|workflow_call):")
         self.assertIn("source_run_id:\n", self.workflow)
         self.assertIn("product_source_sha:\n", self.workflow)
+        self.assertIn("retained_run_id:\n", self.workflow)
+        self.assertIn("retry_platform:\n", self.workflow)
+        for platform in ("all", "ios", "macos", "tvos"):
+            self.assertRegex(self.workflow, rf"(?m)^          - {platform}$")
         self.assertIn('os.environ["REF_NAME"] == "refs/heads/main"', self.workflow)
         self.assertIn("github.workflow_ref", self.workflow)
         self.assertIn("cancel-in-progress: false", self.workflow)
@@ -33,8 +38,14 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
     def test_native_matrix_is_public_arm64_and_runs_every_platform_suite(self):
         self.assertIn("name: Apple native reliability (${{ matrix.platform }})", self.workflow)
         self.assertIn("runs-on: xcode-27", self.workflow)
-        for platform in ("iOS", "macOS", "tvOS"):
-            self.assertRegex(self.workflow, rf"(?m)^          - platform: {platform}$")
+        self.assertIn("inputs.retained_run_id == '' || inputs.retry_platform == 'all'", self.workflow)
+        self.assertIn("inputs.retry_platform == 'ios' &&", self.workflow)
+        self.assertIn("inputs.retry_platform == 'macos' &&", self.workflow)
+        self.assertIn('{\"platform\":\"iOS\",\"slug\":\"ios\"}', self.workflow)
+        self.assertIn('{\"platform\":\"macOS\",\"slug\":\"macos\"}', self.workflow)
+        self.assertIn('{\"platform\":\"tvOS\",\"slug\":\"tvos\"}', self.workflow)
+        self.assertIn('retained_run_id == "" and retry_platform == "all"', self.workflow)
+        self.assertIn('retained_run_id != "" and retry_platform != "all"', self.workflow)
         self.assertIn("- name: Require native Apple Silicon host", self.workflow)
         self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', self.workflow)
         self.assertIn('test "$(uname -m)" = arm64', self.workflow)
@@ -51,9 +62,16 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
 
     def test_source_preflight_precedes_tool_setup_and_checks_canonical_candidate(self):
         preflight = self.workflow.find("- name: Verify frozen candidate source")
+        retained = self.workflow.find("- name: Verify retained Apple siblings")
+        host = self.workflow.find("- name: Require native Apple Silicon host")
         native = self.workflow.find("- name: Qualify Apple native components")
         self.assertGreaterEqual(preflight, 0)
+        self.assertGreater(retained, preflight)
+        self.assertGreater(host, retained)
         self.assertGreater(native, preflight)
+        self.assertIn("from verify_embedded_release_ci import verify_retained_apple_siblings", self.workflow)
+        self.assertIn('os.environ["RETAINED_RUN_ID"]', self.workflow)
+        self.assertIn('os.environ["RETRY_PLATFORM"]', self.workflow)
         for required in (
             "Original release run ID must be numeric",
             'source_run.get("head_branch") == "main"',

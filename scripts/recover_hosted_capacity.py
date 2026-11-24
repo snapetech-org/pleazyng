@@ -12,6 +12,10 @@ from datetime import UTC, datetime, timedelta
 MAX_ATTEMPTS = 8
 MAX_WORKER_DISK_ATTEMPTS = 3
 APPLE_QUALIFICATION_WORKFLOW = "apple-candidate-qualification.yml"
+APPLE_QUALIFICATION_TITLE = re.compile(
+    r"apple-candidate-qualification:([1-9][0-9]*):([0-9a-f]{40})"
+    r"(?::resume:([1-9][0-9]*):(all|ios|macos|tvos))?"
+)
 WORKFLOWS = (APPLE_QUALIFICATION_WORKFLOW, "build.yml", "ci.yml", "macos-app-store-signed.yml")
 APPLE_SUITE_GATE_NAMES = ("Apple native reliability", "Release CI / Apple native reliability")
 APPLE_SUITE_PLATFORMS = ("iOS", "macOS", "tvOS")
@@ -54,6 +58,37 @@ def interrupted_hosted_ios_suite(job):
             and not any(step.get("conclusion") == "failure" for step in job["steps"])
             and any(step.get("name") == "Qualify Apple native components"
                     and step.get("status") == "in_progress" for step in job["steps"]))
+
+
+def retained_siblings_verified(repository, run, retry_platform):
+    """Confirm the focused retry passed its retained-sibling preflight."""
+    attempt = run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1 or retry_platform not in {"all", "ios", "macos", "tvos"}:
+        return False
+    expected_platforms = {
+        "ios": ("iOS",), "macos": ("macOS",), "tvos": ("tvOS",),
+        "all": ("iOS", "macOS", "tvOS"),
+    }[retry_platform]
+    route = f"repos/{repository}/actions/runs/{run['id']}/attempts/{attempt}/jobs?per_page=100"
+    pages = api(route, pages=True)
+    if not isinstance(pages, list) or any(
+        not isinstance(page, dict) or not isinstance(page.get("jobs"), list) for page in pages
+    ):
+        return False
+    jobs = [job for page in pages for job in page["jobs"] if isinstance(job, dict)]
+    for platform in expected_platforms:
+        name = f"Apple native reliability ({platform})"
+        matches = [job for job in jobs if job.get("name") == name]
+        if len(matches) != 1:
+            return False
+        steps = matches[0].get("steps")
+        if not isinstance(steps, list):
+            return False
+        checks = [step for step in steps if step.get("name") == "Verify retained Apple siblings"]
+        if (len(checks) != 1 or checks[0].get("status") != "completed"
+                or checks[0].get("conclusion") != "success"):
+            return False
+    return True
 
 
 def classify_attempt(repository, run_id, attempt):
@@ -150,10 +185,13 @@ def recover_recent(repository, retry):
         for run in latest.values():
             candidate = None
             if workflow == APPLE_QUALIFICATION_WORKFLOW and trusted_workflow(repository, run):
-                candidate = re.fullmatch(r"apple-candidate-qualification:([1-9][0-9]*):([0-9a-f]{40})",
-                                         run["display_title"])
+                candidate = APPLE_QUALIFICATION_TITLE.fullmatch(run["display_title"])
+                resumed = candidate is not None and candidate[3] is not None
                 if candidate is not None and (run["conclusion"] == "success"
-                                               or run["status"] != "completed"):
+                                              or run["status"] != "completed"
+                                              or resumed and retained_siblings_verified(
+                                                  repository, run, candidate[4]
+                                              )):
                     supplemental_candidates.add((int(candidate[1]), candidate[2]))
             if workflow == "build.yml" and (run["id"], run.get("head_sha")) in supplemental_candidates:
                 print(f'{run["id"]}: Supplemental Apple qualification is already available or running')

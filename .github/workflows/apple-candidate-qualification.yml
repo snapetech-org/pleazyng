@@ -2,7 +2,7 @@
 # Verify native Apple behavior against a frozen product source with only the
 # reviewed test-harness and Apple DV staging-tool overlays.
 name: Apple candidate qualification
-run-name: apple-candidate-qualification:${{ inputs.source_run_id }}:${{ inputs.product_source_sha }}
+run-name: apple-candidate-qualification:${{ inputs.source_run_id }}:${{ inputs.product_source_sha }}${{ inputs.retained_run_id != '' && format(':resume:{0}:{1}', inputs.retained_run_id, inputs.retry_platform) || '' }}
 
 on:
   workflow_dispatch:
@@ -15,6 +15,21 @@ on:
         description: Full SHA of the product source and annotated candidate tag to qualify.
         type: string
         required: true
+      retained_run_id:
+        description: Failed supplemental run whose passing Apple suites are retained.
+        type: string
+        required: false
+        default: ''
+      retry_platform:
+        description: Apple platform to resume when retaining siblings, or all platforms for a full qualification.
+        type: choice
+        required: false
+        default: all
+        options:
+          - all
+          - ios
+          - macos
+          - tvos
 
 permissions:
   actions: read
@@ -39,17 +54,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: iOS
-            slug: ios
-          - platform: macOS
-            slug: macos
-          - platform: tvOS
-            slug: tvos
+        include: >-
+          ${{ fromJSON(
+            (inputs.retained_run_id == '' || inputs.retry_platform == 'all') &&
+            '[{"platform":"iOS","slug":"ios"},{"platform":"macOS","slug":"macos"},{"platform":"tvOS","slug":"tvos"}]' ||
+            inputs.retry_platform == 'ios' && '[{"platform":"iOS","slug":"ios"}]' ||
+            inputs.retry_platform == 'macos' && '[{"platform":"macOS","slug":"macos"}]' ||
+            '[{"platform":"tvOS","slug":"tvos"}]'
+          ) }}
     env:
       LANG: en_US.UTF-8
       GH_TOKEN: ${{ github.token }}
-      PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA: 2f631883d070b5791058fd59b15b01a1464372f6
+      PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA: 67374d1ff76dd7f1d89a0e92ce678c6d3dd5ff7e
       PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA: 70c267ba92eba5f90e3abdcfa86f7518268df9ae
     steps:
       - name: Check out current trusted main tooling
@@ -70,6 +86,8 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           PRODUCT_SOURCE_SHA: ${{ inputs.product_source_sha }}
+          RETAINED_RUN_ID: ${{ inputs.retained_run_id }}
+          RETRY_PLATFORM: ${{ inputs.retry_platform }}
           TEST_HARNESS_SHA: ${{ env.PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA }}
           DV_BUILD_TOOL_SHA: ${{ env.PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA }}
         run: |
@@ -90,6 +108,8 @@ jobs:
           tag_pattern = re.compile(r"(?:apple-signing-unavailable:)?action:release:pool:public:tag:v(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$")
           source_run_id = os.environ["SOURCE_RUN_ID"]
           product_sha = os.environ["PRODUCT_SOURCE_SHA"]
+          retained_run_id = os.environ["RETAINED_RUN_ID"]
+          retry_platform = os.environ["RETRY_PLATFORM"]
           test_harness_sha = os.environ["TEST_HARNESS_SHA"]
           dv_build_tool_sha = os.environ["DV_BUILD_TOOL_SHA"]
           workflow_sha = os.environ["WORKFLOW_SHA"]
@@ -130,6 +150,13 @@ jobs:
           require(os.environ["REPOSITORY"] == repository, "Candidate qualification requires the canonical repository.")
           require(os.environ["WORKFLOW_REF"] == expected_workflow, "Candidate qualification workflow is not running from trusted main.")
           require(re.fullmatch(r"[0-9]+", source_run_id) is not None, "Original release run ID must be numeric.")
+          require(retained_run_id == "" or re.fullmatch(r"[1-9][0-9]*", retained_run_id) is not None, "Retained qualification run ID must be a positive decimal value.")
+          require(retry_platform in {"all", "ios", "macos", "tvos"}, "Retry platform must be all, ios, macos, or tvos.")
+          require(
+              (retained_run_id == "" and retry_platform == "all")
+              or (retained_run_id != "" and retry_platform != "all"),
+              "A focused retry requires retained_run_id, and retained-run retries must select one platform."
+          )
           require(re.fullmatch(r"[0-9a-f]{40}", product_sha) is not None, "Product source SHA must be a full lowercase commit SHA.")
           require(re.fullmatch(r"[0-9a-f]{40}", test_harness_sha) is not None, "Test harness source SHA is invalid.")
           require(re.fullmatch(r"[0-9a-f]{40}", dv_build_tool_sha) is not None, "Apple DV build-tool source SHA is invalid.")
@@ -247,6 +274,31 @@ jobs:
               for name, value in outputs.items():
                   output.write(f"{name}={value}\n")
           print(f"Verified {candidate_tag} from source run {source_run_id}, attempt {source_run['run_attempt']} with an Apple qualification gap.")
+          PY
+
+      - name: Verify retained Apple siblings
+        if: ${{ inputs.retained_run_id != '' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PRODUCT_SOURCE_SHA: ${{ inputs.product_source_sha }}
+          RETAINED_RUN_ID: ${{ inputs.retained_run_id }}
+          RETRY_PLATFORM: ${{ inputs.retry_platform }}
+          PYTHONPATH: scripts
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from verify_embedded_release_ci import verify_retained_apple_siblings
+
+          verify_retained_apple_siblings(
+              os.environ["SOURCE_RUN_ID"],
+              os.environ["PRODUCT_SOURCE_SHA"],
+              os.environ["RETAINED_RUN_ID"],
+              os.environ["RETRY_PLATFORM"],
+              os.environ["GH_TOKEN"],
+          )
           PY
 
       - name: Require native Apple Silicon host

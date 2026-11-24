@@ -23,11 +23,17 @@ APPLE_PLATFORM_JOBS = (
     'Apple native reliability (macOS)',
     'Apple native reliability (tvOS)',
 )
+APPLE_JOB_BY_SLUG = dict(zip(('ios', 'macos', 'tvos'), APPLE_PLATFORM_JOBS, strict=True))
 APPLE_AGGREGATE_JOB = 'Apple native reliability'
 APPLE_QUALIFICATION_STEPS = (
     'Verify frozen candidate source',
     'Require native Apple Silicon host',
     'Qualify Apple native components',
+)
+APPLE_FOCUSED_QUALIFICATION_STEPS = (
+    APPLE_QUALIFICATION_STEPS[0],
+    'Verify retained Apple siblings',
+    *APPLE_QUALIFICATION_STEPS[1:],
 )
 APPLE_HOSTED_RUNNER_LABELS = {('xcode-27',), ('macos-26',)}
 
@@ -115,14 +121,27 @@ def _supplemental_apple_jobs(proof, sha, run_id, attempt):
     records = proof.get('jobs')
     if not isinstance(records, list) or len(records) != len(APPLE_PLATFORM_JOBS):
         raise GateError('Supplemental Apple proof must contain exactly the three platform suites.')
+    retained_run, retry_platform = _apple_qualification_title(proof.get('run_name'), run_id, sha)
+    retry_job = APPLE_JOB_BY_SLUG.get(retry_platform)
+    if (retained_run != proof.get('retained_run_id') or retained_run == proof['qualification_run_id']
+            or proof.get('head_repository') != REPOSITORY or proof.get('head_branch') != 'main'):
+        raise GateError('Supplemental Apple proof has an invalid workflow run binding.')
     result = {}
     for record in records:
         if not isinstance(record, dict) or record.get('name') not in APPLE_PLATFORM_JOBS:
             raise GateError('Supplemental Apple proof contains an unexpected platform suite.')
         name = record['name']
+        inherited = retained_run is not None and name != retry_job
+        origin = retained_run if inherited else proof['qualification_run_id']
+        origin_attempt = record.get('qualification_attempt')
         if (name in result or type(record.get('id')) is not int or record['id'] < 1
+                or record.get('run_id') != origin
+                or type(origin_attempt) is not int or not 1 <= origin_attempt <= 100
+                or re.fullmatch(r'[0-9a-f]{40}', str(record.get('tooling_sha', ''))) is None
+                or (not inherited and (origin_attempt != proof['qualification_attempt']
+                                       or record['tooling_sha'] != proof['tooling_sha']))
                 or type(record.get('attempt')) is not int
-                or not 1 <= record['attempt'] <= proof['qualification_attempt']
+                or not 1 <= record['attempt'] <= origin_attempt
                 or record.get('status') != 'completed' or record.get('conclusion') != 'success'):
             raise GateError(f'Supplemental Apple suite is malformed or unsuccessful: {name}')
         labels = record.get('labels')
@@ -131,14 +150,12 @@ def _supplemental_apple_jobs(proof, sha, run_id, attempt):
                 or record.get('runner_group_name') != 'GitHub Actions'):
             raise GateError(f'Supplemental Apple suite lacks public Apple Silicon runner evidence: {name}')
         passed_steps = record.get('passed_steps')
-        if not isinstance(passed_steps, list) or passed_steps != list(APPLE_QUALIFICATION_STEPS):
+        expected_steps = APPLE_FOCUSED_QUALIFICATION_STEPS if name == retry_job else APPLE_QUALIFICATION_STEPS
+        if not isinstance(passed_steps, list) or passed_steps != list(expected_steps):
             raise GateError(f'Supplemental Apple suite omitted its required passing steps: {name}')
         result[name] = record
     if set(result) != set(APPLE_PLATFORM_JOBS):
         raise GateError('Supplemental Apple proof omitted a required platform suite.')
-    if (proof.get('run_name') != f'apple-candidate-qualification:{run_id}:{sha}'
-            or proof.get('head_repository') != REPOSITORY or proof.get('head_branch') != 'main'):
-        raise GateError('Supplemental Apple proof has an invalid workflow run binding.')
     return result
 
 
@@ -202,10 +219,10 @@ def verify_jobs(run, jobs, sha, run_id, attempt, required, *, require_candidate_
             elif supplemental_jobs is not None:
                 replacement = supplemental_jobs[name]
                 record['supplemental_qualification'] = {
-                    'run_id': supplemental_apple['qualification_run_id'],
+                    'run_id': replacement['run_id'],
                     'attempt': replacement['attempt'], 'job_id': replacement['id'],
                     'status': replacement['status'], 'conclusion': replacement['conclusion'],
-                    'tooling_sha': supplemental_apple['tooling_sha'],
+                    'tooling_sha': replacement['tooling_sha'],
                     'workflow': supplemental_apple['workflow'],
                 }
                 replaced_apple_jobs.add(name)
@@ -317,8 +334,96 @@ def _positive_run_id(value):
     return None
 
 
+def _apple_qualification_title(title, source_run_id, source_sha):
+    base = f'apple-candidate-qualification:{source_run_id}:{source_sha}'
+    if title == base:
+        return None, None
+    resume = re.fullmatch(re.escape(base) + r':resume:([1-9][0-9]*):(ios|macos|tvos)', str(title))
+    if resume is None:
+        raise GateError('Supplemental Apple run title does not bind this frozen product.')
+    return int(resume[1]), resume[2]
+
+
+def _validate_apple_qualification_run(run, run_id, expected_title, token, *, conclusions):
+    _require_canonical_run_repository(run, description='Supplemental Apple run')
+    attempt = run.get('run_attempt')
+    tooling_sha = run.get('head_sha')
+    path = run.get('path')
+    workflow_id = run.get('workflow_id')
+    if (run.get('id') != run_id or run.get('event') != 'workflow_dispatch'
+            or run.get('head_branch') != 'main'
+            or not isinstance(path, str) or path.split('@')[0] != APPLE_QUALIFICATION_WORKFLOW
+            or run.get('display_title') != expected_title
+            or run.get('status') != 'completed' or run.get('conclusion') not in conclusions
+            or type(attempt) is not int or not 1 <= attempt <= 100
+            or re.fullmatch(r'[0-9a-f]{40}', str(tooling_sha)) is None
+            or type(workflow_id) is not int or workflow_id < 1):
+        raise GateError('Supplemental Apple run is not the expected completed trusted-main workflow run.')
+    workflow = api(f'actions/workflows/{workflow_id}', token)
+    if (workflow.get('id') != workflow_id or workflow.get('path') != APPLE_QUALIFICATION_WORKFLOW
+            or workflow.get('state') != 'active'):
+        raise GateError('Supplemental Apple run does not resolve to the active canonical workflow file.')
+    _require_main_ancestor(tooling_sha, token, 'Supplemental Apple workflow source')
+
+
+def _qualifying_apple_suites(run, expected_names, token, *, failed_job=None, focused=False):
+    jobs = fetch_attempt_history(run['id'], run['run_attempt'], token)
+    suite_jobs = [job for job in jobs if str(job.get('name', '')).startswith('Apple native reliability')]
+    if len(suite_jobs) != len(expected_names) or {job.get('name') for job in suite_jobs} != set(expected_names):
+        raise GateError('Supplemental Apple workflow does not contain exactly its expected platform suites.')
+    required_steps = APPLE_FOCUSED_QUALIFICATION_STEPS if focused else APPLE_QUALIFICATION_STEPS
+    records = []
+    for job in suite_jobs:
+        name = job['name']
+        if name == failed_job:
+            if job.get('status') != 'completed' or job.get('conclusion') not in {'failure', 'cancelled', 'timed_out'}:
+                raise GateError(f'Retained Apple run did not record the requested failed suite: {name}')
+            continue
+        if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
+                or type(job.get('id')) is not int or job['id'] < 1
+                or type(job.get('run_attempt')) is not int
+                or not 1 <= job['run_attempt'] <= run['run_attempt']):
+            raise GateError(f'Supplemental Apple suite did not pass in its latest attempt: {name}')
+        labels = job.get('labels')
+        normalized = tuple(str(label).lower() for label in labels) if isinstance(labels, list) else ()
+        if (normalized not in APPLE_HOSTED_RUNNER_LABELS
+                or job.get('runner_group_name') != 'GitHub Actions'):
+            raise GateError(f'Supplemental Apple suite did not use a public hosted Apple Silicon runner: {name}')
+        steps = job.get('steps')
+        if not isinstance(steps, list):
+            raise GateError(f'Supplemental Apple suite omitted step evidence: {name}')
+        for step_name in required_steps:
+            matches = [step for step in steps if step.get('name') == step_name]
+            if (len(matches) != 1 or matches[0].get('status') != 'completed'
+                    or matches[0].get('conclusion') != 'success'):
+                raise GateError(f'Supplemental Apple suite step did not pass uniquely: {name}: {step_name}')
+        records.append({
+            'id': job['id'], 'name': name, 'attempt': job['run_attempt'],
+            'run_id': run['id'], 'qualification_attempt': run['run_attempt'], 'tooling_sha': run['head_sha'],
+            'status': job['status'], 'conclusion': job['conclusion'],
+            'labels': labels, 'runner_group_name': job['runner_group_name'],
+            'passed_steps': list(required_steps),
+        })
+    return records
+
+
+def verify_retained_apple_siblings(source_run_id, source_sha, retained_run_id, retry_platform, token):
+    """Accept only successful siblings from a full failed run of this exact candidate."""
+    source_run_id = _positive_run_id(source_run_id)
+    retained_run_id = _positive_run_id(retained_run_id)
+    retry_job = APPLE_JOB_BY_SLUG.get(retry_platform)
+    if (source_run_id is None or retained_run_id is None or retained_run_id == source_run_id
+            or retry_job is None or re.fullmatch(r'[0-9a-f]{40}', str(source_sha)) is None):
+        raise GateError('Retaining Apple siblings requires exact run IDs, product SHA, and one retry platform.')
+    retained = api(f'actions/runs/{retained_run_id}', token)
+    base = f'apple-candidate-qualification:{source_run_id}:{source_sha}'
+    _validate_apple_qualification_run(
+        retained, retained_run_id, base, token, conclusions={'failure', 'cancelled', 'timed_out'})
+    return _qualifying_apple_suites(retained, APPLE_PLATFORM_JOBS, token, failed_job=retry_job)
+
+
 def verify_supplemental_apple_ci(repository, source_sha, source_run_id, qualification_run_id, token):
-    """Verify the trusted hosted-Apple rerun bound to one frozen build source."""
+    """Verify hosted Apple qualification for one frozen build source."""
     source_run_id = _positive_run_id(source_run_id)
     qualification_run_id = _positive_run_id(qualification_run_id)
     if (repository != REPOSITORY or re.fullmatch(r'[0-9a-f]{40}', str(source_sha)) is None
@@ -338,75 +443,27 @@ def verify_supplemental_apple_ci(repository, source_sha, source_run_id, qualific
     _require_main_ancestor(source_sha, token, 'Frozen product source')
 
     qualification = api(f'actions/runs/{qualification_run_id}', token)
-    _require_canonical_run_repository(qualification, description='Supplemental Apple run')
-    qualification_attempt = qualification.get('run_attempt')
-    tooling_sha = qualification.get('head_sha')
-    expected_name = f'apple-candidate-qualification:{source_run_id}:{source_sha}'
-    workflow_path = qualification.get('path')
-    workflow_id = qualification.get('workflow_id')
-    if (qualification.get('id') != qualification_run_id
-            or qualification.get('event') != 'workflow_dispatch'
-            or qualification.get('head_branch') != 'main'
-            or not isinstance(workflow_path, str)
-            or workflow_path.split('@')[0] != APPLE_QUALIFICATION_WORKFLOW
-            or qualification.get('display_title') != expected_name
-            or (qualification.get('status'), qualification.get('conclusion')) != ('completed', 'success')
-            or type(qualification_attempt) is not int or not 1 <= qualification_attempt <= 100
-            or re.fullmatch(r'[0-9a-f]{40}', str(tooling_sha)) is None
-            or type(workflow_id) is not int or workflow_id < 1):
-        raise GateError('Supplemental Apple run is not the successful exact-name trusted-main workflow run.')
-    workflow = api(f'actions/workflows/{workflow_id}', token)
-    if (workflow.get('id') != workflow_id or workflow.get('path') != APPLE_QUALIFICATION_WORKFLOW
-            or workflow.get('state') != 'active'):
-        raise GateError('Supplemental Apple run does not resolve to the active canonical workflow file.')
-    _require_main_ancestor(tooling_sha, token, 'Supplemental Apple workflow source')
-
-    jobs = fetch_attempt_history(qualification_run_id, qualification_attempt, token)
-    suite_jobs = [job for job in jobs if str(job.get('name', '')).startswith('Apple native reliability')]
-    suite_names = {job.get('name') for job in suite_jobs}
-    if len(suite_jobs) != len(APPLE_PLATFORM_JOBS) or suite_names != set(APPLE_PLATFORM_JOBS):
-        raise GateError('Supplemental Apple workflow must contain precisely the iOS, macOS, and tvOS suites.')
-    records = []
-    for name in APPLE_PLATFORM_JOBS:
-        matches = [job for job in suite_jobs if job.get('name') == name]
-        if len(matches) != 1:
-            raise GateError(f'Supplemental Apple suite is missing or ambiguous: {name}')
-        job = matches[0]
-        if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
-                or type(job.get('id')) is not int or job['id'] < 1
-                or type(job.get('run_attempt')) is not int
-                or not 1 <= job['run_attempt'] <= qualification_attempt):
-            raise GateError(f'Supplemental Apple suite did not pass in its latest attempt: {name}')
-        labels = job.get('labels')
-        normalized = tuple(str(label).lower() for label in labels) if isinstance(labels, list) else ()
-        if (normalized not in APPLE_HOSTED_RUNNER_LABELS
-                or job.get('runner_group_name') != 'GitHub Actions'):
-            raise GateError(f'Supplemental Apple suite did not use a public hosted Apple Silicon runner: {name}')
-        steps = job.get('steps')
-        if not isinstance(steps, list):
-            raise GateError(f'Supplemental Apple suite omitted step evidence: {name}')
-        passed_steps = []
-        for step_name in APPLE_QUALIFICATION_STEPS:
-            matches = [step for step in steps if step.get('name') == step_name]
-            if (len(matches) != 1 or matches[0].get('status') != 'completed'
-                    or matches[0].get('conclusion') != 'success'):
-                raise GateError(f'Supplemental Apple suite step did not pass uniquely: {name}: {step_name}')
-            passed_steps.append(step_name)
-        records.append({
-            'id': job['id'], 'name': name, 'attempt': job['run_attempt'],
-            'status': job['status'], 'conclusion': job['conclusion'],
-            'labels': labels, 'runner_group_name': job['runner_group_name'],
-            'passed_steps': passed_steps,
-        })
+    title = qualification.get('display_title')
+    retained_run, retry_platform = _apple_qualification_title(title, source_run_id, source_sha)
+    retry_job = APPLE_JOB_BY_SLUG.get(retry_platform)
+    _validate_apple_qualification_run(qualification, qualification_run_id, title, token, conclusions={'success'})
+    records = _qualifying_apple_suites(
+        qualification, (retry_job,) if retry_job else APPLE_PLATFORM_JOBS, token, focused=retry_job is not None)
+    if retained_run is not None:
+        if retained_run == qualification_run_id:
+            raise GateError('Supplemental Apple qualification cannot retain results from itself.')
+        records.extend(verify_retained_apple_siblings(
+            source_run_id, source_sha, retained_run, retry_platform, token))
 
     return {
         'mode': 'supplemental-apple', 'repository': repository,
         'source_sha': source_sha, 'source_run_id': source_run_id,
         'source_run_attempt': source_attempt,
         'qualification_run_id': qualification_run_id,
-        'qualification_attempt': qualification_attempt,
-        'tooling_sha': tooling_sha, 'workflow': APPLE_QUALIFICATION_WORKFLOW,
-        'workflow_id': workflow_id, 'run_name': expected_name,
+        'qualification_attempt': qualification['run_attempt'],
+        'retained_run_id': retained_run,
+        'tooling_sha': qualification['head_sha'], 'workflow': APPLE_QUALIFICATION_WORKFLOW,
+        'workflow_id': qualification['workflow_id'], 'run_name': title,
         'head_repository': REPOSITORY, 'head_branch': 'main',
         'status': qualification['status'], 'conclusion': qualification['conclusion'],
         'jobs': records,

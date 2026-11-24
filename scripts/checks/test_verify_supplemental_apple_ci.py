@@ -12,6 +12,8 @@ SOURCE_SHA = 'c' * 40
 TOOLING_SHA = 'd' * 40
 SOURCE_RUN_ID = 45421474803
 QUALIFICATION_RUN_ID = 45421479999
+RETAINED_RUN_ID = 45421479988
+RETAINED_TOOLING_SHA = 'b' * 40
 QUALIFICATION_WORKFLOW_ID = 887766
 
 
@@ -99,6 +101,66 @@ class SupplementalAppleQualificationTests(unittest.TestCase):
         self.jobs[0]['labels'] = ['macos-26']
         proof = self.verify()
         self.assertEqual(proof['jobs'][0]['labels'], ['macos-26'])
+
+    def _focused_inputs(self):
+        previous = {
+            **self.qualification_run, 'id': RETAINED_RUN_ID, 'head_sha': RETAINED_TOOLING_SHA,
+            'run_attempt': 2, 'conclusion': 'failure',
+        }
+        self.qualification_run['display_title'] += f':resume:{RETAINED_RUN_ID}:ios'
+        older_failure = {**self.jobs[0], 'run_attempt': 2, 'conclusion': 'failure'}
+        retained_attempts = [deepcopy(self.jobs), [older_failure]]
+        self.jobs = [{**self.jobs[0], 'id': 40,
+                      'steps': [_step(name) for name in embedded.APPLE_FOCUSED_QUALIFICATION_STEPS]}]
+        return previous, retained_attempts
+
+    def _verify_focused(self, previous, retained_attempts):
+        normal_api, normal_pages = self._api, self._pages
+
+        def fixture_api(path, token):
+            if path == f'actions/runs/{RETAINED_RUN_ID}':
+                return deepcopy(previous)
+            if path == f'compare/{RETAINED_TOOLING_SHA}...main':
+                return {'status': 'ahead', 'base_commit': {'sha': RETAINED_TOOLING_SHA}}
+            return normal_api(path, token)
+
+        def fixture_pages(url, token, collection, **options):
+            for number, jobs in enumerate(retained_attempts, 1):
+                if f'/runs/{RETAINED_RUN_ID}/attempts/{number}/jobs' in url:
+                    return deepcopy(jobs)
+            return normal_pages(url, token, collection, **options)
+
+        with (
+            patch.object(embedded, 'api', side_effect=fixture_api),
+            patch.object(embedded, '_pages', side_effect=fixture_pages),
+        ):
+            return embedded.verify_supplemental_apple_ci(
+                embedded.REPOSITORY, SOURCE_SHA, SOURCE_RUN_ID, QUALIFICATION_RUN_ID, 'fixture-token')
+
+    def test_focused_repair_preserves_exact_sibling_run_and_attempt_provenance(self):
+        previous, attempts = self._focused_inputs()
+        proof = self._verify_focused(previous, attempts)
+        by_name = embedded._supplemental_apple_jobs(proof, SOURCE_SHA, SOURCE_RUN_ID, 3)
+        ios, macos, tvos = (by_name[name] for name in embedded.APPLE_PLATFORM_JOBS)
+        self.assertEqual((ios['id'], ios['run_id'], ios['tooling_sha']), (40, QUALIFICATION_RUN_ID, TOOLING_SHA))
+        for job in (macos, tvos):
+            self.assertEqual((job['run_id'], job['attempt'], job['qualification_attempt'], job['tooling_sha']),
+                             (RETAINED_RUN_ID, 1, 2, RETAINED_TOOLING_SHA))
+
+    def test_focused_repair_rejects_mismatched_retained_source_or_superseded_pass(self):
+        previous, attempts = self._focused_inputs()
+        with self.assertRaises(GateError):
+            self._verify_focused({**previous, 'display_title': previous['display_title'].replace(SOURCE_SHA, 'a' * 40)},
+                                 attempts)
+        attempts[1].append({**attempts[0][1], 'run_attempt': 2, 'conclusion': 'failure'})
+        with self.assertRaises(GateError):
+            self._verify_focused(previous, attempts)
+
+    def test_focused_repair_requires_retained_sibling_preflight(self):
+        previous, attempts = self._focused_inputs()
+        self.jobs[0]['steps'][1] = _step('Verify retained Apple siblings', 'skipped')
+        with self.assertRaises(GateError):
+            self._verify_focused(previous, attempts)
 
     def test_rejects_wrong_repository_source_or_run_ids(self):
         for arguments in (

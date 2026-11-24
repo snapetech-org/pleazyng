@@ -4,7 +4,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -228,6 +228,76 @@ class HostedCapacityTests(unittest.TestCase):
             recover.return_value = 'Requested retry for Apple native reliability (iOS)'
             capacity.recover_recent(self.repository, retry=True)
             recover.assert_called_once_with(self.repository, 43, self.attempt, True)
+
+    def test_failed_resumed_qualification_suppresses_source_retry_after_retained_preflight(self):
+        sha = 'b' * 40
+        original = {
+            **self.workflow, 'head_sha': sha,
+            'display_title': 'action:release:pool:public:tag:v3.0.51',
+        }
+        resumed = {
+            **self.workflow, 'id': 44, 'run_attempt': 1,
+            'path': f'.github/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}',
+            'head_sha': 'c' * 40,
+            'display_title': f'apple-candidate-qualification:42:{sha}:resume:45480461821:ios',
+        }
+        suite_job = {
+            'id': 900, 'name': 'Apple native reliability (iOS)',
+            'steps': [{'name': 'Verify retained Apple siblings',
+                       'status': 'completed', 'conclusion': 'success'}],
+        }
+
+        def list_runs(path, *, pages=False):
+            if path == (f'repos/{self.repository}/actions/runs/44/attempts/1/jobs?per_page=100') and pages:
+                return [{'jobs': [suite_job]}]
+            if f'/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}/' in path:
+                return [{'workflow_runs': [resumed]}]
+            if '/workflows/build.yml/' in path:
+                return [{'workflow_runs': [original]}]
+            return []
+
+        with patch.object(capacity, 'api', side_effect=list_runs), \
+                patch.object(capacity, 'recover', return_value='Requires investigation: iOS test failure') as recover:
+            capacity.recover_recent(self.repository, retry=True)
+
+        recover.assert_called_once_with(self.repository, 44, 1, True)
+
+    def test_failed_resumed_qualification_without_retained_preflight_does_not_suppress_source(self):
+        sha = 'c' * 40
+        original = {
+            **self.workflow, 'head_sha': sha,
+            'display_title': 'action:release:pool:public:tag:v3.0.51',
+        }
+        resumed = {
+            **self.workflow, 'id': 45, 'run_attempt': 1,
+            'path': f'.github/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}',
+            'head_sha': 'd' * 40,
+            'display_title': f'apple-candidate-qualification:42:{sha}:resume:45480461821:ios',
+        }
+        suite_job = {
+            'id': 901, 'name': 'Apple native reliability (iOS)',
+            'steps': [{'name': 'Verify retained Apple siblings',
+                       'status': 'completed', 'conclusion': 'failure'}],
+        }
+
+        def list_runs(path, *, pages=False):
+            if path == (f'repos/{self.repository}/actions/runs/45/attempts/1/jobs?per_page=100') and pages:
+                return [{'jobs': [suite_job]}]
+            if f'/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}/' in path:
+                return [{'workflow_runs': [resumed]}]
+            if '/workflows/build.yml/' in path:
+                return [{'workflow_runs': [original]}]
+            return []
+
+        with patch.object(capacity, 'api', side_effect=list_runs), \
+                patch.object(capacity, 'recover', return_value='Requires investigation') as recover:
+            capacity.recover_recent(self.repository, retry=True)
+
+        self.assertCountEqual(
+            recover.call_args_list,
+            [call(self.repository, 45, 1, True),
+             call(self.repository, 42, self.attempt, True)],
+        )
 
     def test_cancelled_supplemental_run_needs_runner_allocation_evidence(self):
         self.workflow.update(conclusion='cancelled',

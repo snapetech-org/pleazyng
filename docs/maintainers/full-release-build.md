@@ -130,6 +130,15 @@ platform artifact before creating the stable tag. It verifies the downloaded
 artifact digests again before drafting the release. Keep the original run ID
 and qualification run ID when retrying delivery for the same version.
 
+When exactly one supplemental Apple suite fails and the fix changes the
+workflow revision, dispatch **Apple candidate qualification** again using the
+same original run ID and product SHA. Set `retained_run_id` to the failed
+supplemental run and `retry_platform` to its failed platform. The new run
+executes one suite and verifies that both siblings passed on hosted Apple
+Silicon against the same frozen source. Use the new run ID in
+`qualification:QUALIFICATION_RUN_ID`. The assembly receipt records the
+actual run, attempt and tooling commit for each reused suite.
+
 Android developer, Play, Fire TV and Automotive jobs each retain their outputs.
 Linux compiles the bundle once per architecture. Each architecture's distro,
 Flatpak, Snap and portable jobs consume its verified bundle independently.
