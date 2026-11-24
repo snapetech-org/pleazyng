@@ -9,6 +9,8 @@ import '../../discovery/discovery_sync.dart';
 import 'sync_document.dart';
 import 'sync_store.dart';
 
+part 'publication_recovery.dart';
+
 class PublicationSyncConfig {
   const PublicationSyncConfig({
     required this.sourceId,
@@ -109,85 +111,76 @@ class PublicationSync {
 
   static String recoveryName(String namespace) => 'plezyng-recovery-v1-$namespace.json';
 
-  /// Exports only the encrypted sync document. The user must retain the
-  /// private sync code separately; no source account or media data is bundled.
-  Future<String> exportRecovery(String profile, {DiscoverySync? discoverySync}) async {
-    final config = await this.config(profile);
-    if (config == null) throw const SourceException(SourceFailure.unsupported);
-    final cipher = SyncCipher(config.code);
-    final cache = _SyncCache(await repository.preference(profile, _cacheKey(cipher.namespace)));
-    final device = (await repository.preference(profile, 'publication-sync-device-v1'))['id'] as String?;
-    cache.document.compactSafe(actor: device);
-    final name = recoveryName(cipher.namespace);
-    final encrypted = await cipher.seal(cache.document, name);
-    final bundle = <String, dynamic>{'format': 'plezyng-encrypted-recovery-v2', 'name': name, 'encrypted': encrypted};
-    if (config.includeDiscovery) {
-      if (discoverySync == null) throw const SourceException(SourceFailure.unsupported);
-      final discoveryNamespace = DiscoverySync.namespaceFor(config.code);
-      final discoveryName = DiscoverySync.recoveryName(discoveryNamespace);
-      final discoveryDocument = await discoverySync.recoveryDocument(profile, config.code);
-      bundle['discoveryName'] = discoveryName;
-      bundle['discoveryEncrypted'] = await cipher.seal(discoveryDocument, discoveryName);
-    }
-    return canonicalSyncJson(bundle);
+  // The bundle can contain two independently bounded encrypted documents.
+  static const maxRecoveryBytes = 12 * 1024 * 1024;
+
+  Future<String> _device(String profile) async {
+    final pref = await repository.updatePreferenceAtomically(profile, 'publication-sync-device-v1', (current) {
+      final id = current['id'];
+      return id is String && RegExp(r'^[a-f0-9]{32}$').hasMatch(id)
+          ? current
+          : {'id': const Uuid().v4().replaceAll('-', '')};
+    });
+    return pref['id'] as String;
   }
 
-  /// Imports are additive. The recovery file is authenticated with the
-  /// configured code and merged through the same causal rules as cloud state.
+  Future<String> exportRecovery(String profile, {DiscoverySync? discoverySync, void Function()? check}) async {
+    final config = await this.config(profile);
+    if (config == null || config.includeDiscovery && discoverySync == null) {
+      throw const SourceException(SourceFailure.unsupported);
+    }
+    final cipher = SyncCipher(config.code), key = _cacheKey(cipher.namespace);
+    final documents = await repository.database.transaction(() async {
+      check?.call();
+      final device = await _device(profile);
+      final cache = _SyncCache(await repository.preference(profile, key));
+      _capture(
+        cache,
+        device,
+        await _locals(profile, await repository.sources(profile), await sharedEntryMappings(profile)),
+      );
+      cache.document.compactSafe(actor: device);
+      await repository.savePreference(profile, key, cache.toJson());
+      final discovery = config.includeDiscovery ? await discoverySync!.recoveryDocument(profile, config.code) : null;
+      check?.call();
+      return (publication: cache.document, discovery: discovery);
+    });
+    return _sealRecovery(cipher, config.code, documents);
+  }
+
   Future<void> importRecovery({
     required String profile,
     required String text,
     required List<FileSource> sources,
     required Set<String> activeKeys,
     DiscoverySync? discoverySync,
+    void Function()? check,
   }) async {
     final config = await this.config(profile);
     if (config == null) throw const SourceException(SourceFailure.unsupported);
-    try {
-      if (text.length > 7 * 1024 * 1024 || utf8.encode(text).length > 7 * 1024 * 1024) {
-        throw const SourceException(SourceFailure.invalidData);
+    final cipher = SyncCipher(config.code), cacheKey = _cacheKey(cipher.namespace);
+    final incoming = await _openRecovery(text, cipher, config);
+    if (incoming.discovery != null && discoverySync == null) throw const SourceException(SourceFailure.unsupported);
+    final restoredConflicts = <String, PublicationSyncConflict>{};
+    await repository.database.transaction(() async {
+      check?.call();
+      final device = await _device(profile);
+      final mappings = await sharedEntryMappings(profile);
+      final cache = _SyncCache(await repository.preference(profile, cacheKey));
+      _capture(cache, device, await _locals(profile, sources, mappings));
+      cache.document.merge(incoming.publication);
+      cache.document.compactSafe(actor: device);
+      cache.published = '';
+      await _apply(profile, cache, sources, mappings, activeKeys, restoredConflicts);
+      await repository.savePreference(profile, cacheKey, cache.toJson());
+      if (incoming.discovery case final discovery?) {
+        await discoverySync!.importRecovery(profile: profile, code: config.code, incoming: discovery);
       }
-      final envelope = sourceMap(jsonDecode(text));
-      final cipher = SyncCipher(config.code);
-      final name = envelope['name'];
-      final format = envelope['format'];
-      if (!const {'plezyng-encrypted-recovery-v1', 'plezyng-encrypted-recovery-v2'}.contains(format) ||
-          name != recoveryName(cipher.namespace) ||
-          envelope['encrypted'] is! String) {
-        throw const SourceException(SourceFailure.invalidData);
-      }
-      final incoming = await cipher.open(envelope['encrypted'] as String, name as String);
-      SyncDocument? discoveryIncoming;
-      if (config.includeDiscovery && format == 'plezyng-encrypted-recovery-v2') {
-        if (discoverySync == null ||
-            envelope['discoveryEncrypted'] is! String ||
-            envelope['discoveryName'] is! String) {
-          throw const SourceException(SourceFailure.invalidData);
-        }
-        final discoveryNamespace = DiscoverySync.namespaceFor(config.code);
-        final discoveryName = DiscoverySync.recoveryName(discoveryNamespace);
-        if (envelope['discoveryName'] != discoveryName) throw const SourceException(SourceFailure.invalidData);
-        discoveryIncoming = await cipher.open(envelope['discoveryEncrypted'] as String, discoveryName);
-      }
-      final device = (await repository.preference(profile, 'publication-sync-device-v1'))['id'] as String?;
-      final entryMappings = await sharedEntryMappings(profile);
-      final cacheKey = _cacheKey(cipher.namespace);
-      await repository.database.transaction(() async {
-        final cache = _SyncCache(await repository.preference(profile, cacheKey));
-        cache.document.merge(incoming);
-        cache.document.compactSafe(actor: device);
-        cache.published = '';
-        await _apply(profile, cache, sources, entryMappings, activeKeys);
-        await repository.savePreference(profile, cacheKey, cache.toJson());
-      });
-      if (discoveryIncoming != null && discoverySync != null) {
-        await discoverySync.importRecovery(profile: profile, code: config.code, incoming: discoveryIncoming);
-      }
-    } on SourceException {
-      rethrow;
-    } on Object {
-      throw const SourceException(SourceFailure.invalidData);
-    }
+      check?.call();
+    });
+    conflicts
+      ..clear()
+      ..addAll(restoredConflicts);
   }
 
   /// Re-keys cached sync records when a source is paired under a shared
@@ -405,11 +398,7 @@ class PublicationSync {
         )
         .get();
     if (cacheRows.isEmpty) return;
-    final devicePreference = await repository.preference(profile, 'publication-sync-device-v1');
-    final device = devicePreference['id'] as String? ?? const Uuid().v4().replaceAll('-', '');
-    if (devicePreference['id'] != device) {
-      await repository.savePreference(profile, 'publication-sync-device-v1', {'id': device});
-    }
+    final device = await _device(profile);
     for (final cacheRow in cacheRows) {
       final cacheKey = cacheRow.read<String>('key');
       final cache = _SyncCache(sourceMap(jsonDecode(cacheRow.read<String>('payload'))));
@@ -639,12 +628,13 @@ class PublicationSync {
     List<FileSource> sources,
     Map<String, String> entryMappings,
     Set<String> activeKeys,
+    Map<String, PublicationSyncConflict> found,
   ) async {
-    conflicts.clear();
+    found.clear();
     final identities = await _identitiesForDocument(profile, sources, cache.document, entryMappings);
     for (final record in cache.document.records.entries) {
       try {
-        await _applyRecord(profile, cache, record, identities, entryMappings, activeKeys);
+        await _applyRecord(profile, cache, record, identities, entryMappings, activeKeys, found);
       } on SourceException catch (error) {
         if (error.reason != SourceFailure.invalidData) rethrow;
         // Leave this version unobserved for a later catalog/metadata refresh.
@@ -659,6 +649,7 @@ class PublicationSync {
     Map<String, SourceEntry> identities,
     Map<String, String> entryMappings,
     Set<String> activeKeys,
+    Map<String, PublicationSyncConflict> found,
   ) async {
     final values = record.value;
     final first = values.first.value;
@@ -670,7 +661,7 @@ class PublicationSync {
       }
     }
     if (cache.document.conflicted(record.key)) {
-      conflicts[record.key] = PublicationSyncConflict(record.key, entry, values);
+      found[record.key] = PublicationSyncConflict(record.key, entry, values);
       return;
     }
     final data = sourceMap(first['data']);
@@ -768,10 +759,8 @@ class PublicationSync {
       check();
       final cipher = SyncCipher(config.code), cacheKey = _cacheKey(SyncCipher(config.code).namespace);
       final cache = _SyncCache(await repository.preference(profile, cacheKey));
-      final deviceConfig = await repository.preference(profile, 'publication-sync-device-v1');
-      final device = deviceConfig['id'] as String? ?? const Uuid().v4().replaceAll('-', '');
+      final device = await _device(profile);
       check();
-      await repository.savePreference(profile, 'publication-sync-device-v1', {'id': device});
       final entryMappings = await sharedEntryMappings(profile);
       // Persist new local edits BEFORE any network access. Retry retains the
       // same causal context even if a pull, upload or application crashes.
@@ -797,14 +786,13 @@ class PublicationSync {
         remote.merge(document);
       }
       // A tick during network I/O is captured against the pre-pull basis.
-      late Map<String, _LocalValue> publishedLocals;
       await repository.database.transaction(() async {
         check();
-        publishedLocals = await _locals(profile, sources, entryMappings);
+        final publishedLocals = await _locals(profile, sources, entryMappings);
         _capture(cache, device, publishedLocals);
         cache.document.merge(remote);
         cache.document.compactSafe(actor: device);
-        await _apply(profile, cache, sources, entryMappings, activeKeys);
+        await _apply(profile, cache, sources, entryMappings, activeKeys, conflicts);
         check();
         await repository.savePreference(profile, cacheKey, cache.toJson());
       });
@@ -861,7 +849,7 @@ class PublicationSync {
     } on SourceException catch (e) {
       failure = e.reason;
       rethrow;
-    } catch (_) {
+    } on Object {
       failure = SourceFailure.unavailable;
       rethrow;
     } finally {
@@ -890,7 +878,7 @@ class PublicationSync {
       cache.document.edit(key, device, selected.value, joinedClock(current));
       cache.observed.remove(key);
       final entryMappings = await sharedEntryMappings(profile);
-      await _apply(profile, cache, sources, entryMappings, activeKeys);
+      await _apply(profile, cache, sources, entryMappings, activeKeys, conflicts);
       check();
       await repository.savePreference(profile, cacheKey, cache.toJson());
     });

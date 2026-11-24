@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Include offline reading and listening edits in recovery backups. Restoring a backup preserves conflicting local edits and restores publication and Discovery data together, including larger combined backups.
+- Tie WebDAV progress updates to the file revision each reader saw and keep oversized annotation updates from making remote state unreadable.
+- Keep a disconnected podcast account disconnected after a delayed login, run podcast sync for the newly selected profile, and retain feeds that were resubscribed to during playback.
+
 - Compile and stage the iOS simulator’s Dolby Vision runtime before the native test build and reclaim dependency build scratch so hosted Macs have room to finish qualification.
 
 - Build and verify the universal MilkRust runtime before macOS app compilation so its logs and timeout are independent of Xcode.

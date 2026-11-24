@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plezy/discovery/discovery_sync.dart';
+import 'package:plezy/discovery/discovery_store.dart';
 import 'package:plezy/sources/source_database.dart';
 import 'package:plezy/sources/source_models.dart';
 import 'package:plezy/sources/sync/publication_sync.dart';
@@ -153,6 +155,114 @@ void main() {
     await repoA.database.close();
     await repoB.database.close();
   });
+  Future<void> configureRecovery({bool discovery = false}) async {
+    await repoA.saveSource(sourceA, {});
+    await repoB.saveSource(sourceB, {});
+    await a.configure('profile-A', config);
+    await b.configure(
+      'profile-B',
+      PublicationSyncConfig(sourceId: sourceB.id, code: config.code, includeDiscovery: discovery),
+    );
+  }
+
+  Future<void> restore(String bundle, {DiscoverySync? discovery}) => b.importRecovery(
+    profile: 'profile-B',
+    text: bundle,
+    sources: [sourceB],
+    activeKeys: {},
+    discoverySync: discovery,
+  );
+
+  test('recovery exports the latest offline progress before any cloud run', () async {
+    await configureRecovery();
+    await position(repoA, 'profile-A', entryA, 60000);
+    await restore(await a.exportRecovery('profile-A'));
+    expect(await at(repoB, 'profile-B', entryB), 60000);
+    expect(await repoA.pendingEvents('profile-A'), hasLength(1));
+    await position(repoA, 'profile-A', entryA, 70000);
+    await restore(await a.exportRecovery('profile-A'));
+    expect(await at(repoB, 'profile-B', entryB), 70000);
+    expect(b.conflicts, isEmpty);
+  });
+
+  test('recovery preserves concurrent unsynced progress and both conflict choices', () async {
+    await configureRecovery();
+    await position(repoA, 'profile-A', entryA, 20000);
+    await runA();
+    await runB();
+    await position(repoA, 'profile-A', entryA, 40000);
+    await runA();
+    await position(repoB, 'profile-B', entryB, 30000);
+    await restore(await a.exportRecovery('profile-A'));
+    expect(await at(repoB, 'profile-B', entryB), 30000);
+    expect(b.conflicts.values.single.values.map((v) => v.value['data']['positionMs']), unorderedEquals([30000, 40000]));
+  });
+
+  test('publication-only recovery restores with discovery enabled and rejects half a discovery section', () async {
+    await configureRecovery(discovery: true);
+    await position(repoA, 'profile-A', entryA, 15000);
+    await runA();
+    final bundle = await a.exportRecovery('profile-A');
+    final discovery = DiscoverySync(repoB);
+    final partial = jsonDecode(bundle) as Map<String, dynamic>;
+    partial['discoveryName'] = DiscoverySync.recoveryName(DiscoverySync.namespaceFor(config.code));
+    await expectLater(restore(jsonEncode(partial), discovery: discovery), throwsA(isA<SourceException>()));
+    expect(await at(repoB, 'profile-B', entryB), isNull);
+    await restore(bundle, discovery: discovery);
+    expect(await at(repoB, 'profile-B', entryB), 15000);
+  });
+
+  test('a failed discovery merge rolls back the publication restore', () async {
+    await configureRecovery(discovery: true);
+    await position(repoA, 'profile-A', entryA, 15000);
+    final bundle = jsonDecode(await a.exportRecovery('profile-A')) as Map<String, dynamic>;
+    final discoveryName = DiscoverySync.recoveryName(DiscoverySync.namespaceFor(config.code));
+    final invalid = SyncDocument()..edit('b' * 64, 'a' * 32, {'type': 'unknown'}, {});
+    bundle['discoveryName'] = discoveryName;
+    bundle['discoveryEncrypted'] = await SyncCipher(config.code).seal(invalid, discoveryName);
+    await expectLater(restore(jsonEncode(bundle), discovery: DiscoverySync(repoB)), throwsA(isA<SourceException>()));
+    expect(await at(repoB, 'profile-B', entryB), isNull);
+    expect(await repoB.pendingEvents('profile-B'), isEmpty);
+  });
+
+  test('restores both bounded documents when their combined encrypted bundle exceeds 7 MiB', () async {
+    await configureRecovery(discovery: true);
+    await position(repoA, 'profile-A', entryA, 15000);
+    final bundle = jsonDecode(await a.exportRecovery('profile-A')) as Map<String, dynamic>;
+    final cipher = SyncCipher(config.code);
+    final publicationName = bundle['name'] as String;
+    final publication = await cipher.open(bundle['encrypted'] as String, publicationName);
+    final archived = 'x' * (3 * 1024 * 1024);
+    publication.edit('a' * 64, 'a' * 32, {
+      'entry': 'offline-edition',
+      'data': {'note': archived},
+    }, {});
+    final reference = jsonEncode(['discovery-pick-v1', 'ebook', null, 'isbn13', '9780306406157']);
+    final key = sourceDigest(reference);
+    final discovery = SyncDocument()
+      ..edit(key, 'b' * 32, {
+        'type': 'discovery-pick',
+        'data': {
+          'saved': true,
+          'reference': reference,
+          'portableKey': key,
+          'type': 'ebook',
+          'ids': {'isbn13': '9780306406157'},
+          'title': 'Book',
+        },
+        'metadata': archived,
+      }, {});
+    final discoveryName = DiscoverySync.recoveryName(DiscoverySync.namespaceFor(config.code));
+    bundle['encrypted'] = await cipher.seal(publication, publicationName);
+    bundle['discoveryName'] = discoveryName;
+    bundle['discoveryEncrypted'] = await cipher.seal(discovery, discoveryName);
+    final text = jsonEncode(bundle);
+    expect(text.length, greaterThan(7 * 1024 * 1024));
+    await restore(text, discovery: DiscoverySync(repoB));
+    expect(await at(repoB, 'profile-B', entryB), 15000);
+    expect((await DiscoveryStore(repoB).load('profile-B')).saved.single.portableKey, key);
+  });
+
   test('different local profile and connection IDs resume same provider edition', () async {
     await position(repoA, 'profile-A', entryA, 60000);
     await runA();

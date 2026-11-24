@@ -2213,33 +2213,33 @@ class SourceController extends ChangeNotifier {
     }
   }
 
-  Future<String> exportCloudSyncRecovery() async {
-    await ready;
+  Future<T> _queueRecovery<T>(Future<T> Function(String profile, void Function() check) recover) {
     final epoch = generation;
-    requireSession(epoch);
-    await _syncQueue;
-    requireSession(epoch);
-    return cloudSync.exportRecovery(profileId!, discoverySync: discoverySync);
+    void check() => requireSession(epoch);
+    final operation = Future.wait([ready, _syncQueue]).then((_) async {
+      check();
+      final result = await recover(profileId!, check);
+      check();
+      return result;
+    });
+    _syncQueue = operation.then<void>((_) {}, onError: (Object _) {});
+    return operation;
   }
 
+  Future<String> exportCloudSyncRecovery() =>
+      _queueRecovery((profile, check) => cloudSync.exportRecovery(profile, discoverySync: discoverySync, check: check));
+
   Future<void> importCloudSyncRecovery(String text) async {
-    await ready;
-    requireSession();
-    final epoch = generation, profile = profileId!;
-    final activeSources = List<FileSource>.of(sources);
-    final activeKeys = Set<String>.of(activeProgressKeys);
-    final operation = _syncQueue.then(
-      (_) => cloudSync.importRecovery(
+    await _queueRecovery(
+      (profile, check) => cloudSync.importRecovery(
         profile: profile,
         text: text,
-        sources: activeSources,
-        activeKeys: activeKeys,
+        sources: List.of(sources),
+        activeKeys: activeProgressKeys,
         discoverySync: discoverySync,
+        check: check,
       ),
     );
-    _syncQueue = operation.catchError((Object _) {});
-    await operation;
-    requireSession(epoch);
     _notify();
     scheduleSync();
   }

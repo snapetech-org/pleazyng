@@ -6,6 +6,8 @@ import '../source_models.dart';
 import '../source_transport.dart';
 import '../sync/sync_path.dart';
 
+part 'webdav_state.dart';
+
 typedef SourceCredentials = Future<Map<String, String>> Function();
 
 class WebDavSourceAdapter extends SourceAdapter {
@@ -22,7 +24,7 @@ class WebDavSourceAdapter extends SourceAdapter {
     );
   }
 
-  final Map<String, ({Map<String, dynamic> data, String? etag, bool exists})> _state = {};
+  final _progressReads = Expando<_DavState>();
   Uri get root {
     final base = Uri.parse(source.endpoint.endsWith('/') ? source.endpoint : '${source.endpoint}/');
     return source.root.isEmpty ? base : base.resolve('${source.root.replaceAll(RegExp(r'^/+|/+$'), '')}/');
@@ -122,69 +124,35 @@ class WebDavSourceAdapter extends SourceAdapter {
     );
   }
 
-  Future<Map<String, dynamic>> _readState(Uri uri) async {
-    final response = await transport.send('GET', uri, headers: await headers());
-    if (response.statusCode == 404) {
-      await response.stream.drain<void>();
-      _state[uri.toString()] = (data: {}, etag: null, exists: false);
-      return {};
-    }
-    SourceTransport.check(response.statusCode);
-    final bytes = <int>[];
-    await for (final chunk in response.stream.timeout(const Duration(seconds: 30))) {
-      if (bytes.length + chunk.length > 2 * 1024 * 1024) throw const SourceException(SourceFailure.invalidData);
-      bytes.addAll(chunk);
-    }
-    final data = sourceMap(jsonDecode(utf8.decode(bytes)));
-    if (data['version'] != 1) throw const SourceException(SourceFailure.unsupported);
-    final etag = response.headers['etag'];
-    _state[uri.toString()] = (data: data, etag: etag, exists: true);
-    return data;
-  }
-
-  Future<void> _writeState(Uri uri, Map<String, dynamic> data) async {
-    final state = _state[uri.toString()];
-    if (state == null || state.exists && (state.etag == null || state.etag!.startsWith('W/'))) {
-      throw const SourceException(SourceFailure.unsupported);
-    }
-    final response = await transport.send(
-      'PUT',
-      uri,
-      headers: {
-        ...await headers(),
-        'Content-Type': 'application/json',
-        if (state.exists) 'If-Match': state.etag! else 'If-None-Match': '*',
-      },
-      body: jsonEncode({'version': 1, ...data}),
-    );
-    await response.stream.drain<void>();
-    SourceTransport.check(response.statusCode);
-    _state.remove(uri.toString());
-  }
-
   @override
   Future<PublicationProgress?> readProgress(SourceEntry entry, PublicationProgress local) async {
-    final data = await _readState(_stateUri(entry, local));
-    if (data['progress'] == null) return null;
-    final remote = sourceMap(data['progress']);
-    if (remote['edition'] != local.edition || remote['mode'] != local.mode.name) {
-      throw const SourceException(SourceFailure.invalidData);
+    _progressReads[local] = null;
+    final state = await _readState(_stateUri(entry, local));
+    PublicationProgress? result;
+    if (state.data['progress'] != null) {
+      final remote = sourceMap(state.data['progress']);
+      if (remote['edition'] != local.edition || remote['mode'] != local.mode.name) {
+        throw const SourceException(SourceFailure.invalidData);
+      }
+      result = PublicationProgress.fromJson({...remote, 'entryKey': entry.key});
     }
-    return PublicationProgress.fromJson({...remote, 'entryKey': entry.key});
+    _progressReads[local] = state;
+    return result;
   }
 
   @override
   Future<void> writeProgress(SourceEntry entry, PublicationProgress progress) async {
-    final uri = _stateUri(entry, progress), state = _state[_stateUri(entry, progress).toString()];
-    if (state == null) throw const SourceException(SourceFailure.conflict);
-    await _writeState(uri, {...state.data, 'progress': progress.toJson()});
+    final state = _progressReads[progress];
+    if (state == null || state.uri != _stateUri(entry, progress)) throw const SourceException(SourceFailure.conflict);
+    _progressReads[progress] = null;
+    await _writeState(state, {...state.data, 'progress': progress.toJson()});
   }
 
   @override
   Future<List<BookAnnotation>> readAnnotations(SourceEntry entry, PublicationProgress progress) async {
-    final uri = _stateUri(entry, progress);
-    final data = _state[uri.toString()]?.data ?? await _readState(uri);
-    return sourceList(data['annotations'])
+    final uri = _stateUri(entry, progress), reviewed = _progressReads[progress];
+    final state = reviewed != null && reviewed.uri == uri ? reviewed : await _readState(uri);
+    return sourceList(state.data['annotations'])
         .map(sourceMap)
         .where((j) => j['edition'] == progress.edition && j['mode'] == progress.mode.name)
         .map((j) => BookAnnotation.fromJson({...j, 'entryKey': entry.key}))
@@ -202,7 +170,7 @@ class WebDavSourceAdapter extends SourceAdapter {
     final uri = _stateUri(entry, progress);
     for (var attempt = 0; attempt < 3; attempt++) {
       final state = await _readState(uri);
-      final notes = sourceList(state['annotations']).map(sourceMap).toList();
+      final notes = sourceList(state.data['annotations']).map(sourceMap).toList();
       final current = notes.where((n) => n['id'] == annotation.id).firstOrNull;
       if (current != null) {
         final updated = sourceInt(current['updatedAt']) ?? 0;
@@ -211,7 +179,7 @@ class WebDavSourceAdapter extends SourceAdapter {
       notes.removeWhere((n) => n['id'] == annotation.id);
       notes.add(annotation.toJson());
       try {
-        await _writeState(uri, {...state, 'annotations': notes});
+        await _writeState(state, {...state.data, 'annotations': notes});
         return;
       } on SourceException catch (e) {
         if (e.reason != SourceFailure.conflict || attempt == 2) rethrow;

@@ -484,6 +484,92 @@ void main() {
     source.close();
   });
 
+  group('WebDAV synchronized state', () {
+    const entry = SourceEntry(sourceId: 'w', id: 'book', title: 'Book', kind: SourceItemKind.ebook);
+    final progress = PublicationProgress(
+      entryKey: entry.key,
+      edition: 'edition',
+      mode: PublicationMode.reading,
+      session: 'session',
+    );
+    WebDavSourceAdapter adapter(MockClient client) {
+      final source = WebDavSourceAdapter(
+        const FileSource(
+          id: 'w',
+          profileId: 'p',
+          kind: FileSourceKind.webdav,
+          name: 'Books',
+          endpoint: 'https://dav.example/books/',
+          options: {'syncRoot': '.state'},
+        ),
+        SourceTransport(client: client),
+        () async => {},
+      );
+      addTearDown(source.close);
+      return source;
+    }
+
+    test('an overlapping reader cannot advance the precondition for an earlier write', () async {
+      var revision = '"v1"';
+      final writes = <String?>[];
+      final source = adapter(
+        MockClient((request) async {
+          if (request.method == 'GET') {
+            return http.Response('{"version":1}', 200, headers: {'etag': revision});
+          }
+          writes.add(request.headers['If-Match']);
+          return http.Response('', writes.last == revision ? 204 : 412);
+        }),
+      );
+      await source.readProgress(entry, progress);
+      revision = '"v2"';
+      final other = progress.copyWith(session: 'other');
+      await source.readProgress(entry, other);
+      await expectLater(
+        source.writeProgress(entry, progress),
+        throwsA(isA<SourceException>().having((e) => e.reason, 'reason', SourceFailure.conflict)),
+      );
+      await source.writeProgress(entry, other);
+      expect(writes, ['"v1"', '"v2"']);
+    });
+
+    test('state updates require a single strong revision for an existing file', () async {
+      for (final tag in ['W/"old"', 'unquoted', '*', '"one", "two"']) {
+        final source = adapter(
+          MockClient((request) async {
+            expect(request.method, 'GET');
+            return http.Response('{"version":1}', 200, headers: {'etag': tag});
+          }),
+        );
+        await source.readProgress(entry, progress);
+        await expectLater(
+          source.writeProgress(entry, progress),
+          throwsA(isA<SourceException>().having((e) => e.reason, 'reason', SourceFailure.unsupported)),
+        );
+      }
+    });
+
+    test('a note that would make the state unreadable leaves the remote copy intact', () async {
+      final requests = <String>[];
+      final source = adapter(
+        MockClient((request) async {
+          requests.add(request.method);
+          return http.Response('', request.method == 'GET' ? 404 : 201);
+        }),
+      );
+      final note = BookAnnotation(
+        id: 'note',
+        entryKey: entry.key,
+        edition: progress.edition,
+        mode: progress.mode,
+        note: 'é' * (1024 * 1024),
+        updatedAt: 1,
+      );
+      await expectLater(source.writeAnnotation(entry, note), throwsA(isA<SourceException>()));
+      expect(requests, ['GET']);
+    });
+  });
+
   test('WebDAV refuses unsafe state folders before any request', () async {
     var requests = 0;
     const entry = SourceEntry(

@@ -8,17 +8,22 @@ import 'podcast_library.dart';
 import 'podcast_opml.dart';
 import 'source_controller.dart';
 import 'source_models.dart';
+import 'source_transport.dart';
+
+part 'podcast_sync_actions.dart';
 
 enum PodcastSyncPhase { disabled, idle, running, complete, failed }
 
 /// Independent gpodder acknowledgments never consume the publication cloud
 /// outbox. A network success acknowledges exactly the captured local revision.
 final class PodcastSync {
-  PodcastSync(this.sources, {required this.onUpdate});
+  PodcastSync(this.sources, {required this.onUpdate, this.newTransport = SourceTransport.new});
+  final SourceTransport Function() newTransport;
   final SourceController sources;
   final void Function() onUpdate;
   static const configKey = 'podcast-gpodder-config-v1';
   GpodderClient? _client;
+  Future<void> _tail = Future.value();
   Future<void>? _pass;
   int _generation = 0;
   PodcastSyncPhase phase = PodcastSyncPhase.disabled;
@@ -41,32 +46,54 @@ final class PodcastSync {
     return value.isEmpty ? null : GpodderConfig.fromJson(value);
   }
 
-  Future<void> configure(GpodderConfig? value) async {
-    await sources.ready;
-    sources.requireSession();
-    final epoch = sources.generation, profile = sources.profileId!;
-    cancel();
-    if (value == null) {
-      await sources.repository.forgetPreference(profile, configKey);
+  void Function() _guard() {
+    final epoch = sources.generation, generation = _generation;
+    return () {
       sources.requireSession(epoch);
+      if (generation != _generation) throw const SourceException(SourceFailure.cancelled);
+    };
+  }
+
+  Future<void> _queue(Future<void> Function(void Function() check) action) {
+    final check = _guard();
+    final operation = _tail.then((_) async {
+      await sources.ready;
+      check();
+      await action(check);
+    });
+    _tail = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  Future<void> configure(GpodderConfig? value) {
+    cancel();
+    return _queue((check) async {
+      final profile = sources.profileId!;
+      if (value == null) {
+        await sources.repository.forgetPreference(profile, configKey);
+      } else {
+        final client = _client = GpodderClient(value, transport: newTransport(), check: check);
+        try {
+          await client.verifyLogin();
+        } finally {
+          client.close();
+          _client = null;
+        }
+        await sources.repository.database.transaction(() async {
+          check();
+          await sources.repository.savePrivatePreference(profile, configKey, value.toJson());
+          check();
+        });
+      }
+      check();
+      phase = value == null ? PodcastSyncPhase.disabled : PodcastSyncPhase.idle;
       onUpdate();
-      return;
-    }
-    final client = GpodderClient(value, check: () => sources.requireSession(epoch));
-    try {
-      await client.verifyLogin();
-    } finally {
-      client.close();
-    }
-    sources.requireSession(epoch);
-    await sources.repository.savePrivatePreference(profile, configKey, value.toJson());
-    sources.requireSession(epoch);
-    phase = PodcastSyncPhase.idle;
-    onUpdate();
+    });
   }
 
   void cancel() {
     _generation++;
+    _pass = null;
     _client?.close();
     _client = null;
     phase = PodcastSyncPhase.disabled;
@@ -75,17 +102,14 @@ final class PodcastSync {
     pendingCount = 0;
   }
 
-  Future<void> get settled => _pass ?? Future.value();
+  Future<void> get settled => _tail;
 
   Future<void> run() {
-    if (_pass != null) {
-      return _pass!;
-    }
-    if (sources.blocked || sources.loading || sources.profileId == null) {
-      return Future.value();
-    }
+    if (sources.blocked || sources.loading || sources.profileId == null) return Future.value();
+    if (_pass != null) return _pass!;
     final epoch = sources.generation, generation = _generation;
-    return _pass = _run(epoch, generation)
+    late final Future<void> operation;
+    operation = _queue((check) => _run(epoch, check))
         .catchError((Object error) {
           if (sources.current(epoch) && generation == _generation) {
             phase = PodcastSyncPhase.failed;
@@ -94,8 +118,9 @@ final class PodcastSync {
           }
         })
         .whenComplete(() {
-          _pass = null;
+          if (identical(_pass, operation)) _pass = null;
         });
+    return _pass = operation;
   }
 
   Future<void> _save(String profile, String key, Map<String, dynamic> state, void Function() check) async {
@@ -166,14 +191,7 @@ final class PodcastSync {
     return matches.length == 1 ? matches.values.single : null;
   }
 
-  Future<void> _run(int epoch, int generation) async {
-    void check() {
-      sources.requireSession(epoch);
-      if (generation != _generation) {
-        throw const SourceException(SourceFailure.cancelled);
-      }
-    }
-
+  Future<void> _run(int epoch, void Function() check) async {
     final configuration = await config();
     check();
     if (configuration == null) {
@@ -193,7 +211,7 @@ final class PodcastSync {
     phase = PodcastSyncPhase.running;
     failure = null;
     onUpdate();
-    final client = GpodderClient(configuration, check: check);
+    final client = GpodderClient(configuration, transport: newTransport(), check: check);
     _client = client;
     try {
       if (configuration.subscriptions) {
@@ -211,6 +229,7 @@ final class PodcastSync {
 
         for (final remoteUrl in changes.add) {
           final url = localUrl(remoteUrl);
+          pendingRemovals.remove(url);
           if (remove.contains(url)) {
             continue;
           }
@@ -234,6 +253,7 @@ final class PodcastSync {
           if (sources.activeProgressKeys.isNotEmpty) {
             continue;
           }
+          pending.remove('subscription:${sourceDigest(url)}');
           final source = local[url];
           if (source != null && sources.sources.any((s) => s.id == source.id)) {
             await sources.remove(source);
@@ -414,48 +434,15 @@ final class PodcastSync {
     }
   }
 
-  static int _actionTime(Map<String, dynamic> action, int received) {
-    final timestamp = action['timestamp'];
-    if (timestamp == null) {
-      return (sourceInt(action['_received']) ?? received) * 1000;
-    }
-    if (timestamp is! String) {
-      throw const SourceException(SourceFailure.invalidData);
-    }
-    final time = DateTime.tryParse(RegExp(r'(?:Z|[+-]\d{2}:\d{2})$').hasMatch(timestamp) ? timestamp : '${timestamp}Z');
-    if (time == null || time.isAfter(DateTime.now().toUtc().add(const Duration(minutes: 5)))) {
-      throw const SourceException(SourceFailure.invalidData);
-    }
-    return time.millisecondsSinceEpoch;
-  }
-
-  static PublicationProgress _fromAction(PublicationProgress current, SourceEntry entry, Map<String, dynamic> action) {
-    final reset = action['action'] == 'new';
-    final position = reset ? 0 : sourceInt(action['position']);
-    final total = sourceInt(action['total']) ?? 0;
-    if (position == null || position < 0 || position > 7 * 24 * 3600 || total > 7 * 24 * 3600 || total < 0) {
-      throw const SourceException(SourceFailure.invalidData);
-    }
-    final duration = entry.files.firstOrNull?.durationMs ?? total * 1000;
-    final milliseconds = duration > 0 ? (position * 1000).clamp(0, duration).toInt() : position * 1000;
-    return current.copyWith(
-      session: const Uuid().v4(),
-      positionMs: milliseconds,
-      filePositionMs: milliseconds,
-      fileIndex: 0,
-      fraction: duration > 0 ? (milliseconds / duration).clamp(0.0, 1.0) : 0,
-      finished: !reset && total > 0 && position >= total,
-    );
-  }
-
   Future<List<Map<String, dynamic>>> conflicts() async {
+    final check = _guard();
     final configuration = await config();
+    check();
     if (configuration == null) {
       return const [];
     }
-    final epoch = sources.generation;
     final state = await sources.repository.privatePreference(sources.profileId!, _stateKey(configuration));
-    sources.requireSession(epoch);
+    check();
     return sourceMap(state['conflicts']).values.map(sourceMap).toList();
   }
 
@@ -464,40 +451,42 @@ final class PodcastSync {
     required bool useRemote,
     required int expectedRevision,
     required String expectedRemoteHash,
-  }) async {
-    await settled;
-    final operation = _resolveConflict(
-      key,
-      useRemote: useRemote,
-      expectedRevision: expectedRevision,
-      expectedRemoteHash: expectedRemoteHash,
-    );
-    _pass = operation;
-    try {
-      await operation;
-    } finally {
-      if (identical(_pass, operation)) {
-        _pass = null;
-      }
-    }
+  }) {
+    _pass = null;
+    return _queue((check) async {
+      final count = await sources.repository.database.transaction(
+        () => _resolveConflict(
+          key,
+          useRemote: useRemote,
+          expectedRevision: expectedRevision,
+          expectedRemoteHash: expectedRemoteHash,
+          check: check,
+        ),
+      );
+      check();
+      conflictCount = count;
+      onUpdate();
+    });
   }
 
-  Future<void> _resolveConflict(
+  Future<int> _resolveConflict(
     String key, {
     required bool useRemote,
     required int expectedRevision,
     required String expectedRemoteHash,
+    required void Function() check,
   }) async {
     final configuration = await config();
     if (configuration == null) {
       throw const SourceException(SourceFailure.authentication);
     }
-    final epoch = sources.generation, profile = sources.profileId!;
+    check();
+    final profile = sources.profileId!;
     final stateKey = _stateKey(configuration),
         state = await sources.repository.privatePreference(profile, _stateKey(configuration));
     final values = sourceMap(state['conflicts']), conflict = sourceMap(values[key]);
     final current = await sources.repository.progress(profile, key);
-    sources.requireSession(epoch);
+    check();
     if (current == null ||
         current.revision != expectedRevision ||
         conflict['remoteHash'] != expectedRemoteHash ||
@@ -520,8 +509,7 @@ final class PodcastSync {
     }
     values.remove(key);
     state['conflicts'] = values;
-    await _save(profile, stateKey, state, () => sources.requireSession(epoch));
-    conflictCount = values.length;
-    onUpdate();
+    await _save(profile, stateKey, state, check);
+    return values.length;
   }
 }

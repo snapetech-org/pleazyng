@@ -169,7 +169,7 @@ class _SourceSyncScreenState extends State<SourceSyncScreen> {
         withReadStream: true,
       );
       if (!mounted || selection == null || selection.files.isEmpty) return;
-      final bytes = await readSourceFile(selection.files.first, 7 * 1024 * 1024);
+      final bytes = await readSourceFile(selection.files.first, PublicationSync.maxRecoveryBytes);
       controller.requireSession(generation);
       if (!mounted) return;
       await controller.importCloudSyncRecovery(utf8.decode(bytes));
