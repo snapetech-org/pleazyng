@@ -52,3 +52,25 @@ Before sending a build for review, confirm its embedded public key matches the
 configured key, redeem the supplied grant in that actual signed build with an
 expired trial, restart, and check full access and purchase/restore availability.
 Unit tests or secret-name presence alone do not complete this device validation.
+
+## Amazon Appstore instructions
+
+Enter these directions in **Testing instructions** on the Fire TV release form.
+This field goes to Amazon's reviewers. Use the release notes for changes that
+customers will see.
+
+> On the Pleazyng welcome screen, choose **Connect to Jellyfin**. Enter
+> `https://demo.jellyfin.org/stable` in **Server URLs** and select **Find server**.
+> If the TV opens **Quick Connect**, select **Cancel** to return to the sign-in
+> form. Press Select on a text field to open its keyboard and Back to close it.
+> Enter `demo` as the username, leave the password empty, and select **Sign in**.
+> Open a sample library and play a video. The public Jellyfin evaluation server
+> supplies the sample media. This path uses the app's built-in server sign-in.
+
+Check that the demo accepts the login before each submission. Then follow the
+same steps with the signed Fire TV APK intended for review and verify playback.
+If the reviewer needs access beyond the trial, include a private signed review
+grant only after verifying redemption in that APK. Use Amazon's sandbox to
+qualify purchase and restore separately.
+
+See [Amazon's Testing instructions guidance](https://developer.amazon.com/docs/app-submission/add-release-details#testing-instructions).
