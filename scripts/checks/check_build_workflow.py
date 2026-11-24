@@ -2183,6 +2183,8 @@ require(
     and "inputs.rebuild_ios" in named_step(release, "Download iOS artifact")
     and all(value in ios_worker_stage for value in (
         "--config-only", "pod install --deployment", "-scheme Pods-RommWorker",
+        'GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0',
+        "Password for 'https://x-access-token@github.com': ",
         '-configuration Release -sdk iphoneos', 'BUILD_DIR="$products_root"',
         "PODS_XCFRAMEWORKS_BUILD_DIR", "PlezyRetroWorker.framework/PlezyRetroWorker",
         "['xcrun', 'lipo', str(binary), '-verify_arch', 'arm64']")),

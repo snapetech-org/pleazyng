@@ -1865,6 +1865,20 @@ jobs:
         working-directory: ${{ env.PLEZYNG_APPLE_WORKSPACE }}
         run: |
           set -euo pipefail
+          # CocoaPods runs CMake for the pinned public RomM sources. Answer a
+          # GitHub authentication challenge using this run's contents-read token.
+          askpass=$(mktemp "$RUNNER_TEMP/pleazyng-ios-git-askpass.XXXXXX")
+          trap 'rm -f "$askpass"' EXIT
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            "Username for 'https://github.com': "*) printf '%s\n' x-access-token ;;
+            "Password for 'https://x-access-token@github.com': "*) printf '%s\n' "$GH_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          export GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0
           flutter build ios --release --no-codesign --config-only ${{ env.RELEASE_DART_DEFINES }} --dart-define=ENABLE_UPDATE_CHECK=true --split-debug-info=debug-info/ios
           (cd ios && pod install --deployment)
           digest=$(python3 "$GITHUB_WORKSPACE/scripts/apple/worker_cache_key.py")

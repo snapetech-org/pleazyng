@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Let iOS CocoaPods fetch pinned public RomM dependencies when GitHub requests authentication.
+
 - Build signed iOS and tvOS App Store packages directly in focused Store runs, saving the developer builds for GitHub release runs.
 
 - Keep Samsung TV playback from retrying the player's default volume at startup and initialize the mpv fallback with the required numeric locale.
