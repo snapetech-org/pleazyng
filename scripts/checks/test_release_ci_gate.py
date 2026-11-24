@@ -144,6 +144,37 @@ class AppleRunnerRoutingTests(unittest.TestCase):
             allow_failure=False,
         )
 
+    @patch("release_all_platforms.configured_repo_variables")
+    @patch("release_all_platforms.wait_for_run")
+    @patch("release_all_platforms.workflow_runs")
+    @patch("release_all_platforms.command")
+    def test_captured_dispatch_starts_jit_only_for_private_ci_override(
+        self, _command, workflow_runs, wait_for_run_mock, variables,
+    ) -> None:
+        run = {
+            "databaseId": 21,
+            "event": "workflow_dispatch",
+            "createdAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        workflow_runs.return_value = [run]
+        for pool, signing_unavailable, expected in (
+            ("", False, False),
+            ("private", False, True),
+            ("private", True, False),
+        ):
+            with self.subTest(pool=pool, signing_unavailable=signing_unavailable):
+                variables.return_value = {"APPLE_NATIVE_CI_RUNNER_POOL": pool}
+                dispatch(
+                    "snapetech-org/pleazyng", "build.yml", "main",
+                    {"candidate_ref": "v3.0.51-candidate.fixture", "execution_profile": "hybrid",
+                     "tvos_runner_pool": "hosted", "private_apple_signing_unavailable": str(signing_unavailable).lower()},
+                    "captured Apple route",
+                )
+                wait_for_run_mock.assert_called_with(
+                    "snapetech-org/pleazyng", run, "captured Apple route",
+                    private_apple=expected, allow_failure=False,
+                )
+
     @patch("release_all_platforms.ensure_remote_main_sha")
     @patch("release_all_platforms.dispatch", return_value={
         "databaseId": 18, "status": "completed", "conclusion": "success",

@@ -740,12 +740,16 @@ def dispatch(repo: str, workflow: str, ref: str, fields: dict[str, str], purpose
             if not wait:
                 return run
             apple_route = fields.get("tvos_runner_pool")
-            private_apple = (bool(fields.get("candidate_ref")) or fields.get("execution_profile") != "hybrid"
+            private_apple = (fields.get("execution_profile") != "hybrid"
                              or fields.get("apple_runner_pool") == "private"
                              or fields.get("apple_runner_pool") == "private-ios"
                              or fields.get("apple_runner_pool") == "split"
                              or fields.get("macos_runner_pool") == "private"
-                             or apple_route in {"private", "private-ios", "split"})
+                             or apple_route in {"private", "private-ios", "split"}
+                             or (repo == PLEZY_REPO and captured_release_uses_private_ci(
+                                 fields.get("candidate_ref"),
+                                 signing_unavailable=fields.get("private_apple_signing_unavailable") == "true",
+                             )))
             return wait_for_run(repo, run, purpose, private_apple=private_apple,
                                 allow_failure=allow_failure)
         time.sleep(5)
@@ -765,6 +769,12 @@ def select_apple_runner_pool(requested: str) -> str:
     if requested != "auto":
         return requested
     return "hosted"
+
+
+def captured_release_uses_private_ci(candidate_ref: str | None, *, signing_unavailable: bool) -> bool:
+    """Match the explicit private qualification override in the captured workflow."""
+    return (bool(candidate_ref) and not signing_unavailable
+            and configured_repo_variables().get("APPLE_NATIVE_CI_RUNNER_POOL") == "private")
 
 
 def private_apple_host_reachable() -> bool:
@@ -2008,7 +2018,11 @@ def ensure_release(
             existing = wait_for_run(PLEZY_REPO, existing, f"Pleazyng {tag} all-platform release build",
                                     private_apple=(tvos_runner_pool == "private"
                                                    or macos_runner_pool == "private"
-                                                   or ios_runner_pool == "private"),
+                                                   or ios_runner_pool == "private"
+                                                   or captured_release_uses_private_ci(
+                                                       candidate_ref,
+                                                       signing_unavailable=private_apple_signing_unavailable,
+                                                   )),
                                     allow_failure=True)
             if (existing.get("conclusion") != "success" and not repair
                     and not reuse_platform_run_id and runner_acquisition_retry_of is None):
