@@ -9,8 +9,13 @@ import Vision
 #if os(macOS)
 import AppKit
 
-private func macRectJSON(_ rect: CGRect) -> [Double] {
-  [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)]
+private func macJSONNumber(_ value: CGFloat) -> Any {
+  let number = Double(value)
+  return number.isFinite ? number as Any : NSNull()
+}
+
+private func macRectJSON(_ rect: CGRect) -> [Any] {
+  [macJSONNumber(rect.minX), macJSONNumber(rect.minY), macJSONNumber(rect.width), macJSONNumber(rect.height)]
 }
 #endif
 
@@ -574,6 +579,15 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       XCTAssertEqual(upperOffset.dy, 0.2, accuracy: 0.0001)
       XCTAssertEqual(lowerOffset.dx, 0.2, accuracy: 0.0001)
       XCTAssertEqual(lowerOffset.dy, 0.8, accuracy: 0.0001)
+
+      let unavailableFrame = CGRect(x: CGFloat.infinity, y: CGFloat.nan, width: 800, height: 632)
+      let unavailableFrameJSON = try JSONSerialization.data(withJSONObject: macRectJSON(unavailableFrame))
+      let unavailableFrameValues = try XCTUnwrap(
+        JSONSerialization.jsonObject(with: unavailableFrameJSON) as? [Any])
+      XCTAssertTrue(unavailableFrameValues[0] is NSNull)
+      XCTAssertTrue(unavailableFrameValues[1] is NSNull)
+      XCTAssertEqual(unavailableFrameValues[2] as? Double, 800)
+      XCTAssertEqual(unavailableFrameValues[3] as? Double, 632)
 
       XCTAssertThrowsError(try resolveMacScreenshotMapping(
         rawImageSize: CGSize(width: 1024, height: 768),

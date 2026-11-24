@@ -656,6 +656,14 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn("macWindowOffset(forVisionBounds: match.boundingBox, geometry: lines.screenshot.geometry)", UI_TEST)
         self.assertIn("window.coordinate(withNormalizedOffset: offset).tap()", UI_TEST)
 
+    def test_mac_geometry_metadata_serializes_nonfinite_frames_as_null(self) -> None:
+        self.assertIn("private func macJSONNumber(_ value: CGFloat) -> Any", UI_TEST)
+        self.assertIn("number.isFinite ? number as Any : NSNull()", UI_TEST)
+        self.assertIn("CGRect(x: CGFloat.infinity, y: CGFloat.nan, width: 800, height: 632)", UI_TEST)
+        self.assertIn("JSONSerialization.data(withJSONObject: macRectJSON(unavailableFrame))", UI_TEST)
+        self.assertIn("XCTAssertTrue(unavailableFrameValues[0] is NSNull)", UI_TEST)
+        self.assertIn("XCTAssertTrue(unavailableFrameValues[1] is NSNull)", UI_TEST)
+
     def test_tvos_screenshot_path_remains_the_existing_xctest_screenshot(self) -> None:
         self.assertIn(
             "#else\n      let screenshot = app.screenshot()\n      attachScreenshot(screenshot, named: name)\n    #endif",
