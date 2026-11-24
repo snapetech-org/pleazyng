@@ -3,6 +3,7 @@ import '../media/media_item.dart';
 import '../media/media_server_client.dart';
 import '../utils/media_server_http_client.dart';
 import 'music/music_queue_items.dart';
+import 'playlist_membership.dart';
 
 const int playlistItemsPageSize = 200;
 
@@ -18,22 +19,14 @@ Future<List<MediaItem>> fetchAllPlaylistItems(
   bool requireComplete = false,
 }) async {
   final buffer = spoolMetadata ? MusicQueueItems(spill: true) : null;
-  int? expectedTotal;
+  final membership = requireComplete ? PlaylistMembership() : null;
   try {
     final items = await drainPages<MediaItem>(
       (start, size) async {
         if (sourceCurrent?.call() == false) throw StateError('Playlist source retired');
         final page = await client.fetchPlaylistPage(playlistId, start: start, size: size, abort: abort);
         if (sourceCurrent?.call() == false) throw StateError('Playlist source retired');
-        if (requireComplete) {
-          expectedTotal ??= page.totalCount;
-          if (page.offset != start ||
-              page.totalCount != expectedTotal ||
-              start + page.items.length > page.totalCount ||
-              (page.items.isEmpty && start < page.totalCount)) {
-            throw const FormatException('Incomplete playlist membership');
-          }
-        }
+        membership?.check(page, start: start, size: size);
         if (acceptsItem != null && page.items.any((item) => !acceptsItem(item))) {
           throw StateError('Playlist page contains an unauthorized item');
         }

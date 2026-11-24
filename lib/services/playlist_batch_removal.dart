@@ -3,14 +3,9 @@ import '../media/media_kind.dart';
 import '../media/media_playlist.dart';
 import '../media/media_server_client.dart';
 import 'music/music_account_scope.dart';
+import 'playlist_membership.dart';
 
-/// Entry identity is independent of media identity: two copies of a song can
-/// be selected and removed separately. Missing entry IDs never fall back.
-String? playlistOccurrenceId(MediaItem item) => switch (item) {
-  PlexMediaItem(:final playlistItemId?) when playlistItemId > 0 => 'p:$playlistItemId',
-  JellyfinMediaItem(:final playlistItemId?) when playlistItemId.isNotEmpty => 'j:$playlistItemId',
-  _ => null,
-};
+export 'playlist_membership.dart' show playlistOccurrenceId;
 
 class PlaylistBatchRemovalResult {
   PlaylistBatchRemovalResult(Set<String> removed, this.error) : removed = Set.unmodifiable(removed);
@@ -73,12 +68,14 @@ Future<PlaylistBatchRemovalResult> removePlaylistOccurrences({
       throw StateError('Playlist is no longer editable');
     }
     final entries = <String, MediaItem>{};
+    final membership = PlaylistMembership();
     var offset = 0;
     // Keep only selected entries; preflight does not retain a second queue.
     while (true) {
       requireCurrent();
       final page = await client.fetchPlaylistPage(playlist.id, start: offset, size: 200);
       requireCurrent();
+      membership.check(page, start: offset, size: 200);
       for (final item in page.items) {
         final id = playlistOccurrenceId(item);
         if (id == null || !ids.containsKey(id)) continue;

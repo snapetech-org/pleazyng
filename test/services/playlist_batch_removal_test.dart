@@ -40,6 +40,7 @@ class _Client implements MediaServerClient {
   bool isOfflineMode = false;
   @override
   ServerId get serverId => ServerId('srv');
+  LibraryPage<MediaItem> Function(LibraryPage<MediaItem>)? editPage;
   void Function()? onRead;
   Future<bool> Function(MediaItem)? onRemove;
 
@@ -55,7 +56,7 @@ class _Client implements MediaServerClient {
       offset: offset,
     );
     onRead?.call();
-    return result;
+    return editPage?.call(result) ?? result;
   }
 
   @override
@@ -163,6 +164,27 @@ void main() {
       expect(client.removals, isEmpty);
     }
   });
+
+  for (final fault in ['short listing', 'changed count', 'wrong offset', 'oversized page']) {
+    test('inconsistent membership ($fault) prevents every batch removal', () async {
+      final client = _Client(MediaBackend.plex, List.generate(202, (i) => track(i + 1)));
+      client.editPage = (page) => switch (fault) {
+        'short listing' when page.offset > 0 => page.copyWith(items: []),
+        'changed count' when page.offset > 0 => page.copyWith(items: [page.items.first], totalCount: 201),
+        'wrong offset' when page.offset > 0 => page.copyWith(offset: 0),
+        'oversized page' when page.offset == 0 => page.copyWith(items: client.items),
+        _ => page,
+      };
+      final result = await removePlaylistOccurrences(
+        client: client,
+        playlist: playlist(client.backend),
+        selected: [track(1)],
+        isCurrent: () => true,
+      );
+      expect(result.error, isA<FormatException>());
+      expect(client.removals, isEmpty);
+    });
+  }
 
   test('missing, repeated and foreign entry identities are rejected locally', () async {
     final client = _Client(MediaBackend.plex, [track(1)]);

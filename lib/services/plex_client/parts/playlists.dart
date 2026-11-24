@@ -253,9 +253,6 @@ mixin _PlexPlaylistMethods on _PlexClientInternals implements PlaylistMetadataCl
     int? size,
   });
 
-  Future<_LibraryContentResult> _getPlaylist(String playlistId, {int? start, int? size, AbortController? abort}) =>
-      _fetchPaginatedList('/playlists/$playlistId/items', start: start, size: size, abort: abort);
-
   Future<({List<PlexPlaylistDto> items, int totalSize})> _getPlaylistsPage({
     String playlistType = 'video',
     bool? smart,
@@ -323,14 +320,7 @@ mixin _PlexPlaylistMethods on _PlexClientInternals implements PlaylistMetadataCl
     int? start,
     int? size,
     AbortController? abort,
-  }) async {
-    final result = await _getPlaylist(playlistId, start: start, size: size, abort: abort);
-    return LibraryPage<MediaItem>(
-      items: result.items.map(PlexMappers.mediaItem).toList(),
-      totalCount: result.totalSize,
-      offset: start ?? 0,
-    );
-  }
+  }) => _playlistMembership(playlistId, start: start, size: size, abort: abort);
 
   @override
   Future<MediaPlaylist?> createPlaylist({required String title, required List<MediaItem> items}) async {

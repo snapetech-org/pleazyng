@@ -246,10 +246,49 @@ class CatalogClient extends ExperienceClient {
   }
 }
 
+class EstimatedPlaylistPlayer extends RadioMusic implements MusicPlaylistWindowPlayback {
+  @override
+  bool get canPlayPlaylistWindow => true;
+  int? selected;
+  bool? receivedShuffle;
+
+  @override
+  Future<bool> playPlaylistWindow({
+    required List<MediaItem> tracks,
+    required int offset,
+    required int index,
+    required bool shuffle,
+    required MusicPlayContext playContext,
+    required bool Function() sourceCurrent,
+    required Future<List<MediaItem>> Function(bool Function()) loadComplete,
+  }) async {
+    selected = offset + index;
+    started = await loadComplete(sourceCurrent);
+    return true;
+  }
+
+  @override
+  Future<void> playFromList({
+    required List<MediaItem> tracks,
+    MediaItem? startTrack,
+    required MusicPlayContext playContext,
+    bool shuffle = false,
+    Duration? initialPosition,
+    bool offline = false,
+    PlaybackLaunchObserver? launchObserver,
+  }) async {
+    playing = true;
+    started = tracks;
+    receivedShuffle = shuffle;
+  }
+}
+
 class PagedPlaylistClient extends CatalogClient {
   final readsAt = <int>[];
   final tailRequested = Completer<void>();
   final tail = Completer<void>();
+
+  int? lengthWithoutTotal;
 
   @override
   Future<LibraryPage<MediaPlaylist>> fetchPlaylistsPage({
@@ -267,6 +306,17 @@ class PagedPlaylistClient extends CatalogClient {
   Future<LibraryPage<MediaItem>> fetchPlaylistPage(String id, {int? start, int? size, AbortController? abort}) async {
     final offset = start ?? 0;
     readsAt.add(offset);
+    final length = lengthWithoutTotal;
+    if (length != null) {
+      final rows = [for (int i = offset; i < length && i < offset + size!; i++) musicTrack('t$i')];
+      final total = fallbackPageTotal(offset: offset, itemCount: rows.length, requestedSize: size);
+      return LibraryPage(
+        items: rows,
+        offset: offset,
+        totalCount: total,
+        hasEstimatedTotal: total > offset + rows.length,
+      );
+    }
     if (offset > 0) {
       tailRequested.complete();
       await tail.future;
@@ -1044,6 +1094,39 @@ void main() {
     hidden.dispose();
     libraries.dispose();
   });
+
+  for (final action in ['select', 'removed', 'shuffle']) {
+    testWidgets('car playlist $action with an estimated total', (tester) async {
+      final music = EstimatedPlaylistPlayer(),
+          profiles = Profiles(),
+          client = PagedPlaylistClient()..lengthWithoutTotal = 350;
+      final hidden = CatalogHidden(), libraries = CatalogLibraries();
+      final servers = testMultiServer(clients: [client]);
+      await mount(tester, music, profiles, servers: servers.provider, hidden: hidden, libraries: libraries);
+      final playlists = await native('browse', {'id': 'playlists:s'}) as List;
+      final playlistId = playlists.single['id'];
+      if (action == 'shuffle') {
+        expect(await native('playItem', {'id': playlistId, 'shuffle': true}), isTrue);
+        expect(music.receivedShuffle, isTrue);
+        expect(music.selected, isNull);
+      } else {
+        var page = await native('browse', {'id': playlistId}) as List;
+        for (var i = 0; i < 2; i++) {
+          page = await native('browse', {'id': page.last['id']}) as List;
+        }
+        final row = page[10];
+        if (action == 'removed') client.lengthWithoutTotal = 200;
+        expect(await native('playItem', {'id': row['id']}), action == 'select');
+        expect(music.selected, action == 'select' ? 204 : isNull);
+      }
+      expect(music.started?.map((item) => item.id), action == 'removed' ? isNull : List.generate(350, (i) => 't$i'));
+      await tester.pumpWidget(const SizedBox());
+      music.dispose();
+      profiles.dispose();
+      hidden.dispose();
+      libraries.dispose();
+    });
+  }
 
   for (final accepted in [true, false]) {
     testWidgets('car playlist enqueue claims before its second page and appends intact only once: $accepted', (

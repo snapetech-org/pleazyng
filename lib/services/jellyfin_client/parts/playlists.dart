@@ -11,10 +11,6 @@ mixin _JellyfinPlaylistMethods on _JellyfinClientInternals {
     int? size,
     AbortController? abort,
   }) async {
-    if (smart == true) {
-      return LibraryPage<MediaPlaylist>(items: const [], totalCount: 0, offset: start ?? 0);
-    }
-
     final offset = start ?? 0;
     final pageSize = size ?? _playlistsPageSize;
     final requestedType = playlistType.toLowerCase();
@@ -27,7 +23,7 @@ mixin _JellyfinPlaylistMethods on _JellyfinClientInternals {
       'unknown' => 'Unknown',
       _ => '',
     };
-    if (mediaType == '') {
+    if (smart == true || mediaType == '') {
       return LibraryPage<MediaPlaylist>(items: const [], totalCount: 0, offset: offset);
     }
 
@@ -109,7 +105,7 @@ mixin _JellyfinPlaylistMethods on _JellyfinClientInternals {
       abort: abort,
     );
     throwIfHttpError(response);
-    return _pagedItems(response.data, offset: offset, requestedSize: pageSize, map: _mapItems);
+    return _pagedItems(response.data, offset: offset, requestedSize: pageSize, map: _mapItems, requireRows: true);
   }
 
   @override

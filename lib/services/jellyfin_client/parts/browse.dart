@@ -24,36 +24,6 @@ const _HubRetryPolicy _libraryLookupRetry = (
   deadline: MediaServerTimeouts.libraryLookup,
 );
 
-List<Map<String, dynamic>> _itemsArray(Object? data) {
-  if (data is Map<String, dynamic>) {
-    final items = data['Items'];
-    if (items is List) return items.whereType<Map<String, dynamic>>().toList();
-  }
-  if (data is List) return data.whereType<Map<String, dynamic>>().toList();
-  return const [];
-}
-
-/// Builds a [LibraryPage] from an `/Items`-shaped response: the `Items` array
-/// run through [map], plus the server's `TotalRecordCount` when it reports one.
-/// Responses that omit it (or return a non-int) fall back to
-/// [fallbackPageTotal], whose full-page sentinel keeps pagination enabled;
-/// [singlePage] endpoints return everything at once, so a full page there means
-/// the end of the list, not "there may be more".
-LibraryPage<T> _pagedItems<T>(
-  Object? data, {
-  required int offset,
-  required List<T> Function(List<Map<String, dynamic>>) map,
-  int? requestedSize,
-  bool singlePage = false,
-}) {
-  final rawItems = _itemsArray(data);
-  final rawTotal = data is Map<String, dynamic> ? data['TotalRecordCount'] : null;
-  final fallbackTotal = singlePage
-      ? offset + rawItems.length
-      : fallbackPageTotal(offset: offset, itemCount: rawItems.length, requestedSize: requestedSize);
-  return LibraryPage<T>(items: map(rawItems), totalCount: rawTotal is int ? rawTotal : fallbackTotal, offset: offset);
-}
-
 /// Slim field set for grid/list browsing — what the card UI actually
 /// renders (title, year, watched badge, episode count for series).
 ///

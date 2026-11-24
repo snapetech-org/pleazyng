@@ -864,7 +864,8 @@ $LibrarySortCopyWith<$Res>? get sort {
 /// @nodoc
 mixin _$LibraryPage<T> {
 
- List<T> get items; int get totalCount; int get offset;
+ List<T> get items; int get totalCount; int get offset;/// A full page without a server count uses one extra row to request the next page.
+ bool get hasEstimatedTotal;
 /// Create a copy of LibraryPage
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -875,16 +876,16 @@ $LibraryPageCopyWith<T, LibraryPage<T>> get copyWith => _$LibraryPageCopyWithImp
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LibraryPage<T>&&const DeepCollectionEquality().equals(other.items, items)&&(identical(other.totalCount, totalCount) || other.totalCount == totalCount)&&(identical(other.offset, offset) || other.offset == offset));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is LibraryPage<T>&&const DeepCollectionEquality().equals(other.items, items)&&(identical(other.totalCount, totalCount) || other.totalCount == totalCount)&&(identical(other.offset, offset) || other.offset == offset)&&(identical(other.hasEstimatedTotal, hasEstimatedTotal) || other.hasEstimatedTotal == hasEstimatedTotal));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(items),totalCount,offset);
+int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(items),totalCount,offset,hasEstimatedTotal);
 
 @override
 String toString() {
-  return 'LibraryPage<$T>(items: $items, totalCount: $totalCount, offset: $offset)';
+  return 'LibraryPage<$T>(items: $items, totalCount: $totalCount, offset: $offset, hasEstimatedTotal: $hasEstimatedTotal)';
 }
 
 
@@ -895,7 +896,7 @@ abstract mixin class $LibraryPageCopyWith<T,$Res>  {
   factory $LibraryPageCopyWith(LibraryPage<T> value, $Res Function(LibraryPage<T>) _then) = _$LibraryPageCopyWithImpl;
 @useResult
 $Res call({
- List<T> items, int totalCount, int offset
+ List<T> items, int totalCount, int offset, bool hasEstimatedTotal
 });
 
 
@@ -912,12 +913,13 @@ class _$LibraryPageCopyWithImpl<T,$Res>
 
 /// Create a copy of LibraryPage
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? items = null,Object? totalCount = null,Object? offset = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? items = null,Object? totalCount = null,Object? offset = null,Object? hasEstimatedTotal = null,}) {
   return _then(_self.copyWith(
 items: null == items ? _self.items : items // ignore: cast_nullable_to_non_nullable
 as List<T>,totalCount: null == totalCount ? _self.totalCount : totalCount // ignore: cast_nullable_to_non_nullable
 as int,offset: null == offset ? _self.offset : offset // ignore: cast_nullable_to_non_nullable
-as int,
+as int,hasEstimatedTotal: null == hasEstimatedTotal ? _self.hasEstimatedTotal : hasEstimatedTotal // ignore: cast_nullable_to_non_nullable
+as bool,
   ));
 }
 
@@ -999,10 +1001,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( List<T> items,  int totalCount,  int offset)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( List<T> items,  int totalCount,  int offset,  bool hasEstimatedTotal)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _LibraryPage() when $default != null:
-return $default(_that.items,_that.totalCount,_that.offset);case _:
+return $default(_that.items,_that.totalCount,_that.offset,_that.hasEstimatedTotal);case _:
   return orElse();
 
 }
@@ -1020,10 +1022,10 @@ return $default(_that.items,_that.totalCount,_that.offset);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( List<T> items,  int totalCount,  int offset)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( List<T> items,  int totalCount,  int offset,  bool hasEstimatedTotal)  $default,) {final _that = this;
 switch (_that) {
 case _LibraryPage():
-return $default(_that.items,_that.totalCount,_that.offset);}
+return $default(_that.items,_that.totalCount,_that.offset,_that.hasEstimatedTotal);}
 }
 /// A variant of `when` that fallback to returning `null`
 ///
@@ -1037,10 +1039,10 @@ return $default(_that.items,_that.totalCount,_that.offset);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( List<T> items,  int totalCount,  int offset)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( List<T> items,  int totalCount,  int offset,  bool hasEstimatedTotal)?  $default,) {final _that = this;
 switch (_that) {
 case _LibraryPage() when $default != null:
-return $default(_that.items,_that.totalCount,_that.offset);case _:
+return $default(_that.items,_that.totalCount,_that.offset,_that.hasEstimatedTotal);case _:
   return null;
 
 }
@@ -1052,7 +1054,7 @@ return $default(_that.items,_that.totalCount,_that.offset);case _:
 
 
 class _LibraryPage<T> implements LibraryPage<T> {
-  const _LibraryPage({required final  List<T> items, required this.totalCount, this.offset = 0}): _items = items;
+  const _LibraryPage({required final  List<T> items, required this.totalCount, this.offset = 0, this.hasEstimatedTotal = false}): _items = items;
   
 
  final  List<T> _items;
@@ -1064,6 +1066,8 @@ class _LibraryPage<T> implements LibraryPage<T> {
 
 @override final  int totalCount;
 @override@JsonKey() final  int offset;
+/// A full page without a server count uses one extra row to request the next page.
+@override@JsonKey() final  bool hasEstimatedTotal;
 
 /// Create a copy of LibraryPage
 /// with the given fields replaced by the non-null parameter values.
@@ -1075,16 +1079,16 @@ _$LibraryPageCopyWith<T, _LibraryPage<T>> get copyWith => __$LibraryPageCopyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _LibraryPage<T>&&const DeepCollectionEquality().equals(other._items, _items)&&(identical(other.totalCount, totalCount) || other.totalCount == totalCount)&&(identical(other.offset, offset) || other.offset == offset));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _LibraryPage<T>&&const DeepCollectionEquality().equals(other._items, _items)&&(identical(other.totalCount, totalCount) || other.totalCount == totalCount)&&(identical(other.offset, offset) || other.offset == offset)&&(identical(other.hasEstimatedTotal, hasEstimatedTotal) || other.hasEstimatedTotal == hasEstimatedTotal));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_items),totalCount,offset);
+int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_items),totalCount,offset,hasEstimatedTotal);
 
 @override
 String toString() {
-  return 'LibraryPage<$T>(items: $items, totalCount: $totalCount, offset: $offset)';
+  return 'LibraryPage<$T>(items: $items, totalCount: $totalCount, offset: $offset, hasEstimatedTotal: $hasEstimatedTotal)';
 }
 
 
@@ -1095,7 +1099,7 @@ abstract mixin class _$LibraryPageCopyWith<T,$Res> implements $LibraryPageCopyWi
   factory _$LibraryPageCopyWith(_LibraryPage<T> value, $Res Function(_LibraryPage<T>) _then) = __$LibraryPageCopyWithImpl;
 @override @useResult
 $Res call({
- List<T> items, int totalCount, int offset
+ List<T> items, int totalCount, int offset, bool hasEstimatedTotal
 });
 
 
@@ -1112,12 +1116,13 @@ class __$LibraryPageCopyWithImpl<T,$Res>
 
 /// Create a copy of LibraryPage
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? items = null,Object? totalCount = null,Object? offset = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? items = null,Object? totalCount = null,Object? offset = null,Object? hasEstimatedTotal = null,}) {
   return _then(_LibraryPage<T>(
 items: null == items ? _self._items : items // ignore: cast_nullable_to_non_nullable
 as List<T>,totalCount: null == totalCount ? _self.totalCount : totalCount // ignore: cast_nullable_to_non_nullable
 as int,offset: null == offset ? _self.offset : offset // ignore: cast_nullable_to_non_nullable
-as int,
+as int,hasEstimatedTotal: null == hasEstimatedTotal ? _self.hasEstimatedTotal : hasEstimatedTotal // ignore: cast_nullable_to_non_nullable
+as bool,
   ));
 }
 

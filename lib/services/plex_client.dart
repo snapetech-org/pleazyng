@@ -109,6 +109,7 @@ import 'video_decode_capabilities.dart';
 
 part 'plex_client/parts/live_tv.dart';
 part 'plex_client/parts/playlists.dart';
+part 'plex_client/parts/playlist_membership.dart';
 part 'plex_client/parts/music_history.dart';
 part 'plex_client/parts/music_analysis.dart';
 part 'plex_client/parts/collections.dart';
@@ -444,6 +445,7 @@ mixin _PlexClientInternals on MediaServerCacheMixin {
   Future<MediaServerResponse> _postWithFailover(String path, {Map<String, dynamic>? queryParameters});
 
   Map<String, dynamic>? _getMediaContainer(MediaServerResponse response);
+  List<PlexMetadataDto> _extractMetadataList(MediaServerResponse response);
 
   Map<String, dynamic> _buildPaginationParams(int? start, int? size);
 
@@ -1169,6 +1171,7 @@ class PlexClient
     );
   }
 
+  @override
   List<PlexMetadataDto> _extractMetadataList(MediaServerResponse response) => _extractMetadataListWithLibrary(response);
 
   List<PlexMetadataDto> _extractMetadataListWithLibrary(
@@ -1247,28 +1250,15 @@ class PlexClient
     return [];
   }
 
-  int? _responseHeaderInt(MediaServerResponse response, String name) {
-    final lowerName = name.toLowerCase();
-    for (final entry in response.headers.entries) {
-      if (entry.key.toLowerCase() == lowerName) return flexibleInt(entry.value);
-    }
-    return null;
-  }
-
   int _responseTotalSize(MediaServerResponse response, {required int itemCount, int? start, int? requestedSize}) {
-    final headerTotal = _responseHeaderInt(response, 'X-Plex-Container-Total-Size');
-    if (headerTotal != null) return headerTotal;
-
     final container = _getMediaContainer(response);
-    final bodyTotal = flexibleInt(container?['totalSize']);
-    if (bodyTotal != null) return bodyTotal;
-
-    final offset = start ?? flexibleInt(container?['offset']) ?? 0;
-    if (start == null && requestedSize == null) {
-      return flexibleInt(container?['size']) ?? itemCount;
-    }
-
-    return fallbackPageTotal(offset: offset, itemCount: itemCount, requestedSize: requestedSize);
+    return _plexPageCount(
+      reported: _reportedPlexTotal(response, container),
+      container: container,
+      itemCount: itemCount,
+      start: start,
+      size: requestedSize,
+    ).total;
   }
 
   @override

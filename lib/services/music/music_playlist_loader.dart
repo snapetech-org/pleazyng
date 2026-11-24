@@ -4,6 +4,7 @@ import '../../media/library_query.dart';
 import '../../media/media_item.dart';
 import '../../media/media_kind.dart';
 import '../../media/media_server_client.dart';
+import '../playlist_membership.dart';
 import 'music_account_scope.dart';
 import 'music_queue_items.dart';
 
@@ -23,7 +24,7 @@ class MusicPlaylistRead {
   final int maxItems;
   final Object? _authentication;
   final String? _account;
-  int? _count;
+  final _membership = PlaylistMembership();
   final _windows = <int, LibraryPage<MediaItem>>{};
 
   void _check(bool Function() active) {
@@ -45,15 +46,9 @@ class MusicPlaylistRead {
     _check(active);
     final page = await client.fetchPlaylistPage(id, start: offset, size: size);
     _check(active);
-    if (offset + page.items.length > maxItems || page.totalCount > maxItems) {
+    final total = _membership.check(page, start: offset, size: size);
+    if (offset + page.items.length > maxItems || (!page.hasEstimatedTotal && total > maxItems)) {
       throw StateError('Music playlist exceeds native selection budget');
-    }
-    if (page.offset != offset ||
-        page.items.length > size ||
-        page.totalCount < offset + page.items.length ||
-        (page.items.isEmpty && page.totalCount > offset) ||
-        (_count != null && page.totalCount != _count)) {
-      throw const FormatException('Invalid native music playlist page');
     }
     if (page.items.any(
       (item) =>
@@ -65,14 +60,14 @@ class MusicPlaylistRead {
     )) {
       throw StateError('Native music playlist contains an unauthorized track');
     }
-    _count = page.totalCount;
-    return page;
+    return total == page.totalCount ? page : page.copyWith(totalCount: total, hasEstimatedTotal: false);
   }
 
   Future<List<MediaItem>> all({required bool Function() active}) async {
     final tracks = MusicQueueItems(spill: true);
     try {
       var offset = 0;
+      int total;
       do {
         _check(active);
         LibraryPage<MediaItem>? existing;
@@ -83,9 +78,10 @@ class MusicPlaylistRead {
         }
         final next = existing ?? await _page(offset, active, size);
         _check(active);
+        total = next.totalCount;
         tracks.addAll(next.items);
         offset += next.items.length;
-      } while (offset < _count!);
+      } while (offset < total);
       return tracks.snapshot();
     } finally {
       tracks.clear();
