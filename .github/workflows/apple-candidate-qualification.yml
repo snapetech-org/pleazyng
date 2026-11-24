@@ -51,7 +51,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA: 2f631883d070b5791058fd59b15b01a1464372f6
       PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA: 70c267ba92eba5f90e3abdcfa86f7518268df9ae
-      PUB_CACHE: ${{ runner.temp }}/apple-native-pub-${{ matrix.slug }}
     steps:
       - name: Check out current trusted main tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -259,7 +258,11 @@ jobs:
 
       - name: Load pinned Flutter SDK
         shell: bash
-        run: python3 scripts/flutter/load_sdk_pin.py --github-env
+        env:
+          PLATFORM: ${{ matrix.slug }}
+        run: |
+          echo "PUB_CACHE=$RUNNER_TEMP/apple-native-pub-$PLATFORM" >> "$GITHUB_ENV"
+          python3 scripts/flutter/load_sdk_pin.py --github-env
 
       - name: Set up Flutter and supported Xcode SDKs
         uses: ./.github/actions/setup-flutter-apple

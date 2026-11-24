@@ -44,6 +44,11 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         self.assertNotIn("build-only: 'true'", self.workflow)
         self.assertNotIn("motion-test-only: 'true'", self.workflow)
 
+    def test_runner_scratch_is_configured_after_the_job_starts(self):
+        job_setup = self.workflow.split('\njobs:\n', 1)[1].split('\n    steps:\n', 1)[0]
+        self.assertNotIn('${{ runner.', job_setup)
+        self.assertIn('PUB_CACHE=$RUNNER_TEMP/apple-native-pub-$PLATFORM', self.workflow)
+
     def test_source_preflight_precedes_tool_setup_and_checks_canonical_candidate(self):
         preflight = self.workflow.find("- name: Verify frozen candidate source")
         native = self.workflow.find("- name: Qualify Apple native components")
