@@ -375,9 +375,22 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       // Podcast, Open Media, and streaming cards. Move focus down so the
       // app scrolls the actual local library controls into view.
       let markers = ["Files and books", "Search saved library", "import a book"]
+      var dismissedSearchKeyboard = false
       for _ in 0..<14 {
         let screen = try captureTVScreen(in: app)
         let text = joinedText(screen.lines)
+        if !dismissedSearchKeyboard &&
+           ["SPACE", "ABC", "search"].allSatisfy({ text.localizedCaseInsensitiveContains($0) }) &&
+           !text.localizedCaseInsensitiveContains("Files and books") {
+          // tvOS opens its full-screen keyboard on the search field's first
+          // focus. Menu dismisses it and the field remembers that dismissal.
+          XCUIRemote.shared.press(.menu)
+          _ = try waitForTVScreen(
+            ["Files and books"], in: app,
+            attachmentName: "pleazyng-diagnostic-search-keyboard-dismissed-tvos", timeout: 15)
+          dismissedSearchKeyboard = true
+          continue
+        }
         if markers.allSatisfy({ text.localizedCaseInsensitiveContains($0) }) &&
            !text.localizedCaseInsensitiveContains("unlock the saved streaming settings") {
           attachScreenshot(screen.screenshot, named: "pleazyng-localtest-files-books-tvos")

@@ -604,6 +604,8 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn('["Files and books", "Search saved library", "import a book"]', UI_TEST)
         self.assertIn("try captureTVLocalLibrary(in: app)", UI_TEST)
         self.assertIn('"pleazyng-diagnostic-files-books-arrival-tvos"', UI_TEST)
+        self.assertIn('"pleazyng-diagnostic-search-keyboard-dismissed-tvos"', UI_TEST)
+        self.assertIn('["SPACE", "ABC", "search"].allSatisfy', UI_TEST)
         self.assertIn('["Your 7-day full-feature trial is active", "Restore lifetime purchase", "$2.99"]', UI_TEST)
         self.assertNotIn(".hasFocus", UI_TEST)
 
