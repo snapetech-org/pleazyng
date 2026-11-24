@@ -69,6 +69,17 @@ class EmbeddedQualificationTests(unittest.TestCase):
         jobs = [{**job, 'run_attempt': 1} for job in self.jobs]
         self.assertEqual(self.verify(jobs=jobs)['jobs'][0]['attempt'], 1)
 
+    def test_github_mirrored_jobs_keep_the_real_execution_attempt_and_id(self):
+        original = {**self.jobs[0], 'run_attempt': 1, 'run_id': 42, 'head_sha': self.sha,
+                    'runner_id': 77, 'started_at': '2026-11-24T18:22:57Z',
+                    'completed_at': '2026-11-24T19:05:17Z',
+                    'steps': [{'name': 'Verify runtime dependencies', 'conclusion': 'success'}]}
+        mirror = {**original, 'id': 500, 'run_attempt': 2}
+        self.assertEqual(embedded.latest_attempt_jobs([[original], [mirror]]), [original])
+        rerun = {**mirror, 'started_at': '2026-11-24T20:00:00Z',
+                 'completed_at': '2026-11-24T20:45:00Z'}
+        self.assertEqual(embedded.latest_attempt_jobs([[original], [rerun]]), [rerun])
+
     def test_partial_rerun_combines_latest_success_for_each_suite_on_same_candidate(self):
         attempt_one = [{**job, 'run_attempt': 1} for job in deepcopy(self.jobs)]
         attempt_two = []

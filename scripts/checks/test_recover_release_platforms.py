@@ -164,6 +164,47 @@ class SourceProofTests(unittest.TestCase):
              patch.object(recovery, "ci_proof", return_value={"ci_run_id": 23}):
             return recovery.verify_source_run(run_id, head_sha, version, **options)
 
+    def test_supplemental_qualification_reuses_only_the_exact_original_outputs(self):
+        sha = self.source['head_sha']
+        self.source.update(conclusion='failure', run_attempt=3)
+        self.compare.update(status='identical', files=[])
+        tvos = next(job for job in self.jobs if job['name'] == 'Build tvOS developer package (arm64)')
+        tvos.update(run_attempt=2, run_id=42, head_sha=sha)
+        self.jobs[-2].update(conclusion='success', id=101)
+        self.jobs.extend([
+            {'name': 'Build WebOS TV package (ARMv7)', 'id': 102,
+             'status': 'completed', 'conclusion': 'success'},
+            {'name': 'Release CI / Apple native reliability (iOS)',
+             'status': 'completed', 'conclusion': 'failure'},
+        ])
+        with patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 42}) as gate:
+            proof = self.prove(head_sha=sha, qualification_run=84, freeze=True)
+        gate.assert_called_once_with(recovery.REPOSITORY, sha, '3.0.0', 42, 84, freeze=True)
+        with patch.object(recovery, 'collection', return_value=self.jobs):
+            assembled = recovery.compose_proof(proof, android_run=42, webos_run=42)
+            self.assertEqual(assembled['rebuilt_jobs'], [])
+            self.assertEqual(assembled['original_tvos_attempt'], 2)
+            self.assertEqual(assembled['android_source']['job_id'], 101)
+            self.assertEqual(assembled['webos_source']['job_id'], 102)
+            with self.assertRaisesRegex(recovery.RecoveryError, 'original release run'):
+                recovery.compose_proof(proof, android_run=74, webos_run=42)
+        with self.assertRaisesRegex(recovery.RecoveryError, 'different product revision'):
+            self.prove(qualification_run=84)
+        with self.assertRaisesRegex(recovery.RecoveryError, 'original unsigned release assets'):
+            self.prove(head_sha=sha, qualification_run=84, rebuild_ios=True)
+
+    def test_supplemental_qualification_does_not_allow_an_unrelated_ci_failure(self):
+        sha = self.source['head_sha']
+        self.source['run_attempt'] = 3
+        self.compare.update(status='identical', files=[])
+        tvos = next(job for job in self.jobs if job['name'] == 'Build tvOS developer package (arm64)')
+        tvos.update(run_attempt=2, run_id=42, head_sha=sha)
+        self.jobs.extend([{'name': 'Release CI / Code Analysis',
+                           'status': 'completed', 'conclusion': 'failure'}])
+        with patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 42}):
+            with self.assertRaisesRegex(recovery.RecoveryError, 'Release CI / Code Analysis'):
+                self.prove(head_sha=sha, qualification_run=84)
+
     def test_actual_public_candidate_run_shape_is_accepted_for_mac_rebuild(self):
         source_sha = "2388a06cc74d03e69ac7178fcd927a54460a5e3a"
         self.source.update(
@@ -1755,6 +1796,27 @@ class ArtifactTests(unittest.TestCase):
 
 
 class ControllerTests(unittest.TestCase):
+    def test_supplemental_qualification_dispatches_one_assembly_at_the_tooling_revision(self):
+        product_sha, tooling_sha = 'a' * 40, 'b' * 40
+        title = 'action:release:pool:public:tag:v3.0.51:assembly:source:42:qualification:84'
+        completed = {'databaseId': 85, 'status': 'completed', 'conclusion': 'success'}
+        with patch.object(controller, 'verify_platform_recovery') as gate, \
+             patch.object(controller, 'matching_packaging_repair_run', side_effect=[None, completed]) as matches, \
+             patch.object(controller, 'gh_json', return_value={'commit': {'sha': tooling_sha}}), \
+             patch.object(controller, 'ensure_remote_main_sha'), \
+             patch.object(controller, 'dispatch', return_value=completed) as dispatch:
+            for _ in range(2):
+                result = controller.ensure_release(
+                    'v3.0.51', product_sha, include_webos_release=True, reuse_platform_run_id=42,
+                    reuse_webos_run_id=42, reuse_repaired_run_id='qualification:84')
+                self.assertEqual(result, completed)
+        gate.assert_called_with(42, product_sha, '3.0.51', qualification_run=84, webos_run=42, android_run=42)
+        self.assertEqual([call.args for call in matches.call_args_list], [(title,), (title,)])
+        dispatch.assert_called_once()
+        self.assertEqual(dispatch.call_args.kwargs['expected_sha'], tooling_sha)
+        self.assertEqual(dispatch.call_args.kwargs['expected_title'], title)
+        self.assertEqual(dispatch.call_args.args[3]['reuse_repaired_run_id'], 'qualification:84')
+
     @patch.object(controller, "verify_platform_recovery")
     @patch.object(controller, "verify_unacquired_hosted_tvos_run", return_value={"run_id": 77})
     @patch.object(controller, "matching_run")

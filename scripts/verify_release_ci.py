@@ -53,16 +53,16 @@ def _request_json(url: str, token: str) -> dict:
     return result
 
 
-def _pages(url: str, token: str, collection: str) -> list[dict]:
+def _pages(url: str, token: str, collection: str, *, page_size: int = PER_PAGE) -> list[dict]:
     records: list[dict] = []
     for page in range(1, MAX_PAGES + 1):
         separator = "&" if "?" in url else "?"
-        result = _request_json(f"{url}{separator}per_page={PER_PAGE}&page={page}", token)
+        result = _request_json(f"{url}{separator}per_page={page_size}&page={page}", token)
         values = result.get(collection)
         if not isinstance(values, list) or any(not isinstance(value, dict) for value in values):
             raise GateError(f"GitHub Actions API omitted the expected {collection} list.")
         records.extend(values)
-        if len(values) < PER_PAGE:
+        if len(values) < page_size:
             return records
     raise GateError("GitHub Actions API pagination exceeded the safety limit.")
 

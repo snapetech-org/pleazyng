@@ -111,6 +111,25 @@ the verified stable tag, then resume the original run. Promotion checks the
 candidate ref, source ancestry, recorded artifact digest and latest job
 identities. An existing stable tag must already point to that source.
 
+If an Apple native suite has failed or timed out and the captured release's
+platform packages are available, run
+**Apple candidate qualification** on canonical `main` with the original build
+run ID and exact product SHA. This runs the native suites on hosted Apple Silicon.
+Once it passes, use the same captured version and artifacts:
+
+```sh
+python3 scripts/release_all_platforms.py --version MAJOR.MINOR.PATCH \
+  --source-commit PRODUCT_SHA --reuse-platform-run ORIGINAL_RUN_ID \
+  --reuse-repaired-run qualification:QUALIFICATION_RUN_ID \
+  --include-webos-release --publish
+```
+
+Once the original run finishes, assembly checks its non-Apple qualification and release jobs,
+verifies the supplemental Apple suite results, and preflights every original
+platform artifact before creating the stable tag. It verifies the downloaded
+artifact digests again before drafting the release. Keep the original run ID
+and qualification run ID when retrying delivery for the same version.
+
 Android developer, Play, Fire TV and Automotive jobs each retain their outputs.
 Linux compiles the bundle once per architecture. Each architecture's distro,
 Flatpak, Snap and portable jobs consume its verified bundle independently.

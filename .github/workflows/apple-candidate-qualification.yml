@@ -1,0 +1,413 @@
+# ng-runner-policy: hosted-default-v2
+# Verify native Apple behavior against a frozen product source with only the
+# reviewed test-harness and Apple DV staging-tool overlays.
+name: Apple candidate qualification
+run-name: apple-candidate-qualification:${{ inputs.source_run_id }}:${{ inputs.product_source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Failed canonical-main release run that produced the frozen candidate artifacts.
+        type: string
+        required: true
+      product_source_sha:
+        description: Full SHA of the product source and annotated candidate tag to qualify.
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: apple-candidate-qualification-${{ inputs.source_run_id }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_SUPPRESS_ANALYTICS: "true"
+  DASH__SUPPRESS_ANALYTICS: "true"
+
+jobs:
+  apple-native-reliability:
+    name: Apple native reliability (${{ matrix.platform }})
+    timeout-minutes: 360
+    runs-on: xcode-27
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            slug: ios
+          - platform: macOS
+            slug: macos
+          - platform: tvOS
+            slug: tvos
+    env:
+      LANG: en_US.UTF-8
+      GH_TOKEN: ${{ github.token }}
+      PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA: 2f631883d070b5791058fd59b15b01a1464372f6
+      PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA: 70c267ba92eba5f90e3abdcfa86f7518268df9ae
+      PUB_CACHE: ${{ runner.temp }}/apple-native-pub-${{ matrix.slug }}
+    steps:
+      - name: Check out current trusted main tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify frozen candidate source
+        id: verify-candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          PRODUCT_SOURCE_SHA: ${{ inputs.product_source_sha }}
+          TEST_HARNESS_SHA: ${{ env.PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA }}
+          DV_BUILD_TOOL_SHA: ${{ env.PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          repository = "snapetech-org/pleazyng"
+          repository_id = 1433487464
+          api_base = "https://api.github.com"
+          expected_workflow = f"{repository}/.github/workflows/apple-candidate-qualification.yml@refs/heads/main"
+          tag_pattern = re.compile(r"(?:apple-signing-unavailable:)?action:release:pool:public:tag:v(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$")
+          source_run_id = os.environ["SOURCE_RUN_ID"]
+          product_sha = os.environ["PRODUCT_SOURCE_SHA"]
+          test_harness_sha = os.environ["TEST_HARNESS_SHA"]
+          dv_build_tool_sha = os.environ["DV_BUILD_TOOL_SHA"]
+          workflow_sha = os.environ["WORKFLOW_SHA"]
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def api(path, *, missing=False):
+              request = urllib.request.Request(
+                  f"{api_base}/repos/{repository}/{path}",
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "Pleazyng-Apple-candidate-qualification",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      payload = response.read(8 * 1024 * 1024 + 1)
+              except urllib.error.HTTPError as error:
+                  if missing and error.code == 404:
+                      return None
+                  raise SystemExit(f"GitHub verification request failed (HTTP {error.code}).") from None
+              except (urllib.error.URLError, OSError, TimeoutError) as error:
+                  raise SystemExit(f"GitHub verification request failed ({type(error).__name__}).") from None
+              require(len(payload) <= 8 * 1024 * 1024, "GitHub verification response exceeded its size limit.")
+              try:
+                  result = json.loads(payload)
+              except (ValueError, UnicodeError):
+                  raise SystemExit("GitHub verification returned invalid JSON.") from None
+              require(isinstance(result, dict), "GitHub verification returned an unexpected response.")
+              return result
+
+          require(os.environ["EVENT_NAME"] == "workflow_dispatch", "Candidate qualification requires workflow_dispatch.")
+          require(os.environ["REF_NAME"] == "refs/heads/main", "Candidate qualification must run from main.")
+          require(os.environ["REPOSITORY"] == repository, "Candidate qualification requires the canonical repository.")
+          require(os.environ["WORKFLOW_REF"] == expected_workflow, "Candidate qualification workflow is not running from trusted main.")
+          require(re.fullmatch(r"[0-9]+", source_run_id) is not None, "Original release run ID must be numeric.")
+          require(re.fullmatch(r"[0-9a-f]{40}", product_sha) is not None, "Product source SHA must be a full lowercase commit SHA.")
+          require(re.fullmatch(r"[0-9a-f]{40}", test_harness_sha) is not None, "Test harness source SHA is invalid.")
+          require(re.fullmatch(r"[0-9a-f]{40}", dv_build_tool_sha) is not None, "Apple DV build-tool source SHA is invalid.")
+          require(re.fullmatch(r"[0-9a-f]{40}", workflow_sha) is not None, "Workflow source SHA is invalid.")
+
+          source_run = api(f"actions/runs/{source_run_id}")
+          require(type(source_run.get("id")) is int and source_run["id"] == int(source_run_id), "Release run ID does not match the requested source run.")
+          require(source_run.get("event") == "workflow_dispatch", "Source release must be a manual workflow dispatch.")
+          require(source_run.get("head_branch") == "main", "Source release must come from canonical main.")
+          require(source_run.get("head_sha") == product_sha, "Source release head does not match the requested product SHA.")
+          require(isinstance(source_run.get("path"), str) and source_run["path"].split("@", 1)[0] == ".github/workflows/build.yml", "Source run is not the canonical release workflow.")
+          require(isinstance(source_run.get("repository"), dict) and source_run["repository"].get("id") == repository_id, "Source release repository identity does not match Pleazyng.")
+          require(isinstance(source_run.get("head_repository"), dict) and source_run["head_repository"].get("id") == repository_id, "Source release head repository is not canonical Pleazyng.")
+          require(type(source_run.get("run_attempt")) is int and source_run["run_attempt"] > 0, "Source release run attempt is invalid.")
+          terminal_source = source_run.get("status") == "completed" and source_run.get("conclusion") in {"failure", "cancelled"}
+          active_source = source_run.get("status") in {"queued", "in_progress", "waiting", "pending"} and source_run.get("conclusion") is None
+          require(terminal_source or active_source, "Source release must be failed/cancelled or still active after an Apple suite failure.")
+          title = source_run.get("display_title")
+          title_match = tag_pattern.fullmatch(title) if isinstance(title, str) else None
+          require(title_match is not None, "Source run title is not a public versioned release dispatch.")
+
+          apple_jobs = []
+          total_jobs = None
+          seen_jobs = 0
+          seen_job_ids = set()
+          for page in range(1, 34):
+              jobs_doc = api(f"actions/runs/{source_run_id}/attempts/{source_run['run_attempt']}/jobs?per_page=30&page={page}")
+              page_jobs = jobs_doc.get("jobs")
+              require(isinstance(page_jobs, list), "Source attempt job inventory is malformed.")
+              if total_jobs is None:
+                  total_jobs = jobs_doc.get("total_count")
+                  require(type(total_jobs) is int and total_jobs >= 0, "Source attempt job count is invalid.")
+              for job in page_jobs:
+                  require(isinstance(job, dict) and type(job.get("id")) is int and job.get("run_id") == int(source_run_id) and job.get("run_attempt") == source_run["run_attempt"], "Source attempt job identity is invalid.")
+                  require(job["id"] not in seen_job_ids, "Source attempt contains a duplicate job ID.")
+                  seen_job_ids.add(job["id"])
+              apple_jobs.extend(job for job in page_jobs if job.get("name") in {
+                  "Release CI / Apple native reliability (iOS)",
+                  "Release CI / Apple native reliability (macOS)",
+                  "Release CI / Apple native reliability (tvOS)",
+              })
+              seen_jobs += len(page_jobs)
+              if seen_jobs == total_jobs or len(page_jobs) < 30:
+                  break
+          require(total_jobs is not None and seen_jobs == total_jobs, "Source attempt job inventory is incomplete.")
+          terminal_apple_failures = [
+              {key: job.get(key) for key in ("id", "name", "run_attempt", "status", "conclusion", "runner_id", "runner_name")}
+              for job in apple_jobs
+              if job.get("status") == "completed" and job.get("conclusion") in {"failure", "cancelled", "timed_out"}
+          ]
+          require(bool(terminal_apple_failures), "Source attempt has no terminal failed, cancelled or timed-out Apple native reliability job.")
+
+          version_doc = api(f"contents/pubspec.yaml?ref={urllib.parse.quote(product_sha, safe='')}")
+          require(version_doc.get("type") == "file" and version_doc.get("encoding") == "base64" and isinstance(version_doc.get("content"), str), "Product pubspec.yaml is not available as an immutable source file.")
+          try:
+              pubspec = base64.b64decode("".join(version_doc["content"].split()), validate=True).decode("utf-8")
+          except (ValueError, UnicodeError):
+              raise SystemExit("Product pubspec.yaml returned invalid content.") from None
+          values = []
+          for line in pubspec.splitlines():
+              match = re.match(r"^version:[ \t]*(.*)$", line)
+              if match:
+                  values.append(re.sub(r"[ \t]+#.*$", "", match.group(1)).strip())
+          require(len(values) == 1, "Product pubspec.yaml must contain one top-level version.")
+          version_match = re.fullmatch(r"(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\+[0-9]+)", values[0])
+          require(version_match is not None, "Product version must use major.minor.patch+numeric-build syntax.")
+          product_version = version_match.group("version")
+          semantic_version = product_version.split("+", 1)[0]
+          require(title_match.group("version") == semantic_version, "Release run title version differs from the product source version.")
+          candidate_tag = f"v{semantic_version}-candidate.{product_sha}"
+
+          candidate_ref = api(f"git/ref/tags/{candidate_tag}")
+          ref_object = candidate_ref.get("object")
+          require(isinstance(ref_object, dict) and ref_object.get("type") == "tag", "Frozen candidate must be an annotated Git tag.")
+          tag_object_sha = ref_object.get("sha")
+          require(isinstance(tag_object_sha, str) and re.fullmatch(r"[0-9a-f]{40}", tag_object_sha) is not None, "Candidate tag object SHA is invalid.")
+          tag_object = api(f"git/tags/{tag_object_sha}")
+          target = tag_object.get("object")
+          require(tag_object.get("tag") == candidate_tag and isinstance(target, dict) and target.get("type") == "commit" and target.get("sha") == product_sha, "Annotated candidate tag does not bind the exact product commit.")
+          require(api(f"git/ref/tags/v{semantic_version}", missing=True) is None, "Stable release tag already exists; candidate supplemental qualification is not applicable.")
+
+          ancestry = api(f"compare/{product_sha}...main")
+          require(ancestry.get("status") in {"ahead", "identical"} and ancestry.get("base_commit", {}).get("sha") == product_sha and ancestry.get("merge_base_commit", {}).get("sha") == product_sha, "Product source is not an ancestor of canonical main.")
+          overlay_in_product = {}
+          for overlay_sha, label, output_name in (
+              (test_harness_sha, "test harness", "test_harness_in_product"),
+              (dv_build_tool_sha, "Apple DV build tool", "dv_build_tool_in_product"),
+          ):
+              comparison = api(f"compare/{overlay_sha}...{workflow_sha}")
+              require(comparison.get("status") in {"ahead", "identical"} and comparison.get("base_commit", {}).get("sha") == overlay_sha and comparison.get("merge_base_commit", {}).get("sha") == overlay_sha, f"Pinned {label} is outside the trusted workflow lineage.")
+              product_comparison = api(f"compare/{overlay_sha}...{product_sha}")
+              overlay_in_product[output_name] = (
+                  product_comparison.get("status") in {"ahead", "identical"}
+                  and product_comparison.get("base_commit", {}).get("sha") == overlay_sha
+                  and product_comparison.get("merge_base_commit", {}).get("sha") == overlay_sha
+              )
+          workflow_lineage = api(f"compare/{workflow_sha}...main")
+          require(workflow_lineage.get("status") in {"ahead", "identical"} and workflow_lineage.get("base_commit", {}).get("sha") == workflow_sha and workflow_lineage.get("merge_base_commit", {}).get("sha") == workflow_sha, "Workflow source is not part of canonical main history.")
+
+          outputs = {
+              "product_source_sha": product_sha,
+              "source_run_attempt": source_run["run_attempt"],
+              "source_run_conclusion": source_run.get("conclusion") or "",
+              "source_run_status": source_run["status"],
+              "terminal_apple_failures": json.dumps(terminal_apple_failures, separators=(",", ":")),
+              "product_version": product_version,
+              "candidate_tag": candidate_tag,
+              "candidate_tag_object_sha": tag_object_sha,
+              "test_harness_source_sha": test_harness_sha,
+              "test_harness_in_product": str(overlay_in_product["test_harness_in_product"]).lower(),
+              "dv_build_tool_source_sha": dv_build_tool_sha,
+              "dv_build_tool_in_product": str(overlay_in_product["dv_build_tool_in_product"]).lower(),
+          }
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for name, value in outputs.items():
+                  output.write(f"{name}={value}\n")
+          print(f"Verified {candidate_tag} from source run {source_run_id}, attempt {source_run['run_attempt']} with an Apple qualification gap.")
+          PY
+
+      - name: Require native Apple Silicon host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = arm64
+
+      - name: Load pinned Flutter SDK
+        shell: bash
+        run: python3 scripts/flutter/load_sdk_pin.py --github-env
+
+      - name: Set up Flutter and supported Xcode SDKs
+        uses: ./.github/actions/setup-flutter-apple
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          hosted-xcode-version: '27.1'
+          require-duo-sdk: ${{ matrix.platform == 'iOS' && 'true' || 'false' }}
+
+      - name: Ensure CMake for the embedded Steam receiver
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v cmake >/dev/null || brew install cmake
+          command -v xcodegen >/dev/null || brew install xcodegen
+          command -v git-lfs >/dev/null || brew install git-lfs
+          command -v gtimeout >/dev/null || brew install coreutils
+          cmake --version
+
+      - name: Install CocoaPods
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:$PATH"
+          gem install cocoapods --version 1.17.0 --no-document \
+            --install-dir "$RUNNER_TEMP/cocoapods-gems" --bindir "$RUNNER_TEMP/cocoapods-bin"
+          gem_path="$RUNNER_TEMP/cocoapods-gems:$(gem env gempath)"
+          { echo "GEM_HOME=$RUNNER_TEMP/cocoapods-gems"; echo "GEM_PATH=$gem_path"; } >> "$GITHUB_ENV"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/cocoapods-bin" >> "$GITHUB_PATH"
+          export GEM_HOME="$RUNNER_TEMP/cocoapods-gems" GEM_PATH="$gem_path"
+          export PATH="$RUNNER_TEMP/cocoapods-bin:/opt/homebrew/bin:$PATH"
+          pod --version
+
+      - name: Qualify Apple native components
+        id: native-tests
+        uses: ./.github/actions/apple-native-reliability
+        timeout-minutes: 110
+        with:
+          platform: ${{ matrix.platform }}
+          candidate-source-sha: ${{ inputs.product_source_sha }}
+          candidate-test-harness-sha: ${{ env.PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA }}
+          candidate-test-harness-in-product: ${{ steps.verify-candidate.outputs.test_harness_in_product }}
+          candidate-dv-build-tool-sha: ${{ env.PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA }}
+          candidate-dv-build-tool-in-product: ${{ steps.verify-candidate.outputs.dv_build_tool_in_product }}
+        env:
+          PUB_CACHE: ${{ env.PUB_CACHE }}
+
+      - name: Record candidate qualification receipt
+        if: always() && steps.verify-candidate.outcome == 'success'
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ steps.verify-candidate.outputs.source_run_attempt }}
+          SOURCE_RUN_CONCLUSION: ${{ steps.verify-candidate.outputs.source_run_conclusion }}
+          SOURCE_RUN_STATUS: ${{ steps.verify-candidate.outputs.source_run_status }}
+          TERMINAL_APPLE_FAILURES: ${{ steps.verify-candidate.outputs.terminal_apple_failures }}
+          PRODUCT_SOURCE_SHA: ${{ steps.verify-candidate.outputs.product_source_sha }}
+          PRODUCT_VERSION: ${{ steps.verify-candidate.outputs.product_version }}
+          CANDIDATE_TAG: ${{ steps.verify-candidate.outputs.candidate_tag }}
+          CANDIDATE_TAG_OBJECT_SHA: ${{ steps.verify-candidate.outputs.candidate_tag_object_sha }}
+          TEST_HARNESS_SOURCE_SHA: ${{ steps.verify-candidate.outputs.test_harness_source_sha }}
+          DV_BUILD_TOOL_SOURCE_SHA: ${{ steps.verify-candidate.outputs.dv_build_tool_source_sha }}
+          PRODUCT_SOURCE_TREE_SHA: ${{ steps.native-tests.outputs.product-source-tree-sha }}
+          TEST_HARNESS_BLOB_SHA: ${{ steps.native-tests.outputs.test-harness-blob-sha }}
+          TEST_HARNESS_IN_PRODUCT: ${{ steps.verify-candidate.outputs.test_harness_in_product }}
+          TEST_HARNESS_OVERLAY_APPLIED: ${{ steps.native-tests.outputs.test-harness-overlay-applied }}
+          DV_BUILD_TOOL_BLOB_SHA: ${{ steps.native-tests.outputs.dv-build-tool-blob-sha }}
+          DV_BUILD_TOOL_IN_PRODUCT: ${{ steps.verify-candidate.outputs.dv_build_tool_in_product }}
+          DV_BUILD_TOOL_OVERLAY_APPLIED: ${{ steps.native-tests.outputs.dv-build-tool-overlay-applied }}
+          STAGED_PRODUCT_SOURCE_SHA: ${{ steps.native-tests.outputs.product-source-sha }}
+          NATIVE_TEST_OUTCOME: ${{ steps.native-tests.outcome }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          receipt_dir="$RUNNER_TEMP/apple-candidate-qualification"
+          mkdir -p "$receipt_dir"
+          python3 - "$receipt_dir/${SLUG}.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import platform
+          import subprocess
+          import sys
+
+          def command(args):
+              result = subprocess.run(args, text=True, capture_output=True)
+              return result.stdout.strip() if result.returncode == 0 else "unavailable"
+
+          platform_name = os.environ["PLATFORM"]
+          if os.environ["STAGED_PRODUCT_SOURCE_SHA"] != os.environ["PRODUCT_SOURCE_SHA"]:
+              raise SystemExit("Native qualification staged a different product source SHA.")
+          sdk = {"iOS": "iphonesimulator", "macOS": "macosx", "tvOS": "appletvsimulator"}[platform_name]
+          value = {
+              "schema_version": 1,
+              "purpose": "supplemental native Apple qualification for an immutable candidate product source",
+              "repository": "snapetech-org/pleazyng",
+              "product_source_sha": os.environ["PRODUCT_SOURCE_SHA"],
+              "staged_product_source_sha": os.environ["STAGED_PRODUCT_SOURCE_SHA"],
+              "product_source_tree_sha": os.environ.get("PRODUCT_SOURCE_TREE_SHA", ""),
+              "product_version": os.environ["PRODUCT_VERSION"],
+              "candidate_tag": os.environ["CANDIDATE_TAG"],
+              "candidate_tag_object_sha": os.environ["CANDIDATE_TAG_OBJECT_SHA"],
+              "source_run_id": int(os.environ["SOURCE_RUN_ID"]),
+              "source_run_attempt": int(os.environ["SOURCE_RUN_ATTEMPT"]),
+              "source_run_conclusion": os.environ["SOURCE_RUN_CONCLUSION"],
+              "source_run_status": os.environ["SOURCE_RUN_STATUS"],
+              "terminal_apple_failures": json.loads(os.environ["TERMINAL_APPLE_FAILURES"]),
+              "test_harness_source_sha": os.environ["TEST_HARNESS_SOURCE_SHA"],
+              "test_harness_blob_sha": os.environ.get("TEST_HARNESS_BLOB_SHA", ""),
+              "test_harness_in_product": os.environ["TEST_HARNESS_IN_PRODUCT"] == "true",
+              "test_harness_overlay_applied": os.environ["TEST_HARNESS_OVERLAY_APPLIED"] == "true",
+              "dv_build_tool_source_sha": os.environ["DV_BUILD_TOOL_SOURCE_SHA"],
+              "dv_build_tool_blob_sha": os.environ.get("DV_BUILD_TOOL_BLOB_SHA", ""),
+              "dv_build_tool_in_product": os.environ["DV_BUILD_TOOL_IN_PRODUCT"] == "true",
+              "dv_build_tool_overlay_applied": os.environ["DV_BUILD_TOOL_OVERLAY_APPLIED"] == "true",
+              "workflow_source_sha": os.environ["WORKFLOW_SHA"],
+              "workflow_ref": os.environ["WORKFLOW_REF"],
+              "qualification_run_id": int(os.environ["WORKFLOW_RUN_ID"]),
+              "qualification_run_attempt": int(os.environ["WORKFLOW_RUN_ATTEMPT"]),
+              "qualification_job": f"Apple native reliability ({platform_name})",
+              "platform": platform_name,
+              "runner_environment": os.environ.get("RUNNER_ENVIRONMENT", ""),
+              "runner_os": os.environ.get("RUNNER_OS", ""),
+              "runner_arch": os.environ.get("RUNNER_ARCH", ""),
+              "machine": platform.machine(),
+              "xcode_version": command(["xcodebuild", "-version"]),
+              "sdk": sdk,
+              "sdk_version": command(["xcrun", "--sdk", sdk, "--show-sdk-version"]),
+              "native_test_outcome": os.environ["NATIVE_TEST_OUTCOME"],
+              "test_mode": "build-for-testing" if platform_name == "macOS" else "simulator-tests",
+              "required_additional_steps": ["Launch the same iOS app on an older phone runtime"] if platform_name == "iOS" else [],
+          }
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+          print(f"Recorded candidate qualification source receipt for {platform_name}.")
+          PY
+
+      - name: Upload candidate qualification receipt
+        if: always() && steps.verify-candidate.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: apple-candidate-qualification-${{ matrix.slug }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/apple-candidate-qualification/${{ matrix.slug }}.json
+          if-no-files-found: error
+          retention-days: 14

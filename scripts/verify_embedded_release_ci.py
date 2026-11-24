@@ -17,6 +17,19 @@ ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = 'snapetech-org/pleazyng'
 REPOSITORY_ID = 1433487464
 PREFIX = 'Release CI / '
+APPLE_QUALIFICATION_WORKFLOW = '.github/workflows/apple-candidate-qualification.yml'
+APPLE_PLATFORM_JOBS = (
+    'Apple native reliability (iOS)',
+    'Apple native reliability (macOS)',
+    'Apple native reliability (tvOS)',
+)
+APPLE_AGGREGATE_JOB = 'Apple native reliability'
+APPLE_QUALIFICATION_STEPS = (
+    'Verify frozen candidate source',
+    'Require native Apple Silicon host',
+    'Qualify Apple native components',
+)
+APPLE_HOSTED_RUNNER_LABELS = {('xcode-27',), ('macos-26',)}
 
 
 class QualificationNotFound(GateError):
@@ -80,7 +93,57 @@ def verify_candidate(token, repository, sha, tag, candidate, *, root=ROOT, pubsp
         raise GateError('Existing stable release tag is immutable and points to different source.')
 
 
-def verify_jobs(run, jobs, sha, run_id, attempt, required, *, require_candidate_guards=False):
+def _supplemental_apple_jobs(proof, sha, run_id, attempt):
+    """Validate the in-memory proof before allowing any Apple CI substitutions."""
+    if proof is None:
+        return None
+    if (not isinstance(proof, dict) or proof.get('mode') != 'supplemental-apple'
+            or proof.get('repository') != REPOSITORY or proof.get('source_sha') != sha
+            or proof.get('source_run_id') != run_id
+            or type(proof.get('source_run_attempt')) is not int
+            or proof.get('source_run_attempt') != attempt
+            or proof.get('workflow') != APPLE_QUALIFICATION_WORKFLOW
+            or proof.get('status') != 'completed' or proof.get('conclusion') != 'success'
+            or type(proof.get('qualification_run_id')) is not int
+            or proof['qualification_run_id'] < 1
+            or type(proof.get('qualification_attempt')) is not int
+            or proof['qualification_attempt'] < 1
+            or type(proof.get('workflow_id')) is not int or proof['workflow_id'] < 1
+            or type(proof.get('source_run_attempt')) is not int or proof['source_run_attempt'] < 1
+            or re.fullmatch(r'[0-9a-f]{40}', str(proof.get('tooling_sha', ''))) is None):
+        raise GateError('Supplemental Apple proof is not bound to this frozen source run.')
+    records = proof.get('jobs')
+    if not isinstance(records, list) or len(records) != len(APPLE_PLATFORM_JOBS):
+        raise GateError('Supplemental Apple proof must contain exactly the three platform suites.')
+    result = {}
+    for record in records:
+        if not isinstance(record, dict) or record.get('name') not in APPLE_PLATFORM_JOBS:
+            raise GateError('Supplemental Apple proof contains an unexpected platform suite.')
+        name = record['name']
+        if (name in result or type(record.get('id')) is not int or record['id'] < 1
+                or type(record.get('attempt')) is not int
+                or not 1 <= record['attempt'] <= proof['qualification_attempt']
+                or record.get('status') != 'completed' or record.get('conclusion') != 'success'):
+            raise GateError(f'Supplemental Apple suite is malformed or unsuccessful: {name}')
+        labels = record.get('labels')
+        normalized = tuple(str(label).lower() for label in labels) if isinstance(labels, list) else ()
+        if (normalized not in APPLE_HOSTED_RUNNER_LABELS
+                or record.get('runner_group_name') != 'GitHub Actions'):
+            raise GateError(f'Supplemental Apple suite lacks public Apple Silicon runner evidence: {name}')
+        passed_steps = record.get('passed_steps')
+        if not isinstance(passed_steps, list) or passed_steps != list(APPLE_QUALIFICATION_STEPS):
+            raise GateError(f'Supplemental Apple suite omitted its required passing steps: {name}')
+        result[name] = record
+    if set(result) != set(APPLE_PLATFORM_JOBS):
+        raise GateError('Supplemental Apple proof omitted a required platform suite.')
+    if (proof.get('run_name') != f'apple-candidate-qualification:{run_id}:{sha}'
+            or proof.get('head_repository') != REPOSITORY or proof.get('head_branch') != 'main'):
+        raise GateError('Supplemental Apple proof has an invalid workflow run binding.')
+    return result
+
+
+def verify_jobs(run, jobs, sha, run_id, attempt, required, *, require_candidate_guards=False,
+                supplemental_apple=None):
     repository = run.get('repository') or {}
     head_repository = run.get('head_repository') or {}
     if (not isinstance(required, list) or not required
@@ -95,6 +158,23 @@ def verify_jobs(run, jobs, sha, run_id, attempt, required, *, require_candidate_
             or not isinstance(head_repository, dict) or head_repository.get('id') != REPOSITORY_ID):
         raise GateError('Embedded CI is not from the captured canonical main build and current attempt.')
     records = []
+    supplemental_jobs = _supplemental_apple_jobs(supplemental_apple, sha, run_id, attempt)
+    replaced_apple_jobs = set()
+    qualified_apple_jobs = set()
+    if supplemental_jobs is not None:
+        for platform in APPLE_PLATFORM_JOBS:
+            originals = [job for job in jobs if job.get('name') == PREFIX + platform]
+            if (len(originals) == 1 and type(originals[0].get('id')) is int
+                    and ((originals[0].get('status'), originals[0].get('conclusion')) == ('completed', 'success')
+                         or platform in supplemental_jobs)):
+                qualified_apple_jobs.add(platform)
+    else:
+        qualified_apple_jobs.update(
+            platform for platform in APPLE_PLATFORM_JOBS
+            if any(job.get('name') == PREFIX + platform
+                   and job.get('status') == 'completed' and job.get('conclusion') == 'success'
+                   for job in jobs)
+        )
     for name in required:
         matches = [job for job in jobs if job.get('name') == PREFIX + name]
         if name == 'Linux package smoke build' and len(matches) == 1 and matches[0].get('conclusion') == 'skipped':
@@ -111,12 +191,36 @@ def verify_jobs(run, jobs, sha, run_id, attempt, required, *, require_candidate_
                 records.append({'id': job['id'], 'name': producer, 'attempt': job['run_attempt'],
                                 'status': job['status'], 'conclusion': job['conclusion']})
             continue
-        if (len(matches) != 1 or matches[0].get('status') != 'completed' or matches[0].get('conclusion') != 'success'
-                or not isinstance(matches[0].get('id'), int)):
+        if (len(matches) != 1 or type(matches[0].get('id')) is not int):
             raise GateError(f'Required embedded CI job did not pass uniquely: {name}')
         job = matches[0]
-        records.append({'id': job['id'], 'name': job['name'], 'attempt': job.get('run_attempt'),
-                        'status': job['status'], 'conclusion': job['conclusion']})
+        record = {'id': job['id'], 'name': job['name'], 'attempt': job.get('run_attempt'),
+                  'status': job.get('status'), 'conclusion': job.get('conclusion')}
+        if name in APPLE_PLATFORM_JOBS:
+            if (job.get('status'), job.get('conclusion')) == ('completed', 'success'):
+                pass
+            elif supplemental_jobs is not None:
+                replacement = supplemental_jobs[name]
+                record['supplemental_qualification'] = {
+                    'run_id': supplemental_apple['qualification_run_id'],
+                    'attempt': replacement['attempt'], 'job_id': replacement['id'],
+                    'status': replacement['status'], 'conclusion': replacement['conclusion'],
+                    'tooling_sha': supplemental_apple['tooling_sha'],
+                    'workflow': supplemental_apple['workflow'],
+                }
+                replaced_apple_jobs.add(name)
+            else:
+                raise GateError(f'Required embedded CI job did not pass uniquely: {name}')
+        elif (name == APPLE_AGGREGATE_JOB
+              and (job.get('status'), job.get('conclusion')) != ('completed', 'success')
+              and supplemental_jobs is not None
+              and set(APPLE_PLATFORM_JOBS) <= qualified_apple_jobs):
+            record['derived_conclusion'] = 'success'
+            record['derived_from_supplemental_apple_jobs'] = [
+                supplemental_jobs[platform]['id'] for platform in APPLE_PLATFORM_JOBS]
+        elif job.get('status') != 'completed' or job.get('conclusion') != 'success':
+            raise GateError(f'Required embedded CI job did not pass uniquely: {name}')
+        records.append(record)
     if require_candidate_guards or any(job.get('name') == 'Record qualified source' for job in jobs):
         for prefix, minimum in (('Candidate isolation / ', 4), ('Candidate security / ', 2)):
             guards = sorted((job for job in jobs if job['name'].startswith(prefix)), key=lambda job: job['name'])
@@ -125,12 +229,27 @@ def verify_jobs(run, jobs, sha, run_id, attempt, required, *, require_candidate_
                 raise GateError(f'Candidate qualification is incomplete: {prefix.rstrip(" /")}')
             records.extend({'id': job['id'], 'name': job['name'], 'attempt': job['run_attempt'],
                             'status': job['status'], 'conclusion': job['conclusion']} for job in guards)
+    replaceable_names = {PREFIX + name for name in APPLE_PLATFORM_JOBS if name in replaced_apple_jobs}
+    if supplemental_jobs is not None and set(APPLE_PLATFORM_JOBS) <= qualified_apple_jobs:
+        replaceable_names.add(PREFIX + APPLE_AGGREGATE_JOB)
     for job in jobs:
         if str(job.get('name', '')).startswith(PREFIX) and (job.get('status') != 'completed'
-                or job.get('conclusion') not in ('success', 'skipped')):
+                or job.get('conclusion') not in ('success', 'skipped')) and job.get('name') not in replaceable_names:
             raise GateError('A reusable CI job failed or remains unfinished.')
-    return {'mode': 'embedded', 'source_sha': sha, 'run_id': run_id, 'attempt': attempt,
-            'workflow': '.github/workflows/build.yml', 'ci_workflow': '.github/workflows/ci.yml', 'jobs': records}
+    proof = {'mode': 'embedded', 'source_sha': sha, 'run_id': run_id, 'attempt': attempt,
+             'workflow': '.github/workflows/build.yml', 'ci_workflow': '.github/workflows/ci.yml', 'jobs': records}
+    if supplemental_apple is not None:
+        proof['supplemental_apple'] = supplemental_apple
+    return proof
+
+
+def same_completed_execution(current, earlier):
+    """GitHub can copy a passing job into a rerun with a new job ID."""
+    identity = ('run_id', 'head_sha', 'runner_id', 'started_at', 'completed_at')
+    return (current.get('status') == earlier.get('status') == 'completed'
+            and current.get('conclusion') == earlier.get('conclusion') == 'success'
+            and all(current.get(field) and current[field] == earlier.get(field) for field in identity)
+            and bool(current.get('steps')) and current['steps'] == earlier.get('steps'))
 
 
 def latest_attempt_jobs(attempt_pages):
@@ -157,6 +276,8 @@ def latest_attempt_jobs(attempt_pages):
             if key in seen:
                 raise GateError('CI attempt history contains a duplicate job record.')
             seen.add(key)
+            if name in latest and same_completed_execution(job, latest[name]):
+                continue
             latest[name] = job
     return list(latest.values())
 
@@ -167,9 +288,129 @@ def fetch_attempt_history(run_id, attempt, token):
         raise GateError('Captured CI attempt count is outside the supported bound.')
     pages = []
     for number in range(1, attempt + 1):
-        jobs = _pages(f'{API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{number}/jobs', token, 'jobs')
+        jobs = _pages(f'{API_BASE}/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{number}/jobs', token, 'jobs',
+                      page_size=30)
         pages.append(jobs)
     return latest_attempt_jobs(pages)
+
+
+def _require_main_ancestor(sha, token, description):
+    comparison = api(f'compare/{sha}...main', token)
+    if (comparison.get('status') not in ('ahead', 'identical')
+            or comparison.get('base_commit', {}).get('sha') != sha):
+        raise GateError(f'{description} is not an ancestor of canonical main.')
+
+
+def _require_canonical_run_repository(run, *, description):
+    for key in ('repository', 'head_repository'):
+        identity = run.get(key)
+        if (not isinstance(identity, dict) or identity.get('id') != REPOSITORY_ID
+                or identity.get('full_name') != REPOSITORY):
+            raise GateError(f'{description} is not from the canonical repository.')
+
+
+def _positive_run_id(value):
+    if type(value) is int and value > 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r'[1-9][0-9]*', value):
+        return int(value)
+    return None
+
+
+def verify_supplemental_apple_ci(repository, source_sha, source_run_id, qualification_run_id, token):
+    """Verify the trusted hosted-Apple rerun bound to one frozen build source."""
+    source_run_id = _positive_run_id(source_run_id)
+    qualification_run_id = _positive_run_id(qualification_run_id)
+    if (repository != REPOSITORY or re.fullmatch(r'[0-9a-f]{40}', str(source_sha)) is None
+            or source_run_id is None or qualification_run_id is None
+            or not isinstance(token, str) or not token.strip()):
+        raise GateError('Supplemental Apple qualification requires exact canonical run identities.')
+
+    source = api(f'actions/runs/{source_run_id}', token)
+    _require_canonical_run_repository(source, description='Frozen source run')
+    source_attempt = source.get('run_attempt')
+    if (source.get('id') != source_run_id or source.get('event') != 'workflow_dispatch'
+            or source.get('head_branch') != 'main' or source.get('head_sha') != source_sha
+            or not isinstance(source.get('path'), str)
+            or source['path'].split('@')[0] != '.github/workflows/build.yml'
+            or type(source_attempt) is not int or not 1 <= source_attempt <= 100):
+        raise GateError('Frozen source run is not the exact canonical main build for this product SHA.')
+    _require_main_ancestor(source_sha, token, 'Frozen product source')
+
+    qualification = api(f'actions/runs/{qualification_run_id}', token)
+    _require_canonical_run_repository(qualification, description='Supplemental Apple run')
+    qualification_attempt = qualification.get('run_attempt')
+    tooling_sha = qualification.get('head_sha')
+    expected_name = f'apple-candidate-qualification:{source_run_id}:{source_sha}'
+    workflow_path = qualification.get('path')
+    workflow_id = qualification.get('workflow_id')
+    if (qualification.get('id') != qualification_run_id
+            or qualification.get('event') != 'workflow_dispatch'
+            or qualification.get('head_branch') != 'main'
+            or not isinstance(workflow_path, str)
+            or workflow_path.split('@')[0] != APPLE_QUALIFICATION_WORKFLOW
+            or qualification.get('display_title') != expected_name
+            or (qualification.get('status'), qualification.get('conclusion')) != ('completed', 'success')
+            or type(qualification_attempt) is not int or not 1 <= qualification_attempt <= 100
+            or re.fullmatch(r'[0-9a-f]{40}', str(tooling_sha)) is None
+            or type(workflow_id) is not int or workflow_id < 1):
+        raise GateError('Supplemental Apple run is not the successful exact-name trusted-main workflow run.')
+    workflow = api(f'actions/workflows/{workflow_id}', token)
+    if (workflow.get('id') != workflow_id or workflow.get('path') != APPLE_QUALIFICATION_WORKFLOW
+            or workflow.get('state') != 'active'):
+        raise GateError('Supplemental Apple run does not resolve to the active canonical workflow file.')
+    _require_main_ancestor(tooling_sha, token, 'Supplemental Apple workflow source')
+
+    jobs = fetch_attempt_history(qualification_run_id, qualification_attempt, token)
+    suite_jobs = [job for job in jobs if str(job.get('name', '')).startswith('Apple native reliability')]
+    suite_names = {job.get('name') for job in suite_jobs}
+    if len(suite_jobs) != len(APPLE_PLATFORM_JOBS) or suite_names != set(APPLE_PLATFORM_JOBS):
+        raise GateError('Supplemental Apple workflow must contain precisely the iOS, macOS, and tvOS suites.')
+    records = []
+    for name in APPLE_PLATFORM_JOBS:
+        matches = [job for job in suite_jobs if job.get('name') == name]
+        if len(matches) != 1:
+            raise GateError(f'Supplemental Apple suite is missing or ambiguous: {name}')
+        job = matches[0]
+        if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
+                or type(job.get('id')) is not int or job['id'] < 1
+                or type(job.get('run_attempt')) is not int
+                or not 1 <= job['run_attempt'] <= qualification_attempt):
+            raise GateError(f'Supplemental Apple suite did not pass in its latest attempt: {name}')
+        labels = job.get('labels')
+        normalized = tuple(str(label).lower() for label in labels) if isinstance(labels, list) else ()
+        if (normalized not in APPLE_HOSTED_RUNNER_LABELS
+                or job.get('runner_group_name') != 'GitHub Actions'):
+            raise GateError(f'Supplemental Apple suite did not use a public hosted Apple Silicon runner: {name}')
+        steps = job.get('steps')
+        if not isinstance(steps, list):
+            raise GateError(f'Supplemental Apple suite omitted step evidence: {name}')
+        passed_steps = []
+        for step_name in APPLE_QUALIFICATION_STEPS:
+            matches = [step for step in steps if step.get('name') == step_name]
+            if (len(matches) != 1 or matches[0].get('status') != 'completed'
+                    or matches[0].get('conclusion') != 'success'):
+                raise GateError(f'Supplemental Apple suite step did not pass uniquely: {name}: {step_name}')
+            passed_steps.append(step_name)
+        records.append({
+            'id': job['id'], 'name': name, 'attempt': job['run_attempt'],
+            'status': job['status'], 'conclusion': job['conclusion'],
+            'labels': labels, 'runner_group_name': job['runner_group_name'],
+            'passed_steps': passed_steps,
+        })
+
+    return {
+        'mode': 'supplemental-apple', 'repository': repository,
+        'source_sha': source_sha, 'source_run_id': source_run_id,
+        'source_run_attempt': source_attempt,
+        'qualification_run_id': qualification_run_id,
+        'qualification_attempt': qualification_attempt,
+        'tooling_sha': tooling_sha, 'workflow': APPLE_QUALIFICATION_WORKFLOW,
+        'workflow_id': workflow_id, 'run_name': expected_name,
+        'head_repository': REPOSITORY, 'head_branch': 'main',
+        'status': qualification['status'], 'conclusion': qualification['conclusion'],
+        'jobs': records,
+    }
 
 
 def verify_created_tag(token, tag, sha):

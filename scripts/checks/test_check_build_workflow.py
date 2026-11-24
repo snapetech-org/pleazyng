@@ -254,12 +254,14 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
     def test_captured_release_cannot_skip_qualified_source_or_inherit_ci_secrets(self):
         original = self._workflow()
         variants = [original.replace("needs.release-ci.result == 'success'", "needs.release-ci.result == 'skipped'"),
-                    original.replace('  validate-trusted-ref:\n    name: Validate release request\n    needs: capture-candidate\n',
+                    original.replace('  validate-trusted-ref:\n    name: Validate release request\n    needs: [capture-candidate, freeze-requalified-source]\n',
                                      '  validate-trusted-ref:\n    name: Validate release request\n    needs: freeze-qualified-source\n'),
+                    original.replace("needs.freeze-requalified-source.result == 'success'", 'true'),
                     original.replace('    uses: ./.github/workflows/ci.yml\n',
                                      '    uses: ./.github/workflows/ci.yml\n    secrets: inherit\n')]
         for workflow in variants:
             with self.subTest(workflow=workflow[:20]):
+                self.assertNotEqual(workflow, original)
                 result = self._run(workflow)
                 self.assertNotEqual(result.returncode, 0)
 

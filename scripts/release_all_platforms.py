@@ -318,7 +318,7 @@ def matching_packaging_repair_run(title: str) -> dict | None:
 
 
 def parse_repaired_run_reference(value):
-    """Parse the existing repaired-run slot, including its typed tvOS assembly form."""
+    """Parse a run ID or a typed recovery source."""
     if value is None or type(value) is int:
         return value
     if not isinstance(value, str):
@@ -328,15 +328,21 @@ def parse_repaired_run_reference(value):
     match = re.fullmatch(r"assembly-tvos:([1-9][0-9]*)", value)
     if match:
         return f"assembly-tvos:{int(match.group(1))}"
-    match = re.fullmatch(r"ios-developer:([1-9][0-9]*)", value)
+    match = re.fullmatch(r"(ios-developer|qualification):([1-9][0-9]*)", value)
     if match:
-        return f"ios-developer:{int(match.group(1))}"
-    raise ReleaseError("Repaired run must be a positive ID, assembly-tvos:<ID>, or ios-developer:<ID>.")
+        return f"{match.group(1)}:{int(match.group(2))}"
+    raise ReleaseError("Repaired run must be a positive ID, assembly-tvos:<ID>, ios-developer:<ID>, or qualification:<ID>.")
 
 
 def assembly_tvos_run_id(value) -> int | None:
     value = parse_repaired_run_reference(value)
     if isinstance(value, str) and value.startswith("assembly-tvos:"):
+        return int(value.split(":", 1)[1])
+    return None
+
+
+def supplemental_qualification_run_id(value) -> int | None:
+    if isinstance(value, str) and value.startswith("qualification:"):
         return int(value.split(":", 1)[1])
     return None
 
@@ -1804,6 +1810,7 @@ def ensure_release(
     allow_private_apple_retry: bool = False,
 ) -> dict:
     reuse_repaired_run_id = parse_repaired_run_reference(reuse_repaired_run_id)
+    qualification_run = supplemental_qualification_run_id(reuse_repaired_run_id)
     if rebuild_tizen and not reuse_platform_run_id:
         raise ReleaseError("Tizen rebuilding requires ordinary verified platform recovery.")
     if reuse_platform_run_id and reuse_android_run_id is None:
@@ -1852,6 +1859,15 @@ def ensure_release(
     if private_apple_signing_unavailable:
         run_title = f"apple-signing-unavailable:{run_title}"
     repair = packaging_source_sha is not None
+    if qualification_run:
+        if (not reuse_platform_run_id or reuse_android_run_id != reuse_platform_run_id
+                or reuse_webos_run_id != reuse_platform_run_id or repair or candidate_ref
+                or not include_webos_build or include_apple_store_build or prepare_homebrew_cask
+                or any((rebuild_ios, rebuild_tvos, rebuild_macos, rebuild_linux, rebuild_tizen,
+                        rebuild_webos, reuse_macos_run_id, reuse_tvos_run_id, reuse_ios_run_id,
+                        reuse_ios_developer_run_id, private_apple_signing_unavailable))):
+            raise ReleaseError("Supplemental qualification requires assembly of every original unsigned artifact.")
+        run_title += f":assembly:source:{reuse_platform_run_id}:qualification:{qualification_run}"
     if runner_acquisition_retry_of is not None:
         if (repair or reuse_platform_run_id or reuse_repaired_run_id is not None
                 or type(runner_acquisition_retry_of) is not int or runner_acquisition_retry_of < 1):
@@ -1997,6 +2013,8 @@ def ensure_release(
             options["rebuild_ios"] = True
         if built_tvos_run_id is not None:
             options["built_tvos_run"] = built_tvos_run_id
+        elif qualification_run is not None:
+            options["qualification_run"] = qualification_run
         elif reuse_repaired_run_id and not (isinstance(reuse_repaired_run_id, str) and reuse_repaired_run_id.startswith("ios-developer:")):
             options["repaired_run"] = reuse_repaired_run_id
         if reuse_tvos_run_id:
@@ -2025,6 +2043,8 @@ def ensure_release(
         proof = verify_platform_recovery(reuse_platform_run_id, commit_sha, tag.removeprefix("v"), **options)
         if repair:
             validate_packaging_repair_proof(proof, tag, packaging_source_sha, workflow_source_sha)
+        elif qualification_run is not None:
+            existing = matching_packaging_repair_run(run_title)
         elif reuse_platform_run_id:
             # Validate the source artifacts before looking for or resuming a
             # retry run. An invalid recovery request must not query or reuse a
@@ -2094,7 +2114,9 @@ def ensure_release(
             f"Release run {existing['databaseId']} passed without all requested platform jobs; "
             "dispatching the required profile."
         )
-    dispatch_sha = workflow_source_sha if repair else commit_sha
+    dispatch_sha = (workflow_source_sha if repair else
+                    gh_json("api", f"repos/{PLEZY_REPO}/branches/main")["commit"]["sha"]
+                    if qualification_run else commit_sha)
     ensure_remote_main_sha(dispatch_sha, f"dispatching the {tag} release build")
     fields = {
         "action": "release",
@@ -2184,7 +2206,7 @@ def verify_platform_recovery(run_id: int, commit_sha: str, version: str, *,
                              android_run=None, macos_run=None, webos_run=None, include_webos_build=True, wait_complete=False,
                              rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False,
                              packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None,
-                             ios_developer_run=None, built_tvos_run=None) -> dict:
+                             ios_developer_run=None, built_tvos_run=None, qualification_run=None) -> dict:
     from recover_release_platforms import RecoveryError, compose_proof, verify_source_run, wait_for_source_run, verify_macos_packaging_recovery
 
     if (rebuild_tvos or rebuild_ios or rebuild_tizen) and (macos_run or repaired_run):
@@ -2200,6 +2222,8 @@ def verify_platform_recovery(run_id: int, commit_sha: str, version: str, *,
         options = {"built_tvos_run": built_tvos_run}
     else:
         options = {}
+    if qualification_run is not None:
+        options.update(qualification_run=qualification_run, freeze=True)
     if tvos_run:
         if not packaging_source_sha or rebuild_tvos or repaired_run or macos_run:
             raise ReleaseError('Signed TV reuse requires approved frozen packaging recovery.')
@@ -3236,7 +3260,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rebuild-linux", action="store_true", help="Rebuild Linux during verified platform recovery")
     parser.add_argument("--reuse-webos-run", type=int, help="Reuse a verified webOS package and wait locally for completed source outputs before assembly")
     parser.add_argument("--reuse-repaired-run", type=str,
-                        help="Reuse repaired Linux/Mac outputs by ID or a signed tvOS package as assembly-tvos:<ID>")
+                        help="Reuse repaired Linux/Mac outputs by ID, a signed tvOS package as assembly-tvos:<ID>, "
+                             "or supplemental Apple CI as qualification:<ID>")
     parser.add_argument('--reuse-tvos-run', type=int, help='Reuse successful signed TV output from an approved sibling Apple packaging repair')
     parser.add_argument('--reuse-ios-run', type=int, help='Reuse successful signed iOS output from an approved sibling Apple packaging repair')
     parser.add_argument('--reuse-ios-developer-run', type=int, help='Reuse an attested unsigned developer IPA from a successful recovery run')
@@ -3306,19 +3331,31 @@ def main() -> int:
     args = parse_args()
     args.reuse_repaired_run = parse_repaired_run_reference(args.reuse_repaired_run)
     built_tvos_run = assembly_tvos_run_id(args.reuse_repaired_run)
+    qualification_run = supplemental_qualification_run_id(args.reuse_repaired_run)
     repaired_platform_run = (args.reuse_repaired_run
                              if type(args.reuse_repaired_run) is int else None)
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
         raise ReleaseError("--version must be MAJOR.MINOR.PATCH, without a leading v.")
     if args.execution_profile is None:
         args.execution_profile = "hybrid"
-    if not getattr(args, "freeze_release", False):
+    if not getattr(args, "freeze_release", False) and qualification_run is None:
         # Preserve the legacy main/recovery preflight. Frozen resumptions must
         # validate the selected tag instead of a later local main checkout.
         validate_source_metadata(ROOT, args.version)
     if args.execution_profile != "hybrid":
         raise ReleaseError("Complete releases require the hybrid profile, including native Windows ARM64 CI.")
-    packaging_repair = bool(args.reuse_platform_run and getattr(args, "source_commit", None))
+    if qualification_run is not None:
+        if (not args.reuse_platform_run or not getattr(args, "source_commit", None)
+                or args.reuse_android_run not in (None, args.reuse_platform_run)
+                or args.reuse_webos_run not in (None, args.reuse_platform_run)
+                or any((args.include_apple_store_build, args.prepare_homebrew_cask, args.rebuild_ios,
+                        args.rebuild_tvos, args.rebuild_macos, args.rebuild_linux, args.rebuild_tizen,
+                        args.rebuild_webos, args.reuse_macos_run, args.reuse_tvos_run,
+                        args.reuse_ios_run, args.reuse_ios_developer_run))):
+            raise ReleaseError("Supply the original platform run and its exact source for supplemental Apple qualification.")
+        args.reuse_android_run = args.reuse_webos_run = args.reuse_platform_run
+    packaging_repair = bool(args.reuse_platform_run and getattr(args, "source_commit", None)
+                            and qualification_run is None)
     ordinary_unsigned_channel_recovery = (
         args.publish and not packaging_repair
         and not args.include_apple_store_build and not args.prepare_homebrew_cask
@@ -3416,10 +3453,10 @@ def main() -> int:
         print(f"Release scratch: {scratch}", flush=True)
         frozen = bool(getattr(args, "freeze_release", False)) and not args.reuse_platform_run
         tag = f"v{args.version}"
-        frozen_commit = existing_release_tag_commit(ROOT, tag) if frozen else None
+        frozen_commit = existing_release_tag_commit(ROOT, tag) if frozen or qualification_run else None
         selected_commit = getattr(args, "source_commit", None)
         if selected_commit:
-            validate_selected_source(selected_commit, frozen=frozen,
+            validate_selected_source(selected_commit, frozen=frozen or qualification_run is not None,
                                      frozen_commit=frozen_commit,
                                      packaging_repair=packaging_repair)
         if frozen_commit or selected_commit:
@@ -3439,7 +3476,7 @@ def main() -> int:
         validate_source_metadata(worktree, args.version)
         existing_tag_commit = existing_release_tag_commit(worktree, tag)
         tag_reused = existing_tag_commit is not None
-        if args.reuse_platform_run and not tag_reused:
+        if args.reuse_platform_run and not tag_reused and qualification_run is None:
             raise ReleaseError("Platform recovery requires an existing immutable release tag.")
         native_sha = None
         ffmpeg_version = None
@@ -3510,6 +3547,7 @@ def main() -> int:
                 **({"rebuild_tizen": True} if args.rebuild_tizen else {}),
                 **({"rebuild_ios": True} if args.rebuild_ios else {}),
                 **({"repaired_run": repaired_platform_run} if repaired_platform_run else {}),
+                **({"qualification_run": qualification_run} if qualification_run else {}),
                 **({"built_tvos_run": built_tvos_run} if built_tvos_run is not None else {}),
                 **({'tvos_run': args.reuse_tvos_run} if args.reuse_tvos_run else {}),
                 **({'ios_run': args.reuse_ios_run} if args.reuse_ios_run else {}),
@@ -3531,6 +3569,8 @@ def main() -> int:
             # The verified S-to-R tree proof preserves every native pin. A
             # later native-fork main cannot invalidate immutable product bytes.
             progress["native_pin_policy"] = "preserved-approved-product-pins"
+        elif qualification_run:
+            progress["native_pin_policy"] = "preserved-qualified-product-pins"
         else:
             command(["python3", "scripts/sync_native_revision.py", "--check"], cwd=worktree)
         validate_source_metadata(worktree, args.version)
@@ -3624,13 +3664,16 @@ def main() -> int:
         # Store variants are explicit preparation, never implied by publishing.
         include_apple_store_build = args.include_apple_store_build
         progress["include_apple_store_build"] = include_apple_store_build
-        if not tag_reused and not frozen:
+        if not tag_reused and not frozen and qualification_run is None:
             # Exact-source CI runs first. Build every release package once after
             # tagging; never publish until the complete artifact checks pass.
             stage = "release tag"
             progress["stage"] = stage
             save_progress()
             tag = ensure_tag(worktree, args.version, pin_sha)
+        elif qualification_run and not tag_reused:
+            progress["stage"] = "stable tag pending verified assembly"
+            save_progress()
         else:
             stage = "reuse immutable release tag"
             progress["stage"] = stage
@@ -3678,6 +3721,10 @@ def main() -> int:
             proof = embedded_ci_proof(release["databaseId"], pin_sha)
             progress["embedded_ci"] = proof
             (scratch / "embedded-ci-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+        elif qualification_run:
+            ensure_frozen_release_source(tag, pin_sha)
+            if not run_has_successful_step(PLEZY_REPO, release, "create-release", "Recover verified platform artifacts"):
+                raise ReleaseError("Assembly omitted verification of the original qualified platform artifacts.")
 
         stage = "release asset validation"
         progress["stage"] = stage
@@ -3704,7 +3751,7 @@ def main() -> int:
         publication_facts_failures: list[str] = []
         release_published = False
         if args.publish or args.publish_github_only:
-            if frozen or packaging_repair:
+            if frozen or packaging_repair or qualification_run:
                 ensure_frozen_release_source(tag, product_sha if packaging_repair else pin_sha)
             else:
                 ensure_remote_main_sha(pin_sha, f"publishing Pleazyng {tag}")
@@ -3720,12 +3767,12 @@ def main() -> int:
             save_progress()
             try:
                 delivery_sha = (gh_json("api", f"repos/{PLEZY_REPO}/branches/main")["commit"]["sha"]
-                                if frozen or packaging_repair else pin_sha)
+                                if frozen or packaging_repair or qualification_run else pin_sha)
                 progress["delivery_tooling_commit"] = delivery_sha
                 followups = post_release_actions(
                     tag, args.version,
                     release_sha=(product_sha if packaging_repair else
-                                 existing_tag_commit if args.reuse_platform_run else pin_sha),
+                                 existing_tag_commit if args.reuse_platform_run and not qualification_run else pin_sha),
                     include_webos_release=args.include_webos_release,
                     publish_channels=args.publish,
                     notify_discord=not args.skip_discord_notification,
@@ -3746,7 +3793,7 @@ def main() -> int:
                 print("GitHub release is published; post-release delivery needs a separate retry.")
             try:
                 publication_facts_commit = (refresh_latest_published_facts(scratch, tag, product_sha if packaging_repair else pin_sha)
-                                            if frozen or packaging_repair else refresh_published_facts(worktree, tag, pin_sha))
+                                            if frozen or packaging_repair or qualification_run else refresh_published_facts(worktree, tag, pin_sha))
             except Exception:
                 # Exception details can contain credentials from a failed
                 # publication operation. Preserve only the safe retry signal.

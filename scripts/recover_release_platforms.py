@@ -129,15 +129,18 @@ def verify_webos_link_patch(repository, source_sha, head_sha, files):
 
 
 def api(path):
-    result = subprocess.run(["gh", "api", path], capture_output=True, text=True)
-    if result.returncode:
-        raise RecoveryError(result.stderr.strip())
-    return json.loads(result.stdout)
+    for attempt in range(3):
+        result = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+        if not result.returncode:
+            return json.loads(result.stdout)
+        if attempt == 2 or not re.search(r"\(HTTP 50[234]\)", result.stderr):
+            raise RecoveryError(result.stderr.strip())
+        time.sleep(attempt + 1)
 
 
 def collection(path, key):
     from release_job_inventory import inventory, mac_package_evidence
-    values = inventory(path, key, api, RecoveryError)
+    values = inventory(path, key, api, RecoveryError, page_size=30)
     return mac_package_evidence(values) if key == "jobs" else values
 
 
@@ -184,7 +187,7 @@ def immutable_ci_source(repository, source_sha, version):
     return tag_sha
 
 
-def embedded_source_ci(repository, source_sha, source_run):
+def embedded_source_ci(repository, source_sha, source_run, *, supplemental_apple=None):
     """Verify qualification inside the original build, even if a platform failed."""
     from verify_embedded_release_ci import PREFIX, verify_jobs
     if repository != REPOSITORY or not str(source_run).isdigit():
@@ -203,13 +206,22 @@ def embedded_source_ci(repository, source_sha, source_run):
         jobs = latest_attempt_jobs(history)
     except GateError as error:
         raise RecoveryError(f"Embedded CI attempt history is invalid: {error}") from error
-    if not any(str(job.get("name", "")).startswith(PREFIX) for job in jobs):
+    if supplemental_apple is None and not any(str(job.get("name", "")).startswith(PREFIX) for job in jobs):
         return None  # Legacy releases qualified in a separate ci.yml run.
     manifest = json.loads(immutable_content(repository, source_sha, "docs/maintainers/capability-manifest.json"))
+    options = {}
+    if supplemental_apple is not None:
+        capture = [job for job in jobs if job.get("name") == "Validate captured source"]
+        if (run.get("status") != "completed" or run.get("conclusion") not in {"failure", "cancelled"}
+                or len(capture) != 1 or capture[0].get("status") != "completed"
+                or capture[0].get("conclusion") != "success"):
+            raise RecoveryError("Supplemental qualification requires a completed interrupted captured release")
+        options.update(supplemental_apple=supplemental_apple, require_candidate_guards=True)
     proof = verify_jobs(run, jobs, source_sha, int(source_run), attempt,
-                        manifest["release"]["releaseGate"]["requiredJobs"])
+                        manifest["release"]["releaseGate"]["requiredJobs"], **options)
     freeze = [job for job in jobs if job.get("name") == "Freeze qualified source"]
-    if len(freeze) != 1 or freeze[0].get("status") != "completed" or freeze[0].get("conclusion") != "success":
+    if (len(freeze) != 1 or freeze[0].get("status") != "completed"
+            or freeze[0].get("conclusion") != ("skipped" if supplemental_apple is not None else "success")):
         raise RecoveryError("Original source was not frozen after successful embedded CI")
     ancestry = api(f"repos/{repository}/compare/{source_sha}...main")
     if ancestry.get("status") not in ("ahead", "identical") or ancestry.get("base_commit", {}).get("sha") != source_sha:
@@ -218,11 +230,30 @@ def embedded_source_ci(repository, source_sha, source_run):
             "ci_source_sha": source_sha, "embedded_ci": proof}
 
 
-def ci_proof(repository, source_sha, version=None, *, source_run=None):
+def github_token():
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=True)
         token = result.stdout.strip()
+    return token
+
+
+def supplemental_ci_proof(repository, source_sha, version, source_run, qualification_run, *, freeze):
+    from verify_embedded_release_ci import resolve_ref, verify_candidate, verify_supplemental_apple_ci
+
+    token = github_token()
+    tag = f"v{version}"
+    candidate = f"{tag}-candidate.{source_sha}"
+    verify_candidate(token, repository, source_sha, tag, candidate,
+                     pubspec_text=immutable_content(repository, source_sha, "pubspec.yaml"))
+    if not freeze and resolve_ref(tag, token) != source_sha:
+        raise RecoveryError("Stable tag must already bind the qualified frozen source")
+    supplemental = verify_supplemental_apple_ci(repository, source_sha, int(source_run), qualification_run, token)
+    return embedded_source_ci(repository, source_sha, source_run, supplemental_apple=supplemental)
+
+
+def ci_proof(repository, source_sha, version=None, *, source_run=None):
+    token = github_token()
     ci_source = immutable_ci_source(repository, source_sha, version) if version else source_sha
     if source_run is not None:
         if not version:
@@ -867,7 +898,29 @@ def verify_unsigned_ios_run(run_id, head_sha, version, repository=REPOSITORY):
             "platforms_complete": True}
 
 
-def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False):
+def original_tvos_execution_attempt(repository, run_id, job):
+    from verify_embedded_release_ci import same_completed_execution
+
+    observed_attempt = job['run_attempt']
+    original_attempt = observed_attempt
+    for prior_attempt in range(observed_attempt - 1, 0, -1):
+        prior_jobs = collection(f'repos/{repository}/actions/runs/{run_id}/attempts/{prior_attempt}/jobs', 'jobs')
+        matches = [prior for prior in prior_jobs if prior.get('name') == job['name']]
+        if len(matches) > 1:
+            raise RecoveryError('Ambiguous original tvOS execution in prior attempt')
+        if matches and same_completed_execution(job, matches[0]):
+            original_attempt = prior_attempt
+        elif matches:
+            break
+    return original_attempt
+
+
+def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False, qualification_run=None, freeze=False):
+    if qualification_run is not None and any((
+            rebuild_linux, rebuild_macos, rebuild_tvos, rebuild_ios, rebuild_tizen, repaired_run,
+            require_homebrew_cask, packaging_source_sha, workflow_source_sha, include_apple_store_build,
+            tvos_run, ios_run, ios_developer_run, built_tvos_run, append_apple_only)):
+        raise RecoveryError("Supplemental qualification requires assembly of the original unsigned release assets")
     if ios_run and not tvos_run:
         raise RecoveryError('Signed iOS sibling reuse requires a distinct signed TV sibling')
     if built_tvos_run is not None:
@@ -931,7 +984,8 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
         raise RecoveryError("Recovery requires the Pleazyng repository and exact run/commit identities.")
     source = api(f"repos/{repository}/actions/runs/{run_id}")
     source_sha = source.get("head_sha", "")
-    pending = allow_pending and source.get("status") in {"queued", "in_progress", "waiting", "pending"}
+    pending = (qualification_run is None and allow_pending
+               and source.get("status") in {"queued", "in_progress", "waiting", "pending"})
     if ((source.get("status") != "completed" and not pending) or source.get("event") != "workflow_dispatch"
         or source.get("head_branch") != "main"
         or source.get("head_repository", {}).get("full_name") != repository
@@ -939,6 +993,15 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
         or not trusted_versioned_release_title(source, version)
         or not re.fullmatch(r"[0-9a-f]{40}", source_sha)):
         raise RecoveryError("Source must be a trusted-main release run for this version, completed before reuse.")
+    qualification = None
+    qualified_apple_jobs = set()
+    if qualification_run is not None:
+        if source_sha != head_sha:
+            raise RecoveryError("Supplemental qualification cannot assemble a different product revision")
+        qualification = supplemental_ci_proof(repository, source_sha, version, run_id, qualification_run,
+                                              freeze=freeze)
+        qualified_apple_jobs = {"Release CI / Apple native reliability"}
+        qualified_apple_jobs.update(f"Release CI / Apple native reliability ({os})" for os in ("iOS", "macOS", "tvOS"))
     comparison = api(f"repos/{repository}/compare/{source_sha}...{head_sha}")
     changed = comparison.get("files")
     if (comparison.get("status") not in {"ahead", "identical"}
@@ -1011,9 +1074,26 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                         or matches[0].get('status') != 'completed'):
                     raise RecoveryError(
                         f'Reusable Apple platform lacks a required signed Store qualification step: {name}/{required_step}')
+    original_tvos_attempt = None
+    original_tvos_has_store = False
     if not rebuild_tvos:
         tvos_job = next(job for job in jobs if job.get('name') == 'Build tvOS developer package (arm64)')
         if 'Build tvOS developer package (arm64)' not in pending_jobs:
+            original_tvos_attempt = tvos_job.get('run_attempt')
+            if original_tvos_attempt is not None and (
+                    type(original_tvos_attempt) is not int or type(source.get('run_attempt')) is not int
+                    or not 1 <= original_tvos_attempt <= source['run_attempt'] <= 100
+                    or tvos_job.get('run_id') != int(run_id) or tvos_job.get('head_sha') != source_sha):
+                raise RecoveryError('Reusable tvOS job has invalid original attempt evidence')
+            if qualification_run is not None and original_tvos_attempt is None:
+                raise RecoveryError('Supplemental qualification requires the original tvOS build attempt')
+            if original_tvos_attempt is not None and tvos_job.get('started_at'):
+                original_tvos_attempt = original_tvos_execution_attempt(repository, run_id, tvos_job)
+            original_tvos_has_store = any(
+                step.get('name') == 'Build signed tvOS App Store IPA' and step.get('conclusion') == 'success'
+                for step in tvos_job.get('steps', []))
+            if qualification_run is not None and original_tvos_has_store:
+                raise RecoveryError('Supplemental qualification assembles the original unsigned platform release')
             for required_step in (
                     'Package unsigned tvOS developer IPA',
                     'Verify unsigned tvOS runtime dependencies',
@@ -1029,7 +1109,7 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                         f'Reusable tvOS artifact lacks runtime dependency qualification: {required_step}')
     failures = [job.get("name") for job in jobs
                 if job.get("conclusion") in {"failure", "cancelled", "timed_out"}
-                and job.get("name") not in rebuilt_jobs | set(repaired["reused_jobs"] if repaired else [])
+                and job.get("name") not in rebuilt_jobs | qualified_apple_jobs | set(repaired["reused_jobs"] if repaired else [])
                 | ({"build-ios"} if ios_developer_source else set())
                 and not (append_apple_only and job.get("name") == "build-macos"
                          and job.get("status") == "completed" and job.get("conclusion") == "failure")
@@ -1068,12 +1148,16 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
             "pending_jobs": pending_jobs + [f"repaired:{name}" for name in (repaired["pending_jobs"] if repaired else [])],
             **({"repaired_source": repaired} if repaired else {}),
             **({"ios_developer_source": ios_developer_source} if ios_developer_source else {}),
-            **ci_proof(repository, source_sha, version, source_run=run_id),
+            **(qualification if qualification is not None else
+               ci_proof(repository, source_sha, version, source_run=run_id)),
+            **({"qualification_run_id": qualification_run} if qualification is not None else {}),
+            **({"original_tvos_attempt": original_tvos_attempt} if original_tvos_attempt is not None else {}),
             **({'schema_version': 2, 'recovery_policy': 'frozen-apple-packaging-v1',
                 'product_source_sha': source_sha, 'packaging_source_sha': head_sha,
                 'workflow_source_sha': workflow_source_sha, 'packaging_approval': frozen_repair,
                 'include_apple_store_build': True} if frozen_repair is not None else {}),
-            **({'runtime_dependency_receipt_required': True} if not rebuild_tvos else {}),
+            **({'runtime_dependency_receipt_required': True, 'original_tvos_has_store': original_tvos_has_store}
+               if not rebuild_tvos else {}),
             **({'append_apple_only': True,
                 'reused_release_assets': ['SHA256SUMS.txt', 'pleazyng-macos.dmg']}
                if append_apple_only else {})}
@@ -1256,6 +1340,20 @@ def verify_android_run(run_id, head_sha, version, repository=REPOSITORY, *, allo
 
 
 def compose_proof(proof, android_run=None, include_webos_build=True, webos_run=None, ios_developer_run=None):
+    if proof.get('qualification_run_id'):
+        source_run = proof['source_run_id']
+        if str(android_run) != str(source_run) or str(webos_run) != str(source_run) or not include_webos_build:
+            raise RecoveryError('Supplemental qualification requires every package from the original release run')
+        jobs = collection(f'repos/{REPOSITORY}/actions/runs/{source_run}/jobs', 'jobs')
+        aliases = {}
+        for key, name in (('android_source', 'build-android'), ('webos_source', 'Build WebOS TV package (ARMv7)')):
+            matches = [job for job in jobs if job.get('name') == name]
+            if (len(matches) != 1 or matches[0].get('status') != 'completed'
+                    or matches[0].get('conclusion') != 'success'):
+                raise RecoveryError(f'Original platform must be uniquely successful: {name}')
+            aliases[key] = {'source_run_id': source_run, 'source_sha': proof['source_sha'],
+                            'job_id': matches[0]['id'], 'platforms_complete': True}
+        return {**proof, **aliases, 'rebuilt_jobs': [], 'excluded_optional_jobs': []}
     if proof.get('recovery_policy') == 'frozen-apple-packaging-v1':
         source_run = proof['source_run_id']
         if str(android_run) != str(source_run) or not include_webos_build:
@@ -1334,12 +1432,19 @@ def extract_verified(archive, destination):
         source.extractall(destination)
 
 
+def tvos_package_names(source):
+    names = ('pleazyng-tvos-unsigned.ipa',)
+    if source.get('include_apple_store_build', True):
+        return (*names, 'pleazyng-tvos-appstore.ipa')
+    return names
+
+
 def verify_tvos_package_attestations(directory, source, repository=REPOSITORY):
     digests = {}
-    for name in ('pleazyng-tvos-unsigned.ipa', 'pleazyng-tvos-appstore.ipa'):
+    for name in tvos_package_names(source):
         path = directory / name
         if not path.is_file() or path.is_symlink():
-            raise RecoveryError('Reused TV archive is missing its complete developer/Store package set')
+            raise RecoveryError(f'Reused TV archive is missing required package: {name}')
         result = subprocess.run(['gh', 'attestation', 'verify', str(path), '--repo', repository,
                                  '--signer-workflow', repository + '/.github/workflows/build.yml',
                                  '--source-digest', source['workflow_source_sha'], '--format', 'json'],
@@ -1551,7 +1656,7 @@ def _validate_tvos_runtime_input(record, ipa_path, expected):
 
 
 def verify_tvos_runtime_dependency_receipt(directory, source, repository=REPOSITORY):
-    """Verify the attested dependency receipt against the selected signed tvOS artifact."""
+    """Verify the attested dependency receipt against the selected tvOS packages."""
     receipt_path = directory / TVOS_RUNTIME_RECEIPT
     if not receipt_path.is_file() or receipt_path.is_symlink():
         raise RecoveryError('Reused tvOS artifact is missing its attested runtime dependency receipt')
@@ -1636,9 +1741,9 @@ def verify_tvos_runtime_dependency_receipt(directory, source, repository=REPOSIT
         raise RecoveryError('tvOS runtime dependency receipt lacks a UTC creation time')
 
     inputs = receipt.get('inputs')
-    expected_names = {'pleazyng-tvos-unsigned.ipa', 'pleazyng-tvos-appstore.ipa'}
+    expected_names = set(tvos_package_names(source))
     if not isinstance(inputs, list) or len(inputs) != len(expected_names):
-        raise RecoveryError('tvOS runtime dependency receipt must bind both unsigned and signed IPAs')
+        raise RecoveryError('tvOS runtime dependency receipt must bind every required IPA')
     by_name = {}
     for record in inputs:
         if not isinstance(record, dict):
@@ -1648,7 +1753,7 @@ def verify_tvos_runtime_dependency_receipt(directory, source, repository=REPOSIT
             raise RecoveryError('tvOS runtime dependency receipt has a missing, duplicate, or unexpected IPA input')
         by_name[filename] = record
     if set(by_name) != expected_names:
-        raise RecoveryError('tvOS runtime dependency receipt does not bind both IPA inputs')
+        raise RecoveryError('tvOS runtime dependency receipt does not bind all IPA inputs')
     for name in sorted(expected_names):
         ipa_path = directory / name
         if not ipa_path.is_file() or ipa_path.is_symlink():
@@ -1876,10 +1981,22 @@ def download_platforms(proof, destination, repository=REPOSITORY):
             if name == 'tvos-ipa' and (proof.get('tvos_source') or source.get('runtime_dependency_receipt_required')):
                 if not source.get('runtime_dependency_receipt_required'):
                     raise RecoveryError('Reused tvOS artifact lacks runtime dependency qualification')
-                package_hashes = verify_tvos_package_attestations(destination / folder, source, repository)
+                tvos_source = source
+                if source is proof:
+                    product_sha = source['source_sha']
+                    tvos_source = {
+                        **source,
+                        'run_attempt': source.get('original_tvos_attempt', source.get('run_attempt')),
+                        'product_source_sha': source.get('product_source_sha', product_sha),
+                        'packaging_source_sha': source.get('packaging_source_sha', product_sha),
+                        'workflow_source_sha': source.get('workflow_source_sha', product_sha),
+                        'include_apple_store_build': source.get('original_tvos_has_store',
+                                                               source.get('include_apple_store_build', False)),
+                    }
+                package_hashes = verify_tvos_package_attestations(destination / folder, tvos_source, repository)
                 if proof.get('tvos_source'):
                     source['package_sha256'] = package_hashes
-                verify_tvos_runtime_dependency_receipt(destination / folder, source, repository)
+                verify_tvos_runtime_dependency_receipt(destination / folder, tvos_source, repository)
             if name == 'ios-ipa' and proof.get('ios_source'):
                 source['package_sha256'] = verify_ios_package_attestations(destination / folder, source, repository)
             if name == 'ios-ipa' and proof.get('ios_developer_source'):
@@ -1943,6 +2060,8 @@ def main():
     parser.add_argument("--rebuild-tizen", action="store_true", help="Rebuild Tizen instead of reusing its original artifact")
     parser.add_argument("--rebuild-macos", action="store_true", help="Build and qualify a fresh Mac package instead of reusing a failed Mac job")
     parser.add_argument("--repaired-run", help="Reuse verified Linux and fully qualified Mac jobs from a prior repair run")
+    parser.add_argument('--qualification-run', type=int, help='Supplemental Apple qualification for the exact captured source')
+    parser.add_argument('--freeze-qualified-release', action='store_true', help='Preflight all original artifacts, then create the verified stable tag')
     parser.add_argument('--tvos-run', help='Reuse signed TV bytes from an independently approved sibling Apple repair')
     parser.add_argument('--ios-run', help='Reuse signed iOS bytes from an independently approved sibling Apple repair')
     parser.add_argument('--ios-developer-run', help='Reuse a verified unsigned developer IPA from a successful recovery run')
@@ -1955,6 +2074,13 @@ def main():
     parser.add_argument("--allow-building", action="store_true", help="Preflight only: native jobs may still be running.")
     parser.add_argument("--wait-for-source", type=int, default=0, help="Wait up to this many seconds before recovering completed outputs.")
     args = parser.parse_args()
+    if args.qualification_run is not None and (args.qualification_run < 1 or args.macos_run):
+        parser.error('Supplemental qualification requires one valid Apple qualification run and no signing-only recovery')
+    if args.freeze_qualified_release and (
+            args.qualification_run is None or args.download or args.wait_for_source
+            or os.environ.get('GITHUB_REPOSITORY') != REPOSITORY
+            or os.environ.get('GITHUB_REF') != 'refs/heads/main'):
+        parser.error('Freezing an assembled candidate requires the canonical main qualification preflight')
     if args.macos_run and (args.rebuild_macos or args.rebuild_linux or args.rebuild_tvos or args.rebuild_ios):
         parser.error("Signing-only Mac recovery cannot be combined with fresh platform rebuilding")
     if args.repaired_run and (args.macos_run or args.rebuild_macos or args.rebuild_linux or args.rebuild_tvos or args.rebuild_ios):
@@ -1986,6 +2112,8 @@ def main():
             or args.tvos_run or args.ios_run):
         parser.error('built tvOS reuse requires approved frozen Apple packaging and cannot rebuild or append siblings')
     frozen_options = {'include_apple_store_build': args.include_apple_store_build}
+    if args.qualification_run is not None:
+        frozen_options.update(qualification_run=args.qualification_run, freeze=args.freeze_qualified_release)
     if args.packaging_source_sha:
         frozen_options.update(packaging_source_sha=args.packaging_source_sha,
                               workflow_source_sha=args.workflow_source_sha)
@@ -2002,6 +2130,11 @@ def main():
              verify_source_run(args.source_run, args.head_sha, args.version, allow_pending=args.allow_building, rebuild_linux=args.rebuild_linux, rebuild_macos=args.rebuild_macos, rebuild_tvos=args.rebuild_tvos, rebuild_ios=args.rebuild_ios, rebuild_tizen=args.rebuild_tizen, repaired_run=args.repaired_run, require_homebrew_cask=args.require_homebrew_cask, ios_developer_run=args.ios_developer_run, **frozen_options))
     proof = compose_proof(proof, args.android_run, not args.skip_webos_build, args.webos_run,
                           args.ios_developer_run)
+    if args.freeze_qualified_release:
+        from verify_embedded_release_ci import create_stable_tag
+
+        preflight_platform_artifacts(proof)
+        create_stable_tag(github_token(), f"v{proof['version']}", proof['source_sha'])
     if args.download:
         proof = download_platforms(proof, args.download)
     if os.environ.get("GITHUB_OUTPUT"):

@@ -1,5 +1,24 @@
 name: Apple native reliability
 description: Qualify a single native Apple platform in its own checkout, Xcode scratch and simulator.
+outputs:
+  product-source-sha:
+    description: Exact product source commit tested by this action.
+    value: ${{ steps.checkout.outputs.product_source_sha }}
+  product-source-tree-sha:
+    description: Base product source tree SHA before allowlisted candidate overlays.
+    value: ${{ steps.checkout.outputs.product_source_tree_sha }}
+  test-harness-blob-sha:
+    description: Git blob SHA of the iOS motion test harness used by candidate qualification.
+    value: ${{ steps.checkout.outputs.test_harness_blob_sha }}
+  dv-build-tool-blob-sha:
+    description: Git blob SHA of the Apple DV runtime build helper used by candidate qualification.
+    value: ${{ steps.checkout.outputs.dv_build_tool_blob_sha }}
+  test-harness-overlay-applied:
+    description: Whether the iOS motion test harness overlay was applied to the candidate tree.
+    value: ${{ steps.checkout.outputs.test_harness_overlay_applied }}
+  dv-build-tool-overlay-applied:
+    description: Whether the Apple DV runtime helper overlay was applied to the candidate tree.
+    value: ${{ steps.checkout.outputs.dv_build_tool_overlay_applied }}
 inputs:
   platform:
     description: iOS, macOS or tvOS.
@@ -10,6 +29,26 @@ inputs:
     default: 'false'
   motion-test-only:
     description: Run the iPhone live motion XCTest on its own.
+    default: 'false'
+  candidate-source-sha:
+    description: Optional exact frozen product source SHA for supplemental candidate qualification.
+    required: false
+    default: ''
+  candidate-test-harness-sha:
+    description: Exact tooling commit supplying the allowlisted iOS motion test harness overlay.
+    required: false
+    default: ''
+  candidate-test-harness-in-product:
+    description: Whether the test-harness overlay commit is already an ancestor of candidate product source.
+    required: false
+    default: 'false'
+  candidate-dv-build-tool-sha:
+    description: Exact tooling commit supplying the allowlisted Apple DV runtime build helper overlay.
+    required: false
+    default: ''
+  candidate-dv-build-tool-in-product:
+    description: Whether the Apple DV build-tool overlay commit is already an ancestor of candidate product source.
+    required: false
     default: 'false'
 runs:
   using: composite
@@ -58,14 +97,92 @@ runs:
         APPLE_LOCAL_BUILD_DIR: ${{ steps.scratch.outputs.APPLE_LOCAL_BUILD_DIR }}
         APPLE_SCRATCH_JOB: ${{ steps.scratch.outputs.project }}
         RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        CANDIDATE_SOURCE_SHA: ${{ inputs.candidate-source-sha }}
+        CANDIDATE_TEST_HARNESS_SHA: ${{ inputs.candidate-test-harness-sha }}
+        CANDIDATE_TEST_HARNESS_IN_PRODUCT: ${{ inputs.candidate-test-harness-in-product }}
+        CANDIDATE_DV_BUILD_TOOL_SHA: ${{ inputs.candidate-dv-build-tool-sha }}
+        CANDIDATE_DV_BUILD_TOOL_IN_PRODUCT: ${{ inputs.candidate-dv-build-tool-in-product }}
       run: |
-        if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+        set -euo pipefail
+        harness_blob_sha=''
+        dv_build_tool_blob_sha=''
+        harness_overlay_applied=false
+        dv_build_tool_overlay_applied=false
+        if [[ -n "$CANDIDATE_SOURCE_SHA" ]]; then
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
+          [[ "$CANDIDATE_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_TEST_HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_DV_BUILD_TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$CANDIDATE_TEST_HARNESS_IN_PRODUCT" == true || "$CANDIDATE_TEST_HARNESS_IN_PRODUCT" == false ]]
+          [[ "$CANDIDATE_DV_BUILD_TOOL_IN_PRODUCT" == true || "$CANDIDATE_DV_BUILD_TOOL_IN_PRODUCT" == false ]]
+          for overlay_sha in "$CANDIDATE_TEST_HARNESS_SHA" "$CANDIDATE_DV_BUILD_TOOL_SHA"; do
+            git -C "$GITHUB_WORKSPACE" fetch --no-tags origin "$overlay_sha"
+          done
+          git -C "$GITHUB_WORKSPACE" fetch --no-tags origin "$CANDIDATE_SOURCE_SHA"
+          git -C "$GITHUB_WORKSPACE" worktree add --detach "$SUITE_ROOT" "$CANDIDATE_SOURCE_SHA"
+          harness_path=ios/RunnerTests/AVFoundationMotionPlaybackTests.swift
+          dv_build_tool_path=tools/dv-engine/build_apple_runtime.py
+          mkdir -p "$SUITE_ROOT/$(dirname "$harness_path")" "$SUITE_ROOT/$(dirname "$dv_build_tool_path")"
+          if [[ "$CANDIDATE_TEST_HARNESS_IN_PRODUCT" == true ]]; then
+            harness_blob_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse "$CANDIDATE_SOURCE_SHA:$harness_path")"
+          else
+            git -C "$GITHUB_WORKSPACE" show "$CANDIDATE_TEST_HARNESS_SHA:$harness_path" > "$SUITE_ROOT/$harness_path"
+            harness_blob_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse "$CANDIDATE_TEST_HARNESS_SHA:$harness_path")"
+            harness_overlay_applied=true
+          fi
+          if [[ "$CANDIDATE_DV_BUILD_TOOL_IN_PRODUCT" == true ]]; then
+            dv_build_tool_blob_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse "$CANDIDATE_SOURCE_SHA:$dv_build_tool_path")"
+          else
+            git -C "$GITHUB_WORKSPACE" show "$CANDIDATE_DV_BUILD_TOOL_SHA:$dv_build_tool_path" > "$SUITE_ROOT/$dv_build_tool_path"
+            dv_build_tool_blob_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse "$CANDIDATE_DV_BUILD_TOOL_SHA:$dv_build_tool_path")"
+            dv_build_tool_overlay_applied=true
+          fi
+          test "$(git -C "$GITHUB_WORKSPACE" hash-object "$SUITE_ROOT/$harness_path")" = "$harness_blob_sha"
+          test "$(git -C "$GITHUB_WORKSPACE" hash-object "$SUITE_ROOT/$dv_build_tool_path")" = "$dv_build_tool_blob_sha"
+          python3 - "$SUITE_ROOT" <<'PY'
+        import subprocess
+        import sys
+
+        root = sys.argv[1]
+        result = subprocess.run(
+            ["git", "-C", root, "diff", "--name-only", "--"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        allowed = {
+            "ios/RunnerTests/AVFoundationMotionPlaybackTests.swift",
+            "tools/dv-engine/build_apple_runtime.py",
+        }
+        changed = set(result.stdout.splitlines())
+        unexpected = sorted(changed - allowed)
+        if unexpected:
+            raise SystemExit(f"Candidate source contains an unapproved overlay: {unexpected}")
+        PY
+        elif [[ -n "$CANDIDATE_TEST_HARNESS_SHA" || -n "$CANDIDATE_DV_BUILD_TOOL_SHA" \
+              || "$CANDIDATE_TEST_HARNESS_IN_PRODUCT" != false || "$CANDIDATE_DV_BUILD_TOOL_IN_PRODUCT" != false ]]; then
+          echo 'Candidate overlay commits require an exact candidate source SHA.' >&2
+          exit 1
+        elif [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
           python3 scripts/copy_apple_jit_sources.py "$GITHUB_WORKSPACE" "$SUITE_ROOT" "$GITHUB_SHA"
           bash scripts/clean_appledouble_sidecars.sh "$SUITE_ROOT"
         else
           git worktree add --detach "$SUITE_ROOT" "$GITHUB_SHA"
         fi
         ln -s "$APPLE_LOCAL_BUILD_DIR" "$SUITE_ROOT/build"
+        printf 'product_source_sha=%s\n' "${CANDIDATE_SOURCE_SHA:-$GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+        if [[ -n "$CANDIDATE_SOURCE_SHA" ]]; then
+          product_tree_sha="$(git -C "$SUITE_ROOT" rev-parse 'HEAD^{tree}')"
+        else
+          product_tree_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse "$GITHUB_SHA^{tree}")"
+        fi
+        printf 'product_source_tree_sha=%s\n' "$product_tree_sha" >> "$GITHUB_OUTPUT"
+        if [[ -n "$CANDIDATE_SOURCE_SHA" ]]; then
+          printf 'test_harness_blob_sha=%s\n' "$harness_blob_sha" >> "$GITHUB_OUTPUT"
+          printf 'dv_build_tool_blob_sha=%s\n' "$dv_build_tool_blob_sha" >> "$GITHUB_OUTPUT"
+          printf 'test_harness_overlay_applied=%s\n' "$harness_overlay_applied" >> "$GITHUB_OUTPUT"
+          printf 'dv_build_tool_overlay_applied=%s\n' "$dv_build_tool_overlay_applied" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Stage iOS DV runtime before compiling the Swift test host
       if: inputs.platform == 'iOS'
@@ -510,7 +627,7 @@ runs:
         fi
 
     - name: Retain failed Apple native test results
-      if: failure() && inputs.platform != 'macOS' && steps.scratch.outcome == 'success'
+      if: failure() && inputs.platform != 'macOS' && inputs.build-only != 'true' && steps.scratch.outcome == 'success'
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: apple-native-results-${{ inputs.platform }}-${{ github.run_id }}-${{ github.run_attempt }}

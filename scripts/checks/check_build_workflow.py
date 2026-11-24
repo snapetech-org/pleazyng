@@ -1383,10 +1383,10 @@ require(
     and "--create-tag" in freeze_source
     and "contents: write" in freeze_source
     and "COMMIT_SHA: ${{ github.sha }}" in freeze_source
-    and "needs: capture-candidate" in trusted_gate
+    and "needs: [capture-candidate, freeze-requalified-source]" in trusted_gate
     and "inputs.candidate_ref == '' || needs.capture-candidate.result == 'success'" in trusted_gate
     and "inputs.candidate_ref == '' }" in trusted_gate
-    and "needs: capture-candidate" in trusted_gate
+    and "needs.freeze-requalified-source.result == 'success'" in trusted_gate
     and "needs.capture-candidate.result == 'success'" in trusted_gate
     and "needs: capture-candidate" in captured_ci
     and "needs.freeze-qualified-source.result == 'success'" in job("create-release")
@@ -1395,6 +1395,20 @@ require(
     and "python3 scripts/verify_embedded_release_ci.py --candidate-only" in capture_request
     and "python3 scripts/verify_release_ci.py" in trusted_gate,
     "Stable tags and platform builds must remain gated by verified exact-source reusable CI",
+)
+supplemental_freeze = job("freeze-requalified-source")
+require(
+    "github.repository == 'snapetech-org/pleazyng'" in supplemental_freeze
+    and "github.ref == 'refs/heads/main'" in supplemental_freeze
+    and "startsWith(inputs.reuse_repaired_run_id, 'qualification:')" in supplemental_freeze
+    and "--qualification-run" in supplemental_freeze
+    and "--freeze-qualified-release" in supplemental_freeze
+    and "contents: write" in supplemental_freeze
+    and "needs.freeze-requalified-source.outputs.source_sha" in trusted_gate
+    and '"$release_commit" == "$REQUALIFIED_SOURCE"' in trusted_gate
+    and "--qualification-run" in named_step(trusted_gate, "Verify reusable platform source")
+    and "--qualification-run" in named_step(job("create-release"), "Recover verified platform artifacts"),
+    "Supplemental qualification must gate stable tagging and re-verify at artifact assembly",
 )
 require(
     "inputs.candidate_ref == ''" in named_step(trusted_gate, "Validate immutable release tag against trusted main")
