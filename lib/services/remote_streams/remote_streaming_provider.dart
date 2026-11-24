@@ -907,19 +907,9 @@ class RemoteStreamingProvider extends ChangeNotifier with WidgetsBindingObserver
       throw StateError('Remote streaming settings are not in a recoverable state');
     }
     final generation = _generation;
-    const empty = RemoteStreamSnapshot();
     await _serializeMutation(() async {
-      if (!_current(profile, generation)) {
-        return;
-      }
-      await RemoteStreamStore.save(profile, empty);
-      if (!_current(profile, generation)) {
-        return;
-      }
-      _snapshot = empty;
-      loadFailed = false;
-      settingsUnreadable = false;
-      _notify();
+      await RemoteStreamStore.clearUnreadable(profile, isCurrent: () => _current(profile, generation));
+      if (_current(profile, generation)) await _load(profile, generation);
     });
   }
 

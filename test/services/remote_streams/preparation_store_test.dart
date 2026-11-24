@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:io';
+import 'package:drift/drift.dart' show ApplyInterceptor, QueryExecutor, QueryInterceptor, TransactionExecutor;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/sources/source_database.dart';
 import 'package:plezy/services/remote_streams/remote_stream_store.dart';
+import 'package:plezy/services/remote_streams/remote_preparation_worker.dart';
 import 'package:plezy/services/remote_streams/remote_stream_models.dart';
 import '../../test_helpers/prefs.dart';
 
@@ -122,6 +125,7 @@ void main() {
     await SourceRepository(database).forgetProfile('alice');
     expect(await RemoteStreamStore.claim('alice', 'job', 'new'), isFalse);
     await expectLater(RemoteStreamStore.save('alice', const RemoteStreamSnapshot()), throwsStateError);
+    await expectLater(RemoteStreamStore.clearUnreadable('alice', isCurrent: () => true), throwsStateError);
     expect(await RemoteStreamStore.profiles(), isEmpty);
   });
 
@@ -148,6 +152,121 @@ void main() {
       cancelled = true;
     });
     expect(cancelled, isTrue);
+  });
+
+  test('the worker reads healthy profiles after an unreadable journal', () async {
+    final reads = _ProfileReads();
+    final store = SourceDatabase(NativeDatabase.memory().interceptWith(reads));
+    addTearDown(store.close);
+    RemoteStreamStore.useDatabaseForTesting(store);
+    await RemoteStreamStore.save('alice', const RemoteStreamSnapshot());
+    await RemoteStreamStore.save('bob', const RemoteStreamSnapshot());
+    final profiles = await RemoteStreamStore.profiles();
+    await store.customStatement('UPDATE remote_stream_state SET payload=? WHERE profile=?', [
+      'enc:v2:damaged',
+      profiles.first,
+    ]);
+    reads.profiles.clear();
+
+    expect(await runRemotePreparationWorker(), isFalse, reason: 'the failed profile still needs attention');
+    expect(reads.profiles, profiles);
+  });
+
+  test('a busy worker retries opening its transaction and applies the edit once', () async {
+    final directory = await Directory.systemTemp.createTemp('preparation-busy-');
+    final file = File('${directory.path}/state.sqlite');
+    SourceDatabase open([QueryInterceptor? interceptor]) {
+      final executor = NativeDatabase.createInBackground(
+        file,
+        setup: (db) {
+          db.execute('PRAGMA journal_mode=WAL');
+          // Have SQLite report a real busy result immediately in this fixture.
+          db.execute('PRAGMA busy_timeout=0');
+        },
+      );
+      return SourceDatabase(interceptor == null ? executor : executor.interceptWith(interceptor));
+    }
+
+    final holder = open();
+    final observed = _TransactionAttempts();
+    final contender = open(observed);
+    final release = Completer<void>();
+    final locked = Completer<void>();
+    await holder.customSelect('SELECT 1').getSingle();
+    await contender.customSelect('SELECT 1').getSingle();
+    final lock = holder.transaction(() async {
+      locked.complete();
+      await release.future;
+      await holder.customStatement('UPDATE remote_stream_state SET payload=payload');
+    });
+    addTearDown(() async {
+      if (!release.isCompleted) release.complete();
+      await lock;
+      await contender.close();
+      await holder.close();
+      await directory.delete(recursive: true);
+    });
+    await locked.future;
+    RemoteStreamStore.useDatabaseForTesting(contender);
+    var edits = 0;
+    final pending = RemoteStreamStore.update('alice', (state) {
+      edits++;
+      return state.copyWith(nativePeerEnabled: true);
+    });
+    final outcome = pending.then<Object>((value) => value, onError: (Object error) => error);
+    final retried = await Future.any([observed.retried.future.then((_) => true), outcome.then((_) => false)]);
+    release.complete();
+    final result = await outcome;
+    expect(retried, isTrue, reason: 'The writer lock was still held after this attempt: $result');
+    expect((result as RemoteStreamSnapshot).nativePeerEnabled, isTrue);
+    expect(edits, 1);
+  });
+
+  test('a busy error from inside the mutation never repeats a journal edit', () async {
+    var attempts = 0;
+    final busy = SqliteException(extendedResultCode: 5, message: 'database is busy');
+    await expectLater(
+      RemoteStreamStore.update('alice', (state) {
+        attempts++;
+        throw busy;
+      }),
+      throwsA(same(busy)),
+    );
+    expect(attempts, 1);
+    expect(await RemoteStreamStore.profiles(), isEmpty);
+  });
+
+  test('a lease that expires while renewal is waiting stays expired', () async {
+    expect(await RemoteStreamStore.claim('alice', 'job', 'foreground'), isTrue);
+    final locked = Completer<void>(), release = Completer<void>();
+    final expires = DateTime.now().add(const Duration(milliseconds: 250));
+    final lock = database.transaction(() async {
+      await database.customStatement('UPDATE remote_preparation_claims SET expires=?', [
+        expires.millisecondsSinceEpoch,
+      ]);
+      locked.complete();
+      await release.future;
+    });
+    await locked.future;
+    final renewed = RemoteStreamStore.renewClaim('alice', 'job', 'foreground');
+    await Future<void>.delayed(expires.difference(DateTime.now()) + const Duration(milliseconds: 10));
+    release.complete();
+    await lock;
+    expect(await renewed, isFalse);
+    expect(await RemoteStreamStore.claim('alice', 'job', 'worker'), isTrue);
+  });
+
+  test('a claim invalidated during a journal edit cannot authorize its write', () async {
+    expect(await RemoteStreamStore.claim('alice', 'job', 'foreground'), isTrue);
+    final claim = RemotePreparationClaim('alice', 'job', 'foreground');
+    await expectLater(
+      RemoteStreamStore.update('alice', (snapshot) {
+        claim.active = false;
+        return snapshot.copyWith(nativePeerEnabled: true);
+      }, claim: claim),
+      throwsA(isA<RemoteStreamStoreException>().having((e) => e.reason, 'reason', RemoteStreamStoreFailure.claimLost)),
+    );
+    expect((await RemoteStreamStore.load('alice')).nativePeerEnabled, isFalse);
   });
 
   test('independent worker connections preserve concurrent transactions', () async {
@@ -204,4 +323,27 @@ void main() {
       await directory.delete(recursive: true);
     }
   });
+}
+
+class _TransactionAttempts extends QueryInterceptor {
+  int attempts = 0;
+  final retried = Completer<void>();
+
+  @override
+  TransactionExecutor beginTransaction(QueryExecutor parent) {
+    if (++attempts == 2) retried.complete();
+    return super.beginTransaction(parent);
+  }
+}
+
+class _ProfileReads extends QueryInterceptor {
+  final profiles = <String>[];
+
+  @override
+  Future<List<Map<String, Object?>>> runSelect(QueryExecutor executor, String statement, List<Object?> args) {
+    if (statement == 'SELECT payload FROM remote_stream_state WHERE profile=?') {
+      profiles.add(args.single as String);
+    }
+    return super.runSelect(executor, statement, args);
+  }
 }

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Retry remote-stream journal writes when another engine holds SQLite's writer lock. A preparation that expires while waiting cannot renew its lease or save another checkpoint.
+- Restore the remote-stream settings reset for unreadable journals, preserve settings another engine already repaired, and let the worker process healthy profiles after a damaged one.
+
 - Let the last IPTV recording write finish before closing the file when Stop is pressed or a recording reaches its deadline.
 
 - Preserve playable parts when a stacked download loses a file. Retry fetches the missing parts and marks the item complete once the whole stack is available. Completed downloads show 100% after reopening the app.

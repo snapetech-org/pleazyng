@@ -8,24 +8,19 @@ import 'remote_stream_store.dart';
 import 'remote_streaming_provider.dart';
 import 'preparation_scheduler.dart';
 
-@pragma('vm:entry-point')
-Future<void> remotePreparationEntrypoint() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  DartPluginRegistrant.ensureInitialized();
-  final success = await runRemotePreparationWorker();
-  await const MethodChannel('org.plezy/preparation.worker').invokeMethod<void>('complete', success);
-}
+part 'remote_preparation_entrypoints.dart';
 
 Future<bool> runRemotePreparationWorker() async {
   final worker = RemoteStreamingProvider(backgroundWorker: true);
   try {
     final deadline = DateTime.now().add(const Duration(minutes: 6));
+    var success = true;
     for (final profile in await RemoteStreamStore.profiles()) {
       if (DateTime.now().isAfter(deadline)) return false;
-      await worker.runBackgroundProfile(profile, deadline);
+      success = await _runProfile(worker, profile, deadline) && success;
     }
-    await RemoteStreamStore.cancelRecoveryWhenIdle(PreparationScheduler.cancel);
-    return true;
+    if (success) await RemoteStreamStore.cancelRecoveryWhenIdle(PreparationScheduler.cancel);
+    return success;
   } on Object {
     return false;
   } finally {
@@ -33,9 +28,13 @@ Future<bool> runRemotePreparationWorker() async {
   }
 }
 
-Future<void> runDesktopPreparationWorker() async {
-  // Native runners leave the worker window hidden. No app navigation, media
-  // server binding, tracking or playback services are started by this entry.
-  final success = await runRemotePreparationWorker();
-  exit(success ? 0 : 1);
+Future<bool> _runProfile(RemoteStreamingProvider worker, String profile, DateTime deadline) async {
+  try {
+    await worker.runBackgroundProfile(profile, deadline);
+    return true;
+  } on Object {
+    // Keep the worker scheduled for the failed profile and continue with the
+    // remaining journals.
+    return false;
+  }
 }
