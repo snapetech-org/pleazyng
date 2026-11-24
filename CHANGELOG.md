@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Allow remote navigation between source-setup fields on Android TV without reopening the keyboard.
+
 - Pass the required virtual-collection type when browsing RomM libraries.
 
 - Keep IPTV watch positions separate for same-named profiles. Plex Home users sync across devices after a rename. The new settings start from each device’s saved positions because older cloud entries identify profiles only by display name.

@@ -262,6 +262,12 @@ class _AddSourceScreenState extends State<AddSourceScreen> {
       textDirection: key == 'name' ? null : TextDirection.ltr,
       maxLines: maxLines,
       keyboardType: keyboardType,
+      textInputAction: PlatformDetector.isTV() && Theme.of(context).platform == TargetPlatform.android && maxLines == 1
+          ? TextInputAction.next
+          : null,
+      tvTextInputAutoOpenBehavior: PlatformDetector.isTV() && Theme.of(context).platform == TargetPlatform.android
+          ? TvTextInputAutoOpenBehavior.never
+          : TvTextInputAutoOpenBehavior.automatic,
       textCapitalization: textCapitalization,
       autocorrect: false,
       enableSuggestions: !secret,
