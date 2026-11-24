@@ -125,12 +125,28 @@ require(
     and "inputs.action == 'build' && 'pleazyng-candidate-build-v2'" in text,
     "nonpublishing build requests must not hold the versioned release concurrency group",
 )
+macos_job = job("build-macos")
+macos_compile = named_step(macos_job, "Build macOS")
+macos_milkrust = named_step(macos_job, "Build pinned universal MilkRust before Xcode")
+macos_deployment_targets = set(re.findall(
+    r"MACOSX_DEPLOYMENT_TARGET = ([0-9.]+);",
+    (ROOT / "macos/Runner.xcodeproj/project.pbxproj").read_text(encoding="utf-8"),
+))
 require(
     "timeout-minutes: 240" in job("build-ios")
     and "include_apple_store_build == 'true' && 300 || 180" in job("build-tvos")
-    and "timeout-minutes: 210" in job("build-macos")
-    and "timeout-minutes: 150" in named_step(job("build-macos"), "Build macOS"),
-    "Apple package jobs and the macOS compile step must have explicit bounded timeouts",
+    and "timeout-minutes: 240" in macos_job
+    and "timeout-minutes: 150" in macos_compile
+    and "timeout-minutes: 35" in macos_milkrust,
+    "Apple package jobs and the macOS MilkRust and compile steps must have explicit bounded timeouts",
+)
+require(
+    macos_job.index(macos_milkrust) < macos_job.index(macos_compile)
+    and "--platform macos --architectures arm64,x64" in macos_milkrust
+    and 'PLEAZYNG_MACOS_MILKRUST_BUNDLE=$RUNNER_TEMP/pleazyng-macos-milkrust' in macos_milkrust
+    and len(macos_deployment_targets) == 1
+    and all(f'MACOSX_DEPLOYMENT_TARGET: "{target}"' in macos_milkrust for target in macos_deployment_targets),
+    "macOS packaging must prepare the verified universal MilkRust runtime before Xcode",
 )
 release_driver_ast = ast.parse(release_driver_text)
 apple_pool_argument = next((

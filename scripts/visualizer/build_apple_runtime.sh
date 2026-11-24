@@ -18,9 +18,25 @@ for arch in ${ARCHS:?Xcode architectures required}; do
   esac
   architectures="${architectures:+$architectures,}$selected"
 done
-bundle="${DERIVED_FILE_DIR:?}/plezy-milkrust"
+derived_bundle="${DERIVED_FILE_DIR:?}/plezy-milkrust"
+bundle="$derived_bundle"
+if [[ "$target_platform" == macos && -n "${PLEAZYNG_MACOS_MILKRUST_BUNDLE:-}" ]]; then
+  bundle="$PLEAZYNG_MACOS_MILKRUST_BUNDLE"
+  if [[ ! -f "$bundle/milkrust-build.json" ]]; then
+    echo 'The macOS MilkRust prebuild must provide a verified build receipt' >&2
+    exit 1
+  fi
+  # Xcode's universal architecture list may have the opposite ordering.
+  if [[ "$architectures" == x64,arm64 ]]; then architectures=arm64,x64; fi
+fi
+# The builder validates the source, recipe, current-run identity and all
+# recorded file digests before the Xcode phase consumes a prebuilt bundle.
 python3 "$repo_root/scripts/visualizer/build_runtime.py" \
   --platform "$target_platform" --architectures "$architectures" --output "$bundle"
+if [[ "$bundle" != "$derived_bundle" ]]; then
+  mkdir -p "$derived_bundle"
+  cp "$bundle/libmilkrust_native.a" "$derived_bundle/"
+fi
 destination="${TARGET_BUILD_DIR:?}/${UNLOCALIZED_RESOURCES_FOLDER_PATH:?}/visualizer-notices"
 mkdir -p "$destination"
 cp "$bundle/assets/visualizer-notices/MILKRUST-NOTICES.txt" "$destination/"

@@ -2440,7 +2440,7 @@ jobs:
   build-macos:
     if: ${{ always() && !cancelled() && needs.validate-trusted-ref.result == 'success' && (inputs.reuse_platform_run_id == '' || inputs.rebuild_macos) && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && (needs.validate-trusted-ref.outputs.mode == 'release' || needs.validate-trusted-ref.outputs.mode == 'macos-validation') }}
     needs: validate-trusted-ref
-    timeout-minutes: 210
+    timeout-minutes: 240
     runs-on: ${{ needs.validate-trusted-ref.outputs.prepare_homebrew_cask == 'true' && needs.validate-trusted-ref.outputs.tvos_runner_pool == 'private' && fromJSON(format('{{"group":"private-apple-builds","labels":["self-hosted","macOS","ARM64","private-apple","ng-shared-main-pleazyng","ng-main-run-{0}","gha-{0}-build-macos"]}}', github.run_id)) || 'macos-26-intel' }}
     permissions:
       actions: read
@@ -2688,6 +2688,17 @@ jobs:
         if: ${{ steps.restore-notarization.outputs.restored != 'true' }}
         working-directory: ${{ env.PLEZYNG_APPLE_WORKSPACE }}
         run: flutter pub get --enforce-lockfile --no-example
+
+      - name: Build pinned universal MilkRust before Xcode
+        if: ${{ steps.restore-notarization.outputs.restored != 'true' && (inputs.macos_compilation_job_id == '') }}
+        timeout-minutes: 35
+        working-directory: ${{ env.PLEZYNG_APPLE_WORKSPACE }}
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "14.0"
+        run: |
+          python3 scripts/visualizer/build_runtime.py --platform macos --architectures arm64,x64 \
+            --output "$RUNNER_TEMP/pleazyng-macos-milkrust"
+          echo "PLEAZYNG_MACOS_MILKRUST_BUNDLE=$RUNNER_TEMP/pleazyng-macos-milkrust" >> "$GITHUB_ENV"
 
       - name: Prefetch checksum-pinned macos native downloads
         if: ${{ steps.restore-notarization.outputs.restored != 'true' }}

@@ -537,7 +537,7 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
         macos = workflow[start:end]
         route = "needs.validate-trusted-ref.outputs.prepare_homebrew_cask == 'true' && needs.validate-trusted-ref.outputs.tvos_runner_pool == 'private' && fromJSON(format("
         self.assertIn(route, macos)
-        self.assertIn("timeout-minutes: 210", macos)
+        self.assertIn("timeout-minutes: 240", macos)
         self.assertIn("timeout-minutes: 150", macos)
 
         mutations = (
@@ -547,14 +547,19 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
                 "the private Apple route must be conditional on requested signing work",
             ),
             (
-                "timeout-minutes: 210",
+                "timeout-minutes: 240",
                 "timeout-minutes: 360",
-                "Apple package jobs and the macOS compile step must have explicit bounded timeouts",
+                "Apple package jobs and the macOS MilkRust and compile steps must have explicit bounded timeouts",
             ),
             (
                 "timeout-minutes: 150",
                 "timeout-minutes: 360",
-                "Apple package jobs and the macOS compile step must have explicit bounded timeouts",
+                "Apple package jobs and the macOS MilkRust and compile steps must have explicit bounded timeouts",
+            ),
+            (
+                "timeout-minutes: 35",
+                "timeout-minutes: 360",
+                "Apple package jobs and the macOS MilkRust and compile steps must have explicit bounded timeouts",
             ),
         )
         for original, replacement, expected in mutations:
