@@ -2,11 +2,11 @@ import Foundation
 import StoreKit
 import StoreKitTest
 import XCTest
-#if os(macOS)
 import CoreGraphics
 import ImageIO
 import Vision
 
+#if os(macOS)
 private func macRectJSON(_ rect: CGRect) -> [Double] {
   [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)]
 }
@@ -76,30 +76,15 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       try tapMacVisibleText(
         "Start my 7-day free trial", in: app, attachmentName: "pleazyng-macos-trial-offer-action")
     #else
-      let trialButton = app.buttons["Start my 7-day free trial"]
-      guard trialButton.waitForExistence(timeout: 90) else {
-        try attachScreenshot(of: app, named: "pleazyng-diagnostic-trial-offer-timeout-tvos")
-        attachText(app.debugDescription, named: "pleazyng-diagnostic-trial-offer-timeout-accessibility-tvos")
-        XCTFail("The actual product trial offer did not load")
-        return
-      }
-      XCTAssertTrue(trialButton.isEnabled, "The actual product trial offer is unavailable")
-      let lifetimeOffer = app.buttons.matching(
-        NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Unlock every feature", "$2.99")
-      ).firstMatch
-      XCTAssertTrue(lifetimeOffer.waitForExistence(timeout: 60), "The scheme-associated LOCALTEST catalog did not load")
-      XCTAssertTrue(
-        app.staticTexts.containing(
-          NSPredicate(format: "label CONTAINS[c] %@", "There is no subscription or automatic charge")
-        )
-        .firstMatch.exists,
-        "The actual product trial disclosure was not visible"
-      )
-      trialOfferShown = trialButton.exists
-      trialOfferLifetimePriceShown = lifetimeOffer.exists
-      lifetimeDisplayPrice = lifetimeOffer.label
-      try attachScreenshot(of: app, named: "pleazyng-localtest-trial-offer-\(platformName())")
-      select(trialButton, in: app)
+      let offerText = try waitForTVScreen(
+        ["Start my 7-day free trial", "Unlock every feature", "$2.99", "no subscription or automatic charge"],
+        in: app, attachmentName: "pleazyng-localtest-trial-offer-tvos", timeout: 90)
+      trialOfferShown = true
+      trialOfferLifetimePriceShown = offerText.contains("$2.99")
+      lifetimeDisplayPrice = "$2.99"
+      // The app's initial focus is the free-trial CTA. The LOCALTEST
+      // transaction assertions below verify which control was activated.
+      XCUIRemote.shared.press(.select)
     #endif
 
     #if os(macOS)
@@ -107,8 +92,9 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
         "Use files and books", in: app, attachmentName: "pleazyng-diagnostic-after-trial-purchase-macos",
         timeout: 90)
     #else
-      let useFiles = app.buttons["Use files and books"]
-      XCTAssertTrue(useFiles.waitForExistence(timeout: 90), "The app did not unlock after its LOCALTEST trial purchase")
+      _ = try waitForTVScreen(
+        ["Use files and books"], in: app,
+        attachmentName: "pleazyng-diagnostic-after-trial-purchase-tvos", timeout: 90)
     #endif
     let trialTransactions = session.allTransactions()
     XCTAssertEqual(trialTransactions.count, 1, "The actual product CTA must create only one LOCALTEST trial")
@@ -120,7 +106,14 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     #if os(macOS)
       try tapMacVisibleText("Use files and books", in: app, attachmentName: "pleazyng-macos-use-files-action")
     #else
-      select(useFiles, in: app)
+      // The TV QR sign-in CTA takes initial focus. The next four
+      // actions are Jellyfin, Emby, direct Plex, then Files and Books.
+      for _ in 0..<4 {
+        XCUIRemote.shared.press(.down)
+        Thread.sleep(forTimeInterval: 0.25)
+      }
+      try attachScreenshot(of: app, named: "pleazyng-diagnostic-before-use-files-tvos")
+      XCUIRemote.shared.press(.select)
     #endif
 
     var filesBooksScreenOpened = false
@@ -133,32 +126,28 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       XCTAssertTrue(filesText.contains("Import files"), "The real local library Import files action is missing")
       filesBooksScreenOpened = true
     #else
-      let addSource = app.buttons["Add source"]
-      XCTAssertTrue(addSource.waitForExistence(timeout: 60), "The product did not open its local Files and Books screen")
-      XCTAssertTrue(app.buttons["Import files"].exists, "The local library import action was missing")
-      XCTAssertTrue(
-        app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "Add a source or import a book"))
-          .firstMatch.exists,
-        "Expected the actual empty local library, without seeded media or a server"
-      )
-      filesBooksScreenOpened = addSource.exists
-      try attachScreenshot(of: app, named: "pleazyng-localtest-files-books-\(platformName())")
+      // Add Source and Import are icon-only buttons on the TV layout.
+      _ = try waitForTVScreen(
+        ["Files and books", "Add a source or import a book", "Search saved library"],
+        in: app, attachmentName: "pleazyng-localtest-files-books-tvos", timeout: 60)
+      filesBooksScreenOpened = true
     #endif
 
-    openSettings(in: app)
     #if os(macOS)
+      app.activate()
+      app.typeKey(",", modifierFlags: .command)
       _ = try waitForMacVisibleText(
         "Pleazyng lifetime access", in: app, attachmentName: "pleazyng-diagnostic-settings-macos",
         timeout: 60)
       try tapMacVisibleText(
         "Pleazyng lifetime access", in: app, attachmentName: "pleazyng-macos-lifetime-settings-action")
-    #endif
-    #if os(tvOS)
-      let lifetimeTile = app.descendants(matching: .any).matching(
-        NSPredicate(format: "label CONTAINS %@", "Pleazyng lifetime access")
-      ).firstMatch
-      XCTAssertTrue(lifetimeTile.waitForExistence(timeout: 60), "The actual product Settings row was not available")
-      select(lifetimeTile, in: app)
+    #else
+      try openTVSettings(in: app)
+      _ = try waitForTVScreen(
+        ["Settings", "Pleazyng lifetime access"], in: app,
+        attachmentName: "pleazyng-diagnostic-settings-tvos", timeout: 60)
+      // Settings takes focus on its first displayed tile in Store builds.
+      XCUIRemote.shared.press(.select)
     #endif
 
     var activeTrialShown = false
@@ -173,19 +162,11 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       activeTrialShown = true
       accessSheetLifetimePriceShown = accessText.contains("$2.99")
     #else
-      let activeTrial = app.staticTexts["Your 7-day full-feature trial is active."]
-      let restoreButton = app.buttons["Restore lifetime purchase"]
-      let lifetimePrice = app.buttons.matching(
-        NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Unlock every feature", "$2.99")
-      ).firstMatch
-      XCTAssertTrue(
-        activeTrial.waitForExistence(timeout: 60), "The actual app did not restore the native trial entitlement")
-      XCTAssertTrue(restoreButton.waitForExistence(timeout: 60), "The real access sheet did not show its Restore action")
-      XCTAssertTrue(
-        lifetimePrice.waitForExistence(timeout: 60), "The app did not show the queried LOCALTEST lifetime price")
-      activeTrialShown = activeTrial.exists
-      accessSheetLifetimePriceShown = lifetimePrice.exists
-      try attachScreenshot(of: app, named: "pleazyng-localtest-supporter-\(platformName())")
+      let accessText = try waitForTVScreen(
+        ["Your 7-day full-feature trial is active", "Restore lifetime purchase", "$2.99"],
+        in: app, attachmentName: "pleazyng-localtest-supporter-tvos", timeout: 60)
+      activeTrialShown = true
+      accessSheetLifetimePriceShown = accessText.contains("$2.99")
     #endif
 
     let finalTransactions = session.allTransactions()
@@ -262,38 +243,6 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     #endif
   }
 
-  private func select(_ element: XCUIElement, in app: XCUIApplication) {
-    #if os(tvOS)
-      let deadline = Date().addingTimeInterval(45)
-      while !element.hasFocus && Date() < deadline {
-        XCUIRemote.shared.press(.down)
-        Thread.sleep(forTimeInterval: 0.2)
-      }
-      XCTAssertTrue(element.hasFocus, "The requested actual tvOS control did not receive remote focus")
-      XCUIRemote.shared.press(.select)
-    #else
-      XCTAssertTrue(element.isHittable, "The requested actual Mac control is not hittable")
-      element.tap()
-    #endif
-  }
-
-  private func openSettings(in app: XCUIApplication) {
-    #if os(tvOS)
-      let homeTab = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Home")).firstMatch
-      XCTAssertTrue(homeTab.waitForExistence(timeout: 30), "The actual Home navigation action was not available")
-      select(homeTab, in: app)
-      let profilesMenu = app.buttons["Profiles"]
-      XCTAssertTrue(profilesMenu.waitForExistence(timeout: 30), "The actual Profiles menu was not available")
-      select(profilesMenu, in: app)
-      let settingsItem = app.buttons["Settings"]
-      XCTAssertTrue(settingsItem.waitForExistence(timeout: 30), "The actual Settings action was not available")
-      select(settingsItem, in: app)
-    #else
-      app.activate()
-      app.typeKey(",", modifierFlags: .command)
-    #endif
-  }
-
   private func optionalDate(_ value: Date?) -> Any {
     guard let value else { return NSNull() }
     return ISO8601DateFormatter().string(from: value)
@@ -316,11 +265,128 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     add(attachment)
   }
 
-  #if os(macOS)
-    private struct MacScreenText {
-      let text: String
-      let boundingBox: CGRect
+  private struct ScreenText {
+    let text: String
+    let boundingBox: CGRect
+  }
+
+  private func recognizeScreenText(in image: CGImage) throws -> [ScreenText] {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.usesLanguageCorrection = false
+    request.recognitionLanguages = ["en-US"]
+    try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+    return (request.results ?? []).compactMap { observation in
+      guard let text = observation.topCandidates(1).first?.string else { return nil }
+      return ScreenText(text: text, boundingBox: observation.boundingBox)
     }
+  }
+
+  private func joinedText(_ lines: [ScreenText]) -> String {
+    lines.map(\.text).joined(separator: " ")
+  }
+
+  #if os(tvOS)
+    private struct TVScreen {
+      let screenshot: XCUIScreenshot
+      let image: CGImage
+      let lines: [ScreenText]
+    }
+
+    private func captureTVScreen(in app: XCUIApplication) throws -> TVScreen {
+      let screenshot = app.screenshot()
+      guard let source = CGImageSourceCreateWithData(screenshot.pngRepresentation as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 20,
+                      userInfo: [NSLocalizedDescriptionKey: "Could not read the live tvOS screenshot"])
+      }
+      return TVScreen(screenshot: screenshot, image: image, lines: try recognizeScreenText(in: image))
+    }
+
+    // On the fresh default palette the focused rail row has a teal border.
+    // Look for long matching border segments immediately above and below
+    // the Settings text. An unfocused label or an adjacent icon cannot match.
+    private func hasTVRailFocus(_ row: CGRect, in image: CGImage) -> Bool {
+      let width = CGFloat(image.width)
+      let height = CGFloat(image.height)
+      let span = CGRect(
+        x: row.minX * width, y: (1 - row.maxY - row.height * 2) * height,
+        width: max(row.width, 0.025) * width, height: row.height * 5 * height
+      ).integral
+      guard CGRect(x: 0, y: 0, width: width, height: height).contains(span),
+            let slice = image.cropping(to: span),
+            let canvas = CGContext(data: nil, width: slice.width, height: slice.height,
+              bitsPerComponent: 8, bytesPerRow: slice.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue),
+            let pixels = canvas.data?.assumingMemoryBound(to: UInt8.self) else { return false }
+      canvas.draw(slice, in: CGRect(x: 0, y: 0, width: span.width, height: span.height))
+      func border(in rows: Range<Int>) -> Bool {
+        rows.contains { y in
+          (1...5).allSatisfy { sample in
+            let x = sample * slice.width / 6
+            let offset = y * canvas.bytesPerRow + x * 4
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            let blue = Int(pixels[offset + 2])
+            return green > 150 && green - red > 45 && blue - red > 35
+          }
+        }
+      }
+      let third = slice.height / 3
+      return border(in: 0..<third) && border(in: (slice.height - third)..<slice.height)
+    }
+
+    private func openTVSettings(in app: XCUIApplication) throws {
+      // Menu moves focus from the library content to the expanded sidebar.
+      XCUIRemote.shared.press(.menu)
+      _ = try waitForTVScreen(
+        ["Settings"], in: app, attachmentName: "pleazyng-diagnostic-sidebar-tvos", timeout: 15)
+      for direction: XCUIRemote.Button in [.down, .up] {
+        for _ in 0..<8 {
+          let screen = try captureTVScreen(in: app)
+          if let settings = screen.lines.first(where: {
+            $0.text == "Settings" && $0.boundingBox.midX < 0.30
+          }), hasTVRailFocus(settings.boundingBox, in: screen.image) {
+            attachScreenshot(screen.screenshot, named: "pleazyng-diagnostic-sidebar-settings-focused-tvos")
+            XCUIRemote.shared.press(.select)
+            return
+          }
+          XCUIRemote.shared.press(direction)
+          Thread.sleep(forTimeInterval: 0.3)
+        }
+      }
+      try attachScreenshot(of: app, named: "pleazyng-diagnostic-sidebar-settings-unfocused-tvos")
+      throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 22,
+                    userInfo: [NSLocalizedDescriptionKey: "The Settings row did not receive visible tvOS remote focus"])
+    }
+
+    // The tvOS Flutter engine can render controls without exposing them
+    // to XCTest. Inspect the actual app screenshot after each remote action.
+    private func waitForTVScreen(
+      _ markers: [String], in app: XCUIApplication, attachmentName: String, timeout: TimeInterval
+    ) throws -> String {
+      let deadline = Date().addingTimeInterval(timeout)
+      while true {
+        let screen = try captureTVScreen(in: app)
+        let text = joinedText(screen.lines)
+        if markers.allSatisfy({ text.localizedCaseInsensitiveContains($0) }) {
+          attachScreenshot(screen.screenshot, named: attachmentName)
+          attachText(text, named: "\(attachmentName)-visible-text")
+          return text
+        }
+        if Date() >= deadline {
+          attachScreenshot(screen.screenshot, named: "pleazyng-diagnostic-\(attachmentName)-timeout")
+          attachText(text, named: "pleazyng-diagnostic-\(attachmentName)-visible-text")
+          attachText(app.debugDescription, named: "pleazyng-diagnostic-\(attachmentName)-accessibility")
+          throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 21,
+                        userInfo: [NSLocalizedDescriptionKey: "Missing visible tvOS controls: \(markers.joined(separator: ", "))"])
+        }
+        Thread.sleep(forTimeInterval: 0.5)
+      }
+    }
+  #endif
+
+  #if os(macOS)
 
     private struct MacScreenshotGeometry {
       let basisNames: [String]
@@ -372,7 +438,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     }
 
     private struct MacTextObservation {
-      let lines: [MacScreenText]
+      let lines: [ScreenText]
       let screenshot: MacWindowScreenshot
     }
 
@@ -386,12 +452,12 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
           userInfo: [NSLocalizedDescriptionKey: "The real app window did not appear before the OCR deadline"])
       }
       let deadline = Date().addingTimeInterval(timeout)
-      var latest: [MacScreenText] = []
+      var latest: [ScreenText] = []
       var latestCapture: MacWindowScreenshot?
       repeat {
         let capture = try captureMacWindowScreenshot(of: app)
         latestCapture = capture
-        latest = try recognizeMacScreenText(in: capture.image)
+        latest = try recognizeScreenText(in: capture.image)
         if joinedText(latest).localizedCaseInsensitiveContains(expected) {
           attachMacScreenshot(capture, named: attachmentName)
           attachText(app.debugDescription, named: "\(attachmentName)-accessibility")
@@ -623,23 +689,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       attachText(capture.geometry.json(name: name), named: "\(name)-capture-geometry")
     }
 
-    private func recognizeMacScreenText(in image: CGImage) throws -> [MacScreenText] {
-      let request = VNRecognizeTextRequest()
-      request.recognitionLevel = .accurate
-      request.usesLanguageCorrection = false
-      request.recognitionLanguages = ["en-US"]
-      try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-      return (request.results ?? []).compactMap { observation in
-        guard let text = observation.topCandidates(1).first?.string else { return nil }
-        return MacScreenText(text: text, boundingBox: observation.boundingBox)
-      }
-    }
-
-    private func joinedText(_ lines: [MacScreenText]) -> String {
-      lines.map(\.text).joined(separator: " ")
-    }
-
-    private func macScreenTextJSON(_ lines: [MacScreenText]) -> String {
+    private func macScreenTextJSON(_ lines: [ScreenText]) -> String {
       let records: [[String: Any]] = lines.map { line in
         [
           "text": line.text,
