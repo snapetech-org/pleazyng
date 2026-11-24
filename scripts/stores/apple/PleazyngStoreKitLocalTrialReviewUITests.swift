@@ -84,6 +84,10 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       trialOfferShown = true
       trialOfferLifetimePriceShown = offerText.contains("Unlock every feature") && offerText.contains("$2.99")
       lifetimeDisplayPrice = offer.lines.first(where: { $0.text.contains("$2.99") })?.text ?? "$2.99"
+      guard session.disableDialogs else {
+        throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 14,
+                      userInfo: [NSLocalizedDescriptionKey: "The Mac StoreKit test session did not apply its local dialog setting"])
+      }
       try clickMacVisibleText(
         "Start my 7-day free trial", in: app, attachmentName: "pleazyng-macos-trial-offer-action")
     #else

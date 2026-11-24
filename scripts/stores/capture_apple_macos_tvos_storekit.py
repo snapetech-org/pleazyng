@@ -41,6 +41,7 @@ STOREKIT_CONFIG = Path("scripts/stores/apple/pleazyng-trial-review.storekit")
 UI_TEST_SOURCE = Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewUITests.swift")
 TEST_TARGET = "PleazyngStoreKitLocalTrialReviewUITests"
 TEST_BUNDLE_ID = "org.snapetech.pleazyng.localtest.review-tests"
+MACOS_TEST_PLAN = "PleazyngStoreKitLocalTrialReview.xctestplan"
 SCHEME_PATH_PREFIX = "../../"
 PRIOR_STOREKIT_FAILURE = {
     "run_id": "44082331641",
@@ -228,6 +229,42 @@ def verify_scheme_storekit_configuration(scheme_path: Path, project_root: Path) 
         "storekit_configuration_path": STOREKIT_CONFIG.name,
         "storekit_configuration_sha256": sha256_file(expected),
     }
+
+
+def configure_macos_storekit_test_plan(scheme_path: Path, project_root: Path) -> Path:
+    scheme = ET.parse(scheme_path)
+    action = scheme.find("./TestAction")
+    testables = None if action is None else action.find("Testables")
+    references = [] if testables is None else testables.findall("./TestableReference/BuildableReference")
+    if action is None or testables is None or len(references) != 1:
+        raise ValueError("Generated Mac capture scheme must contain one UI test target")
+    reference = references[0]
+    project = reference.get("ReferencedContainer")
+    target_id = reference.get("BlueprintIdentifier")
+    if (project != "container:PleazyngStoreKitLocalTrialReview.xcodeproj"
+            or reference.get("BlueprintName") != TEST_TARGET
+            or not re.fullmatch(r"[0-9A-Fa-f]{24}", target_id or "")):
+        raise ValueError("Generated Mac capture plan has an unexpected target reference")
+    target = {"containerPath": project, "identifier": target_id, "name": TEST_TARGET}
+    plan_path = project_root / MACOS_TEST_PLAN
+    write_json(plan_path, {
+        "configurations": [{
+            "id": "458EFC0F-7DC8-4703-BA86-89BB31859CF4",
+            "name": "LOCALTEST",
+            "options": {},
+        }],
+        "defaultOptions": {
+            "storeKitConfiguration": STOREKIT_CONFIG.name,
+            "targetForVariableExpansion": target,
+        },
+        "testTargets": [{"target": target}],
+        "version": 1,
+    })
+    action.remove(testables)
+    plans = ET.SubElement(action, "TestPlans")
+    ET.SubElement(plans, "TestPlanReference", reference=f"container:{MACOS_TEST_PLAN}", default="YES")
+    scheme.write(scheme_path, encoding="utf-8", xml_declaration=True)
+    return plan_path
 
 
 def select_canonical_tvos_runtime(inventory: dict[str, Any], sdk_version: tuple[int, int]) -> dict[str, Any]:
@@ -1100,8 +1137,15 @@ def capture(args: argparse.Namespace) -> None:
         derived_data = project_root / "derived-data"
         project = project_root / "PleazyngStoreKitLocalTrialReview.xcodeproj"
         scheme_path = project / "xcshareddata" / "xcschemes" / "PleazyngStoreKitLocalTrialReview.xcscheme"
+        test_plan_args = []
+        if platform == "macos":
+            test_plan = configure_macos_storekit_test_plan(scheme_path, project_root)
+            shutil.copyfile(test_plan, output / test_plan.name)
+            test_plan_args = ["-testPlan", test_plan.stem]
         shutil.copyfile(scheme_path, output / "generated-scheme.xcscheme")
         scheme_evidence = verify_scheme_storekit_configuration(scheme_path, project_root)
+        if platform == "macos":
+            scheme_evidence.update(test_plan=test_plan.name, test_plan_sha256=sha256_file(test_plan))
         destination = (
             f"platform=tvOS Simulator,id={simulator_id}" if platform == "tvos" else PLATFORM[platform]["destination"]
         )
@@ -1110,7 +1154,7 @@ def capture(args: argparse.Namespace) -> None:
             [
                 "xcodebuild", "build-for-testing", "-project", str(project),
                 "-scheme", "PleazyngStoreKitLocalTrialReview", "-destination", destination,
-                "-derivedDataPath", str(derived_data), "-parallel-testing-enabled", "NO",
+                *test_plan_args, "-derivedDataPath", str(derived_data), "-parallel-testing-enabled", "NO",
             ],
             build_log,
             timeout=900,
@@ -1127,6 +1171,10 @@ def capture(args: argparse.Namespace) -> None:
         xctestrun = xctestruns[0]
         raw_xctestrun_sha = sha256_file(xctestrun)
         shutil.copyfile(xctestrun, output / "xctestrun-before-app-association.xctestrun")
+        if platform == "macos":
+            metadata = plistlib.loads(xctestrun.read_bytes()).get("__xctestrun_metadata__", {})
+            if metadata.get("FormatVersion") != 2:
+                raise ValueError("Xcode did not generate a plan-aware Mac StoreKit XCTest manifest")
         test_bundle, _ = resolve_test_bundle_from_plan(xctestrun, products)
         test_bundle_identity = verify_test_bundle_identity(test_bundle)
         storekit_resource = verify_storekit_resource(test_bundle, config_sha)

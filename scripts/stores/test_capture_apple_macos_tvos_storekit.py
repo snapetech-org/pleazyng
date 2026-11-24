@@ -134,6 +134,29 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different or missing"):
                 capture.verify_scheme_storekit_configuration(scheme, root)
 
+    def test_macos_test_plan_preserves_generated_target_and_catalog(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / capture.STOREKIT_CONFIG.name).write_text(STOREKIT, encoding="utf-8")
+            scheme = root / "Capture.xcscheme"
+            scheme.write_text(
+                '<Scheme><TestAction><Testables><TestableReference><BuildableReference '
+                'ReferencedContainer="container:PleazyngStoreKitLocalTrialReview.xcodeproj" '
+                'BlueprintIdentifier="5363AC02446C0BEECEBFD1B2" '
+                f'BlueprintName="{capture.TEST_TARGET}"/>'
+                '</TestableReference></Testables></TestAction><LaunchAction>'
+                f'<StoreKitConfigurationFileReference identifier="../../{capture.STOREKIT_CONFIG.name}"/>'
+                '</LaunchAction></Scheme>',
+                encoding="utf-8",
+            )
+            plan = capture.configure_macos_storekit_test_plan(scheme, root)
+            document = json.loads(plan.read_text(encoding="utf-8"))
+            self.assertEqual(document["defaultOptions"]["storeKitConfiguration"], capture.STOREKIT_CONFIG.name)
+            self.assertEqual(document["testTargets"][0]["target"]["identifier"], "5363AC02446C0BEECEBFD1B2")
+            self.assertIn(f'reference="container:{capture.MACOS_TEST_PLAN}" default="YES"', scheme.read_text())
+            self.assertNotIn("<Testables>", scheme.read_text())
+            capture.verify_scheme_storekit_configuration(scheme, root)
+
     def test_tvos_simulator_selects_canonical_runtime_not_device_variant(self) -> None:
         canonical_id = "com.apple.CoreSimulator.SimRuntime.tvOS-27-2"
         inventory = {
