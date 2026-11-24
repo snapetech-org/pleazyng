@@ -246,7 +246,7 @@ def select_canonical_tvos_runtime(inventory: dict[str, Any], sdk_version: tuple[
     return runtime
 
 
-def create_tvos_simulator(run_id: str, attempt: str, output: Path) -> dict[str, str]:
+def create_tvos_simulator(run_id: str, attempt: str, output: Path, *, diagnostic: bool = False) -> dict[str, str]:
     sdk_version_text = command(["xcrun", "--sdk", "appletvsimulator", "--show-sdk-version"], capture=True, timeout=60)
     sdk_version = version_pair(sdk_version_text)
     raw_inventory = command(["xcrun", "simctl", "list", "-j"], capture=True, timeout=60)
@@ -265,6 +265,8 @@ def create_tvos_simulator(run_id: str, attempt: str, output: Path) -> dict[str, 
         raise RuntimeError(f"No available Apple TV simulator exists in {runtime['identifier']}")
     template = max(devices, key=lambda item: capture_tools.device_preference(item["name"], "tvos"))
     name = f"Pleazyng-{run_id}-{attempt}-tvos"
+    if diagnostic:
+        name += "-diagnostic"
     udid = command([
         "xcrun", "simctl", "create", name, template["deviceTypeIdentifier"], runtime["identifier"],
     ], capture=True, timeout=120)
@@ -1162,22 +1164,32 @@ def capture(args: argparse.Namespace) -> None:
         installed_app_evidence = None
         if platform == "tvos":
             assert simulator is not None
-            simulator_readiness = ensure_tvos_simulator_ready_for_install(simulator, output)
-            write_json(output / "simulator-readiness.json", simulator_readiness)
-            installed_app_evidence = install_tvos_app(simulator, app_staged, receipt)
-            write_json(output / "simulator-installed-app.json", installed_app_evidence)
-            pre_xctest_app_diagnostic = diagnose_tvos_retained_app(
-                simulator,
-                installed_app_evidence,
-                identity,
-                app_hash,
-                output,
-            )
+            # A direct launch starts StoreKit in the default environment. Keep
+            # its process and store state off the device used for LOCALTEST.
+            diagnostic_output = output / "tvos-diagnostic-simulator"
+            diagnostic_output.mkdir()
+            diagnostic_simulator = create_tvos_simulator(args.run_id, args.run_attempt, diagnostic_output,
+                                                         diagnostic=True)
+            if diagnostic_simulator["udid"] == simulator["udid"]:
+                raise ValueError("The diagnostic launch must use a separate simulator from LOCALTEST")
+            try:
+                verify_created_tvos_simulator(diagnostic_simulator)
+                ensure_tvos_simulator_ready_for_install(diagnostic_simulator, diagnostic_output)
+                diagnostic_install = install_tvos_app(diagnostic_simulator, app_staged, receipt)
+                pre_xctest_app_diagnostic = diagnose_tvos_retained_app(
+                    diagnostic_simulator, diagnostic_install, identity, app_hash, output,
+                )
+            finally:
+                capture_tools.cleanup_simulator(diagnostic_simulator)
             if not pre_xctest_app_diagnostic["ready_for_xctest"]:
                 raise RuntimeError(
                     "The exact retained tvOS app did not stay running after a bounded direct launch; "
                     "see tvos-pre-xctest-diagnostic.json and its process/crash/log evidence"
                 )
+            simulator_readiness = ensure_tvos_simulator_ready_for_install(simulator, output)
+            write_json(output / "simulator-readiness.json", simulator_readiness)
+            installed_app_evidence = install_tvos_app(simulator, app_staged, receipt)
+            write_json(output / "simulator-installed-app.json", installed_app_evidence)
 
         result_bundle = output / f"pleazyng-{platform}-storekit-localtest.xcresult"
         test_log = output / "storekit-ui-test.log"

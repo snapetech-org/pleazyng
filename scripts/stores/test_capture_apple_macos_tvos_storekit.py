@@ -590,6 +590,9 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertLess(screenshot, accessibility)
         self.assertLess(accessibility, trial_assertion)
         self.assertIn("attachText(app.debugDescription", UI_TEST)
+        timeout_screenshot = UI_TEST.index('named: "pleazyng-diagnostic-trial-offer-timeout-tvos"')
+        self.assertLess(trial_assertion, timeout_screenshot)
+        self.assertLess(timeout_screenshot, UI_TEST.index("select(trialButton, in: app)"))
 
     def test_macos_fresh_install_uses_visible_onboarding_and_bounded_ocr_fallback(self) -> None:
         self.assertIn('try tapMacVisibleText("Start fresh", in: app', UI_TEST)

@@ -77,7 +77,12 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
         "Start my 7-day free trial", in: app, attachmentName: "pleazyng-macos-trial-offer-action")
     #else
       let trialButton = app.buttons["Start my 7-day free trial"]
-      XCTAssertTrue(trialButton.waitForExistence(timeout: 90), "The actual product trial offer did not load")
+      guard trialButton.waitForExistence(timeout: 90) else {
+        try attachScreenshot(of: app, named: "pleazyng-diagnostic-trial-offer-timeout-tvos")
+        attachText(app.debugDescription, named: "pleazyng-diagnostic-trial-offer-timeout-accessibility-tvos")
+        XCTFail("The actual product trial offer did not load")
+        return
+      }
       XCTAssertTrue(trialButton.isEnabled, "The actual product trial offer is unavailable")
       let lifetimeOffer = app.buttons.matching(
         NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Unlock every feature", "$2.99")
