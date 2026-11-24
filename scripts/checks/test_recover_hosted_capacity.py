@@ -32,6 +32,11 @@ class HostedCapacityTests(unittest.TestCase):
             "runner_id": 0, "runner_name": "", "steps": [],
         }
         self.macos = {**self.tvos, "id": 102, "name": "Release CI / Apple native reliability (macOS)"}
+        self.apple_gate = {
+            "id": 105, "name": "Release CI / Apple native reliability", "status": "completed",
+            "conclusion": "failure", "labels": ["ubuntu-24.04"], "runner_id": 9,
+            "steps": [{"name": "Require all Apple native suites", "conclusion": "failure"}],
+        }
         self.jobs = [
             {"jobs": [self.tvos, {**self.tvos, "id": 103, "conclusion": "success", "runner_id": 9}]},
             {"jobs": [self.macos, {**self.macos, "id": 104, "conclusion": "skipped"}]},
@@ -62,6 +67,28 @@ class HostedCapacityTests(unittest.TestCase):
         self.mutate.assert_called_once_with(
             ["gh", "api", "--method", "POST", f"{self.route}/rerun-failed-jobs"], check=True
         )
+
+    def test_retries_the_apple_gate_after_confirmed_suite_allocation_failures(self):
+        self.jobs[-1]["jobs"].append(self.apple_gate)
+        self.assertIn(self.apple_gate["name"], self.recover())
+        self.mutate.assert_called_once_with(
+            ["gh", "api", "--method", "POST", f"{self.route}/rerun-failed-jobs"], check=True
+        )
+
+    def test_requires_investigation_when_an_apple_suite_actually_runs_and_fails(self):
+        self.jobs[-1]["jobs"].extend([self.apple_gate, {
+            **self.macos, "id": 106, "name": "Release CI / Apple native reliability (iOS)",
+            "conclusion": "failure", "runner_id": 11,
+            "steps": [{"name": "Qualify Apple native components", "conclusion": "failure"}],
+        }])
+        self.assertIn("Requires investigation", self.recover())
+        self.mutate.assert_not_called()
+
+    def test_aggregate_failure_needs_a_matching_suite_allocation_failure(self):
+        package = {**self.tvos, "name": "Build tvOS developer package (arm64)"}
+        self.jobs = [{"jobs": [package, self.apple_gate]}]
+        self.assertIn("No hosted suite allocation failure recorded", self.recover())
+        self.mutate.assert_not_called()
 
     def test_one_unconfirmed_job_blocks_retry_even_with_a_capacity_warning(self):
         self.annotations[self.macos["id"]] = [[{"message": QUEUE_WARNING}]]

@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 
 MAX_ATTEMPTS = 8
 WORKFLOWS = ("build.yml", "ci.yml", "macos-app-store-signed.yml")
+APPLE_SUITE_GATE_NAMES = ("Apple native reliability", "Release CI / Apple native reliability")
+APPLE_SUITE_PLATFORMS = ("iOS", "macOS", "tvOS")
 
 
 def api(path, *, pages=False):
@@ -31,6 +33,13 @@ def unassigned_hosted_job(job):
             and bool(job["labels"]) and "self-hosted" not in job["labels"])
 
 
+def failed_apple_suite_gate(job):
+    return (job["name"] in APPLE_SUITE_GATE_NAMES and job["status"] == "completed"
+            and job["conclusion"] == "failure" and job.get("labels") == ["ubuntu-24.04"]
+            and [step["name"] for step in job["steps"] if step["conclusion"] == "failure"]
+            == ["Require all Apple native suites"])
+
+
 def classify_attempt(repository, run_id, attempt):
     """Return failed job names only if every failure has hosted allocation evidence."""
     base = f"repos/{repository}"
@@ -39,13 +48,25 @@ def classify_attempt(repository, run_id, attempt):
             for job in page["jobs"] if job["conclusion"] not in {"success", "skipped", "neutral"}]
     if not jobs:
         return [], "No unsuccessful jobs"
+    capacity_failures = set()
+    suite_gates = []
     for job in jobs:
+        if failed_apple_suite_gate(job):
+            suite_gates.append(job["name"])
+            continue
         if job["conclusion"] not in {"failure", "cancelled"} or not unassigned_hosted_job(job):
             return [], f"Requires investigation: {job['name']}"
         annotations = api(f"{base}/check-runs/{job['id']}/annotations?per_page=100", pages=True)
         if not any("not acquired by Runner of type hosted" in item["message"]
                    for page in annotations for item in page):
             return [], f"No hosted allocation failure recorded for {job['name']}"
+        capacity_failures.add(job["name"])
+    # The aggregate runs after the matrix and only tests its result. Its failure
+    # is a consequence of an unassigned suite when every other failure above
+    # was verified. The same failed-jobs request also reruns this dependency.
+    for name in suite_gates:
+        if not any(f"{name} ({platform})" in capacity_failures for platform in APPLE_SUITE_PLATFORMS):
+            return [], f"No hosted suite allocation failure recorded for {name}"
     return [job["name"] for job in jobs], ""
 
 
