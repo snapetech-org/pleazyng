@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Update release packaging to version 3.0.51 on all supported platforms.
+
 - Let iOS CocoaPods fetch pinned public RomM dependencies when GitHub requests authentication.
 
 - Build signed iOS and tvOS App Store packages directly in focused Store runs, saving the developer builds for GitHub release runs.
