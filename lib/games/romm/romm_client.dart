@@ -304,7 +304,10 @@ class RommClient {
     }.entries) {
       try {
         result.addAll(
-          (await getList(route.key)).take(1000).map((e) => RommCollection.fromJson(rommMap(e), route.value)),
+          (await getList(
+            route.key,
+            query: route.key == 'collections/virtual' ? const {'type': 'all'} : const {},
+          )).take(1000).map((e) => RommCollection.fromJson(rommMap(e), route.value)),
         );
       } on RommFailure catch (error) {
         if (error.status != 404 && error.status != 403) {

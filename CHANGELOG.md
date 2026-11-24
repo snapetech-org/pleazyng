@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Pass the required virtual-collection type when browsing RomM libraries.
+
 - Keep IPTV watch positions separate for same-named profiles. Plex Home users sync across devices after a rename. The new settings start from each device’s saved positions because older cloud entries identify profiles only by display name.
 - Preserve progress for IPTV providers configured on another device, keep overlapping sync requests, and stop pending syncs when the profile changes or sharing turns off.
 - Preserve Home layout preferences added by newer clients and pause uploads when the account uses an unsupported layout version.
