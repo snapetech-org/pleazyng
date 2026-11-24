@@ -629,7 +629,8 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             r"#if os\(macOS\)\s+let capture = try captureMacWindowScreenshot\(of: app\)\s+attachMacScreenshot\(capture, named: name\)\s+#else\s+let screenshot = app\.screenshot\(\)",
         )
         self.assertNotIn("window.screenshot()", UI_TEST)
-        self.assertIn("let screenshot = app.screenshot()", UI_TEST)
+        self.assertIn("let screenshot = XCUIScreen.main.screenshot()", UI_TEST)
+        self.assertIn("_ = NSApplication.shared", UI_TEST)
         self.assertIn("let screenFrame = CGDisplayBounds(CGMainDisplayID())", UI_TEST)
         self.assertIn("let applicationFrame = app.frame", UI_TEST)
         self.assertIn("let windowFrame = window.frame", UI_TEST)
@@ -646,7 +647,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 self.assertIn(field, UI_TEST)
-        self.assertIn("guard mappings.count == 1", UI_TEST)
+        self.assertIn("XCTAssertEqual(retinaMapping.scaleX, 2)", UI_TEST)
         self.assertIn("try assertMacScreenshotGeometryScale()", UI_TEST)
         self.assertIn("XCTAssertThrowsError(try resolveMacScreenshotMapping(", UI_TEST)
         self.assertIn("guard matchingLines.count == 1", UI_TEST)

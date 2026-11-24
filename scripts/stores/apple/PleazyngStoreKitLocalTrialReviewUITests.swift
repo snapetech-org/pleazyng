@@ -7,6 +7,8 @@ import ImageIO
 import Vision
 
 #if os(macOS)
+import AppKit
+
 private func macRectJSON(_ rect: CGRect) -> [Double] {
   [Double(rect.minX), Double(rect.minY), Double(rect.width), Double(rect.height)]
 }
@@ -19,6 +21,9 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
 
   func testCaptureTrialBackedFilesBooksAndAccessSheet() throws {
 #if os(macOS)
+    // Initialize this XCTest runner's WindowServer connection before using
+    // the display API. The runner has no application windows of its own.
+    _ = NSApplication.shared
     try assertMacScreenshotGeometryScale()
 #endif
     let configurationURL = try XCTUnwrap(
@@ -403,7 +408,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       func json(name: String) -> String {
         let value: [String: Any] = [
           "schema_version": 1,
-          "capture_api": "XCUIApplication.screenshot()",
+          "capture_api": "XCUIScreen.main.screenshot()",
           "image_basis": basisNames,
           "raw_image_pixels": [rawImageSize.width, rawImageSize.height],
           "screen_frame_points": macRectJSON(screenFrame),
@@ -529,20 +534,14 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       let screen = CGRect(x: 0, y: 0, width: 1024, height: 768)
       let window = CGRect(x: 112, y: 51, width: 800, height: 632)
       let fullScreenMapping = try resolveMacScreenshotMapping(
-        rawImageSize: CGSize(width: 1024, height: 768),
-        screenFrame: screen,
-        applicationFrame: screen,
-        windowFrame: window)
+        rawImageSize: CGSize(width: 1024, height: 768), screenFrame: screen, windowFrame: window)
       XCTAssertEqual(fullScreenMapping.cropRectInPixels, window)
-      XCTAssertTrue(fullScreenMapping.basisNames.contains("screen"))
 
-      let windowOnlyMapping = try resolveMacScreenshotMapping(
-        rawImageSize: CGSize(width: 1600, height: 1264),
-        screenFrame: screen,
-        applicationFrame: window,
-        windowFrame: window)
-      XCTAssertEqual(windowOnlyMapping.cropRectInPixels, CGRect(x: 0, y: 0, width: 1600, height: 1264))
-      XCTAssertTrue(windowOnlyMapping.basisNames.contains("window"))
+      let retinaMapping = try resolveMacScreenshotMapping(
+        rawImageSize: CGSize(width: 2048, height: 1536), screenFrame: screen, windowFrame: window)
+      XCTAssertEqual(retinaMapping.cropRectInPixels, CGRect(x: 224, y: 102, width: 1600, height: 1264))
+      XCTAssertEqual(retinaMapping.scaleX, 2)
+      XCTAssertEqual(retinaMapping.scaleY, 2)
 
       let upperScreenText = CGRect(x: 0.1, y: 0.7, width: 0.2, height: 0.2)
       let lowerScreenText = CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2)
@@ -557,8 +556,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       XCTAssertThrowsError(try resolveMacScreenshotMapping(
         rawImageSize: CGSize(width: 1024, height: 768),
         screenFrame: screen,
-        applicationFrame: screen,
-        windowFrame: CGRect(x: 100, y: 100, width: 800, height: 600)))
+        windowFrame: CGRect(x: 300, y: 100, width: 800, height: 600)))
     }
 
     private func fixtureGeometry(_ window: CGRect) -> MacScreenshotGeometry {
@@ -576,52 +574,26 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     }
 
     private func resolveMacScreenshotMapping(
-      rawImageSize: CGSize,
-      screenFrame: CGRect,
-      applicationFrame: CGRect,
-      windowFrame: CGRect
+      rawImageSize: CGSize, screenFrame: CGRect, windowFrame: CGRect
     ) throws -> MacScreenshotMapping {
-      let rawBounds = CGRect(origin: .zero, size: rawImageSize)
-      let candidates: [(String, CGRect)] = [
-        ("screen", screenFrame), ("application", applicationFrame), ("window", windowFrame),
-      ]
-      var mappings: [MacScreenshotMapping] = []
-      for (name, sourceFrame) in candidates {
-        guard sourceFrame.width > 0, sourceFrame.height > 0,
-              windowFrame.minX >= sourceFrame.minX - 1,
-              windowFrame.minY >= sourceFrame.minY - 1,
-              windowFrame.maxX <= sourceFrame.maxX + 1,
-              windowFrame.maxY <= sourceFrame.maxY + 1 else { continue }
-        let scaleX = rawImageSize.width / sourceFrame.width
-        let scaleY = rawImageSize.height / sourceFrame.height
-        guard scaleX > 0, scaleY > 0,
-              abs(scaleX - scaleY) / max(scaleX, scaleY) <= 0.02 else { continue }
-        // XCTest frames use the same top-left screen coordinate basis as the
-        // screenshot PNG's pixel rows; CGImage cropping uses pixel coordinates.
-        let crop = CGRect(
-          x: (windowFrame.minX - sourceFrame.minX) * scaleX,
-          y: (windowFrame.minY - sourceFrame.minY) * scaleY,
-          width: windowFrame.width * scaleX,
-          height: windowFrame.height * scaleY).integral
-        guard rawBounds.contains(crop),
-              crop.width > 0, crop.height > 0 else { continue }
-        if let existing = mappings.firstIndex(where: { abs($0.cropRectInPixels.minX - crop.minX) < 0.5
-          && abs($0.cropRectInPixels.minY - crop.minY) < 0.5
-          && abs($0.cropRectInPixels.width - crop.width) < 0.5
-          && abs($0.cropRectInPixels.height - crop.height) < 0.5 }) {
-          mappings[existing].basisNames.append(name)
-        } else {
-          mappings.append(MacScreenshotMapping(
-            basisNames: [name], sourceFrame: sourceFrame,
-            cropRectInPixels: crop, scaleX: scaleX, scaleY: scaleY))
-        }
-      }
-      guard mappings.count == 1, let mapping = mappings.first else {
+      let scaleX = rawImageSize.width / screenFrame.width
+      let scaleY = rawImageSize.height / screenFrame.height
+      let crop = CGRect(
+        x: (windowFrame.minX - screenFrame.minX) * scaleX,
+        y: (windowFrame.minY - screenFrame.minY) * scaleY,
+        width: windowFrame.width * scaleX,
+        height: windowFrame.height * scaleY).integral
+      guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0,
+            abs(scaleX - scaleY) / max(scaleX, scaleY) <= 0.02,
+            crop.width > 0, crop.height > 0,
+            CGRect(origin: .zero, size: rawImageSize).contains(crop) else {
         throw NSError(
           domain: "PleazyngStoreKitReviewCapture", code: 7,
-          userInfo: [NSLocalizedDescriptionKey: "Could not identify one unambiguous app-window crop from screenshot pixels \(rawImageSize), screen \(NSStringFromRect(screenFrame)), app \(NSStringFromRect(applicationFrame)), window \(NSStringFromRect(windowFrame)); valid mappings: \(mappings.count)"])
+          userInfo: [NSLocalizedDescriptionKey: "Could not crop the app window \(NSStringFromRect(windowFrame)) from the main display \(NSStringFromRect(screenFrame)) at \(rawImageSize) pixels"])
       }
-      return mapping
+      return MacScreenshotMapping(
+        basisNames: ["screen"], sourceFrame: screenFrame,
+        cropRectInPixels: crop, scaleX: scaleX, scaleY: scaleY)
     }
 
     private func captureMacWindowScreenshot(of app: XCUIApplication) throws -> MacWindowScreenshot {
@@ -631,12 +603,15 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
           domain: "PleazyngStoreKitReviewCapture", code: 8,
           userInfo: [NSLocalizedDescriptionKey: "The app window was not available for a supported XCTest screenshot"])
       }
-      let screenshot = app.screenshot()
+      // The element screenshot path aborts inside XCTest's display lookup on
+      // Xcode 27. Capture the known main display and attach only the app crop.
+      app.activate()
+      let screenshot = XCUIScreen.main.screenshot()
       guard let source = CGImageSourceCreateWithData(screenshot.pngRepresentation as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
         throw NSError(
           domain: "PleazyngStoreKitReviewCapture", code: 9,
-          userInfo: [NSLocalizedDescriptionKey: "XCUIApplication.screenshot() did not provide a decodable PNG"])
+          userInfo: [NSLocalizedDescriptionKey: "XCUIScreen.main.screenshot() did not provide a decodable PNG"])
       }
       let rawImageSize = CGSize(width: image.width, height: image.height)
       let screenFrame = CGDisplayBounds(CGMainDisplayID())
@@ -645,7 +620,6 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       let mapping = try resolveMacScreenshotMapping(
         rawImageSize: rawImageSize,
         screenFrame: screenFrame,
-        applicationFrame: applicationFrame,
         windowFrame: windowFrame)
       let imageBounds = CGRect(origin: .zero, size: rawImageSize)
       let crop = mapping.cropRectInPixels.intersection(imageBounds)
