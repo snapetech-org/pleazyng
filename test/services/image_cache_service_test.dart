@@ -3,6 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cached_network_image_ce/cached_network_image.dart' show FileInfo;
+// The IO implementation exposes the directory provider for the legacy cache fixture.
+// ignore: implementation_imports
+import 'package:cached_network_image_ce/src/cache/default_cache_manager.dart' as ce_cache;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -240,17 +243,115 @@ void main() {
         'https://srv.example:32400/photo/:/transcode?width=200&minSize=1'
         '&url=%2Flibrary%2Fmetadata%2F1%2Fthumb%2F99%3FX-Plex-Token%3D$token&X-Plex-Token=$token';
 
-    test('redaction blanks outer and nested Plex tokens and Jellyfin api keys', () {
-      expect(
-        redactArtworkUrl(plexUrl),
-        'https://srv.example:32400/photo/:/transcode?width=200&minSize=1'
-        '&url=%2Flibrary%2Fmetadata%2F1%2Fthumb%2F99%3FX-Plex-Token%3D&X-Plex-Token=',
+    test('the same poster path keeps each account’s response separate across disk cache hits', () async {
+      final dir = await Directory.systemTemp.createTemp('artwork-accounts-');
+      addTearDown(() => dir.delete(recursive: true));
+      var downloads = 0;
+      final manager = PlexImageCacheManager.forTesting(
+        httpClientFactory: () => MockClient((request) async {
+          downloads++;
+          return http.Response(request.url.queryParameters['api_key'] == 'first-token' ? 'first' : 'second', 200);
+        }),
+        cacheDirectoryProvider: () async => dir,
       );
-      expect(
-        redactArtworkUrl('https://jf.example/Items/1/Images/Primary?maxWidth=300&api_key=$token'),
-        'https://jf.example/Items/1/Images/Primary?maxWidth=300&api_key=',
+      addTearDown(manager.dispose);
+      Future<String> poster(String token) async {
+        final url = 'https://jf.example/Items/1/Images/Primary?api_key=$token';
+        final response = await manager.getFileStream(url).firstWhere((r) => r is FileInfo) as FileInfo;
+        return response.file.readAsString();
+      }
+
+      expect(await poster('first-token'), 'first');
+      expect(await poster('second-token'), 'second');
+      expect(await poster('first-token'), 'first');
+      expect(downloads, 2);
+    });
+
+    test('encoded credential values stay out of persistent metadata, including explicit URL keys', () async {
+      final dir = await Directory.systemTemp.createTemp('artwork-query-');
+      addTearDown(() => dir.delete(recursive: true));
+      final inner = Uri.https('source.example', '/poster', {'X-Plex-Token': 'a/b+private-tail'});
+      final url = Uri.https('images.example', '/photo/:/transcode', {'url': inner.toString()}).toString();
+      final manager = PlexImageCacheManager.forTesting(
+        httpClientFactory: () => MockClient((request) async {
+          expect(request.url.queryParameters['url'], inner.toString());
+          return http.Response.bytes([1], 200);
+        }),
+        cacheDirectoryProvider: () async => dir,
       );
-      expect(redactArtworkUrl('https://cdn.example/poster.jpg'), 'https://cdn.example/poster.jpg');
+      final downloaded = await manager.getImageFile(url, key: url).firstWhere((r) => r is FileInfo) as FileInfo;
+      final cached = await manager.getFileFromCache(url);
+      await manager.dispose();
+      expect(downloaded.originalUrl, isNot(contains('private-tail')));
+      expect(cached?.originalUrl, downloaded.originalUrl);
+      final metadata = [
+        await for (final e in dir.list(recursive: true))
+          if (e is File && e.path.endsWith('.hive')) utf8.decode(await e.readAsBytes(), allowMalformed: true),
+      ];
+      expect(metadata, isNotEmpty);
+      expect(metadata.join(), isNot(contains('private-tail')));
+    });
+
+    test('header-authenticated requests keep distinct cached representations', () async {
+      final dir = await Directory.systemTemp.createTemp('artwork-headers-');
+      addTearDown(() => dir.delete(recursive: true));
+      var requests = 0;
+      final manager = PlexImageCacheManager.forTesting(
+        httpClientFactory: () => MockClient((request) async {
+          requests++;
+          return http.Response(request.headers['Authorization'] == 'first' ? 'A' : 'B', 200);
+        }),
+        cacheDirectoryProvider: () async => dir,
+      );
+      addTearDown(manager.dispose);
+      Future<String> fetch(Map<String, String> headers) async {
+        final result =
+            await manager
+                    .getFileStream('https://server.example/poster', key: 'poster', headers: headers)
+                    .firstWhere((r) => r is FileInfo)
+                as FileInfo;
+        return result.file.readAsString();
+      }
+
+      expect(await fetch({'Authorization': 'first'}), 'A');
+      expect(await fetch({'Authorization': 'second'}), 'B');
+      expect(await fetch({'authorization': 'first'}), 'A');
+      expect(requests, 2);
+      expect(await manager.getFileFromCache('poster'), isNull);
+    });
+
+    test('existing account-qualified artwork remains readable offline after upgrade', () async {
+      final dir = await Directory.systemTemp.createTemp('artwork-upgrade-');
+      addTearDown(() => dir.delete(recursive: true));
+      final legacy = ce_cache.DefaultCacheManager(cacheDirectoryProvider: () async => dir);
+      final key = 'plex_optimized_${'a' * 40}';
+      await legacy.putFile(plexUrl, [9], key: key);
+      await legacy.dispose();
+      final manager = PlexImageCacheManager.forTesting(
+        httpClientFactory: () => throw StateError('unexpected network request'),
+        cacheDirectoryProvider: () async => dir,
+      );
+      addTearDown(manager.dispose);
+      final restored = await manager.getFileStream(plexUrl, key: key).firstWhere((r) => r is FileInfo) as FileInfo;
+      expect(await restored.file.readAsBytes(), [9]);
+      expect(restored.originalUrl, isNot(contains(token)));
+    });
+
+    test('explicit cache keys support lookup and removal for directly stored artwork', () async {
+      final dir = await Directory.systemTemp.createTemp('artwork-explicit-');
+      addTearDown(() => dir.delete(recursive: true));
+      final manager = PlexImageCacheManager.forTesting(
+        httpClientFactory: () => throw StateError('unexpected network request'),
+        cacheDirectoryProvider: () async => dir,
+      );
+      addTearDown(manager.dispose);
+      const key = 'cover?api_key=fixture-token';
+      await manager.putFile(plexUrl, [42], key: key);
+      final file = await manager.getFileFromCache(key);
+      expect(await file?.file.readAsBytes(), [42]);
+      expect(file?.originalUrl, isNot(contains(token)));
+      await manager.removeFile(key);
+      expect(await manager.getFileFromCache(key), isNull);
     });
 
     test('the cache stores the redacted URL but downloads with the token', () async {
@@ -265,16 +366,16 @@ void main() {
         cacheDirectoryProvider: () async => dir,
       );
 
-      // No explicit key: the cache falls back to keying the entry by its URL.
+      // Default lookup and eviction still accept the original URL.
       final downloaded = await manager.getFileStream(plexUrl).firstWhere((r) => r is FileInfo) as FileInfo;
-      final cached = await manager.getFileFromCache(redactArtworkUrl(plexUrl));
+      final cached = await manager.getFileFromCache(plexUrl);
       await manager.dispose();
 
       expect(requests.single.url.queryParameters['X-Plex-Token'], token);
       expect(requests.single.url.queryParameters['url'], contains('X-Plex-Token=$token'));
       expect(requests.single.headers.keys.map((k) => k.toLowerCase()), isNot(contains('x-plezy-credentialed-url')));
       expect(downloaded.originalUrl, isNot(contains(token)));
-      expect(cached?.originalUrl, redactArtworkUrl(plexUrl));
+      expect(cached?.originalUrl, downloaded.originalUrl);
 
       final persisted = <String>[];
       await for (final entity in dir.list(recursive: true)) {

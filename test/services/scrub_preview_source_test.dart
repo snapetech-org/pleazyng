@@ -37,6 +37,21 @@ void main() {
       expect(scrubPreviewServes(_plexSource(partId: 1), _plexSource(partId: 2)), isFalse);
     });
 
+    test('a shared first part does not make two different preview timelines interchangeable', () {
+      MediaSourceInfo layout(String second, int firstDuration) => _plexSource(
+        partId: 1,
+        timeline: MediaPartTimeline.fromParts([
+          MediaPart(id: '1', durationMs: firstDuration),
+          MediaPart(id: second, durationMs: 1000),
+        ]),
+      );
+      final loaded = layout('2', 3000);
+      expect(scrubPreviewServes(loaded, layout('3', 3000)), isFalse);
+      expect(scrubPreviewServes(loaded, layout('2', 4000)), isFalse);
+      expect(scrubPreviewServes(loaded, _plexSource(partId: 1)), isFalse);
+      expect(scrubPreviewServes(_plexSource(partId: 1), loaded), isFalse);
+    });
+
     test('a stacked Plex preview serves every file of its version', () {
       const parts = [MediaPart(id: '1', durationMs: 3000000), MediaPart(id: '2', durationMs: 2400000)];
       MediaSourceInfo file(int index, {String version = 'v1'}) => _plexSource(

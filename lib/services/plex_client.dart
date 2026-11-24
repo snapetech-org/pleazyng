@@ -5253,12 +5253,11 @@ class PlexClient
     // A stacked version previews every file: the seek bar spans the item.
     final timeline = mediaSource.partTimeline;
     if (timeline != null) {
-      final sources = await Future.wait([
-        for (final part in timeline.parts)
-          _loadBifPreview(int.tryParse(part.partId), aspectRatio: mediaSource.videoAspectRatio),
-      ]);
-      if (sources.every((source) => source == null)) return null;
-      return StackedScrubPreviewSource(timeline: timeline, sources: sources);
+      return BifThumbnailService.loadStacked(
+        timeline,
+        (id, limit) => downloadBifFile(id, maxBytes: limit),
+        aspectRatio: mediaSource.videoAspectRatio,
+      );
     }
     return _loadBifPreview(mediaSource.partId, aspectRatio: mediaSource.videoAspectRatio);
   }
@@ -5266,14 +5265,8 @@ class PlexClient
   Future<ScrubPreviewSource?> _loadBifPreview(int? partId, {double? aspectRatio}) async {
     if (partId == null) return null;
     final service = BifThumbnailService();
-    try {
-      await service.load((maxBytes) => downloadBifFile(partId, maxBytes: maxBytes), aspectRatio: aspectRatio);
-      return service;
-    } catch (e, st) {
-      appLogger.w('BIF thumbnail load failed for part $partId', error: e, stackTrace: st);
-      service.dispose();
-      return null;
-    }
+    await service.load((maxBytes) => downloadBifFile(partId, maxBytes: maxBytes), aspectRatio: aspectRatio);
+    return service;
   }
 
   @override

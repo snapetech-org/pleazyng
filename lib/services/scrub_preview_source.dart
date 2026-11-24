@@ -5,13 +5,8 @@ import 'package:flutter/widgets.dart';
 import '../media/media_part_timeline.dart';
 import '../media/media_source_info.dart';
 
-/// One frame of scrub-bar preview imagery, produced by a
-/// [ScrubPreviewSource] for a given timestamp.
-///
-/// Plex's BIF returns standalone JPEG bytes per timestamp.
-/// Jellyfin's Trickplay returns a sprite-sheet URL plus the row/column of
-/// the right tile. The tooltip sizes itself to [aspectRatio] so the frame
-/// renders without letterboxing or cropping.
+/// One seek-preview frame, either a Plex/Emby JPEG or a tile in a Jellyfin
+/// sprite sheet. The tooltip uses [aspectRatio] to size the image.
 sealed class ScrubFrame {
   const ScrubFrame();
 
@@ -59,22 +54,24 @@ abstract class ScrubPreviewSource {
   void dispose();
 }
 
-/// Whether a scrub preview built for [loaded] also serves [current]: the
-/// same file, the same stacked version (whose preview spans every file), or
-/// on a backend without part ids (Jellyfin trickplay, Emby BIF) the same
-/// media source, which is what that preview is built from.
+/// Stacked previews use the whole part layout. Sharing the currently open
+/// part alone cannot establish that two versions map item time identically.
 bool scrubPreviewServes(MediaSourceInfo loaded, MediaSourceInfo? current) {
   if (current == null) return false;
-  if (loaded.partId != null && loaded.partId == current.partId) return true;
-  final sameSource = loaded.mediaSourceId != null && loaded.mediaSourceId == current.mediaSourceId;
-  if (loaded.partTimeline != null) return current.partTimeline != null && sameSource;
-  return loaded.partId == null && current.partId == null && sameSource;
+  final left = loaded.partTimeline?.parts, right = current.partTimeline?.parts;
+  final sameSource = loaded.mediaSourceId == current.mediaSourceId;
+  if (left != null || right != null) {
+    if (left == null || right == null || !sameSource || left.length != right.length) return false;
+    for (var i = 0; i < left.length; i++) {
+      if (left[i].partId != right[i].partId || left[i].duration != right[i].duration) return false;
+    }
+    return true;
+  }
+  if (loaded.partId != null) return loaded.partId == current.partId;
+  return current.partId == null && loaded.mediaSourceId != null && sameSource;
 }
 
-/// Previews for an item stacked across several files: each file has its own
-/// source on its own clock, and the timeline is the whole item's, so a time
-/// is handed to the file that holds it, shifted onto that file's clock.
-/// A file whose source failed to load shows no frames.
+/// Each part serves frames on its own clock.
 class StackedScrubPreviewSource implements ScrubPreviewSource {
   StackedScrubPreviewSource({required this.timeline, required List<ScrubPreviewSource?> sources})
     : assert(sources.length == timeline.parts.length),

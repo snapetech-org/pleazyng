@@ -24,6 +24,7 @@ dependencies:
   shared_preferences: ^2.5.4
   shared_preferences_linux: ^2.4.1
   cached_network_image_ce: ^4.9.0
+  file: ^7.0.1
   http: ^1.6.0
   sherpa_onnx: ^2.0.1
   flutter_whisper_ggml: 0.0.2

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- Keep authenticated artwork requests separate in the disk cache and store opaque identifiers for artwork URLs and explicit cache keys. Existing account-specific posters remain available offline.
+- Share one seek-preview memory budget across the files of a stacked Plex title, prioritize the playing file, and release preview archives independently of cached thumbnail images. Plex and Emby now discard stale loads and invalid thumbnail indexes.
+- Recognize explicit multi-episode filename ranges, ignore chapter labels for other seasons, and preserve overlapping edits to manual episode start times.
+
 - Include offline reading and listening edits in recovery backups. Restoring a backup preserves conflicting local edits and restores publication and Discovery data together, including larger combined backups.
 - Tie WebDAV progress updates to the file revision each reader saw and keep oversized annotation updates from making remote state unreadable.
 - Keep a disconnected podcast account disconnected after a delayed login, run podcast sync for the newly selected profile, and retain feeds that were resubscribed to during playback.

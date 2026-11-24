@@ -1,7 +1,11 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/services/bif_thumbnail_service.dart';
+import 'package:plezy/services/scrub_preview_source.dart';
+import 'package:plezy/media/media_part.dart';
+import 'package:plezy/media/media_part_timeline.dart';
 
 import '../test_helpers/bif_fixtures.dart';
 
@@ -152,6 +156,60 @@ void main() {
     });
   });
 
+  test('a scrub frame can outlive the service without retaining the whole archive', () async {
+    final service = BifThumbnailService();
+    final archive = buildBif([
+      (timestamp: 0, bytes: [42]),
+      (timestamp: 1, bytes: [17]),
+    ]);
+    await service.load((_) async => archive);
+    final thumbnail = service.getThumbnail(Duration.zero)!;
+    expect(identical(thumbnail, service.getThumbnail(Duration.zero)), isTrue);
+    service.dispose();
+    expect(thumbnail.buffer.lengthInBytes, thumbnail.length);
+    expect(thumbnail, [42]);
+  });
+
+  test('empty entries keep the preceding frame and clamp to the first real frame', () async {
+    final service = BifThumbnailService();
+    addTearDown(service.dispose);
+    final archive = buildBif([
+      (timestamp: 0, bytes: []),
+      (timestamp: 1, bytes: [1]),
+      (timestamp: 2, bytes: []),
+      (timestamp: 3, bytes: []),
+      (timestamp: 4, bytes: [2]),
+      (timestamp: 5, bytes: []),
+    ]);
+    await service.load((_) async => archive);
+    for (var i = 0; i <= 6; i++) {
+      expect(service.getThumbnail(Duration(seconds: i)), [i < 4 ? 1 : 2]);
+    }
+  });
+
+  test('stacked files share one byte budget, starting at the playing file', () async {
+    final timeline = MediaPartTimeline.fromParts([
+      for (var i = 1; i <= 4; i++) MediaPart(id: '$i', durationMs: 10000),
+    ], currentIndex: 1)!;
+    final requests = <(int, int)>[];
+    final size = buildBif([
+      (timestamp: 0, bytes: [0]),
+    ]).length;
+    final source = await BifThumbnailService.loadStacked(timeline, (id, limit) async {
+      requests.add((id, limit));
+      if (id == 3) return null;
+      return buildBif([
+        (timestamp: 0, bytes: [id]),
+      ]);
+    }, maxBytes: size * 2);
+    addTearDown(() => source?.dispose());
+    expect(requests, [(2, size * 2), (3, size), (4, size)]);
+    expect(source!.getFrame(Duration.zero), isNull);
+    expect((source.getFrame(const Duration(seconds: 10)) as BytesScrubFrame).bytes, [2]);
+    expect(source.getFrame(const Duration(seconds: 20)), isNull);
+    expect((source.getFrame(const Duration(seconds: 35)) as BytesScrubFrame).bytes, [4]);
+  });
+
   group('empty input', () {
     test('null download keeps the service in unavailable state', () async {
       final svc = BifThumbnailService();
@@ -182,6 +240,45 @@ void main() {
   });
 
   group('reload + dispose', () {
+    test('only the latest load can publish and disposal retires outstanding work', () async {
+      final svc = BifThumbnailService();
+      final old = Completer<Uint8List?>();
+      final first = svc.load((_) => old.future);
+      final newer = buildBif([
+        (timestamp: 0, bytes: [2]),
+      ]);
+      await svc.load((_) async => newer);
+      old.complete(
+        buildBif([
+          (timestamp: 0, bytes: [1]),
+        ]),
+      );
+      await first;
+      expect(svc.getThumbnail(Duration.zero), [2]);
+      final pending = Completer<Uint8List?>();
+      final last = svc.load((_) => pending.future);
+      svc.dispose();
+      pending.complete(newer);
+      await last;
+      expect(svc.isAvailable, isFalse);
+    });
+    test('index offsets must reference image data, and timestamps must support binary search', () async {
+      final service = BifThumbnailService();
+      addTearDown(service.dispose);
+      final bytes = buildBif([
+        (timestamp: 0, bytes: [1]),
+      ]);
+      ByteData.sublistView(bytes).setUint32(68, 4, Endian.little);
+      await service.load((_) async => bytes);
+      expect(service.getThumbnail(Duration.zero), isNull);
+      await service.load(
+        (_) async => buildBif([
+          (timestamp: 2, bytes: [1]),
+          (timestamp: 1, bytes: [2]),
+        ]),
+      );
+      expect(service.isAvailable, isFalse);
+    });
     test('a second load() replaces prior entries', () async {
       final first = buildBif([
         (timestamp: 0, bytes: [0xAA]),

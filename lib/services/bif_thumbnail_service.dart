@@ -1,134 +1,75 @@
 import 'dart:typed_data';
 
-import 'scrub_preview_source.dart';
+import '../media/media_part_timeline.dart';
 import '../utils/app_logger.dart';
 import '../utils/platform_detector.dart';
+import 'scrub_preview_source.dart';
 
-/// A single BIF thumbnail entry: timestamp in milliseconds + JPEG bytes.
-typedef BifEntry = ({int timestampMs, Uint8List imageBytes});
+part 'bif_index.dart';
 
-/// Parse raw BIF file bytes into a list of thumbnail entries.
-///
-/// BIF format:
-///   - 0..7   : magic bytes (0x89 "BIF" 0x0D 0x0A 0x1A 0x0A)
-///   - 8..11  : version (uint32 LE)
-///   - 12..15 : image count (uint32 LE)
-///   - 16..19 : timestamp multiplier (uint32 LE, ms per unit; 0 = 1000)
-///   - 20..63 : reserved
-///   - 64..   : index table — (imageCount + 1) entries of 8 bytes each:
-///              [timestamp (uint32 LE), offset (uint32 LE)]
-///              The last entry is a sentinel (timestamp = 0xFFFFFFFF).
-List<BifEntry> _parseBifBytes(Uint8List bytes) {
-  if (bytes.length < 64) return [];
-
-  final data = ByteData.sublistView(bytes);
-
-  // Validate magic: 0x89 B I F 0x0D 0x0A 0x1A 0x0A
-  const magic = [0x89, 0x42, 0x49, 0x46, 0x0D, 0x0A, 0x1A, 0x0A];
-  for (var i = 0; i < magic.length; i++) {
-    if (bytes[i] != magic[i]) return [];
-  }
-
-  final imageCount = data.getUint32(12, Endian.little);
-  var timestampMultiplier = data.getUint32(16, Endian.little);
-  if (timestampMultiplier == 0) timestampMultiplier = 1000;
-
-  // Index table starts at byte 64; each entry is 8 bytes.
-  // There are (imageCount + 1) entries (last is sentinel).
-  final indexTableSize = (imageCount + 1) * 8;
-  if (bytes.length < 64 + indexTableSize) return [];
-
-  final entries = <BifEntry>[];
-  for (var i = 0; i < imageCount; i++) {
-    final entryOffset = 64 + i * 8;
-    final timestamp = data.getUint32(entryOffset, Endian.little);
-    final imgOffset = data.getUint32(entryOffset + 4, Endian.little);
-
-    // Next entry's offset gives us the end of this image's data.
-    final nextEntryOffset = 64 + (i + 1) * 8;
-    final nextImgOffset = data.getUint32(nextEntryOffset + 4, Endian.little);
-
-    if (nextImgOffset <= imgOffset || nextImgOffset > bytes.length) continue;
-
-    entries.add((
-      timestampMs: timestamp * timestampMultiplier,
-      imageBytes: Uint8List.sublistView(bytes, imgOffset, nextImgOffset),
-    ));
-  }
-
-  return entries;
-}
-
-/// Caches a full BIF file in memory and serves thumbnails by timestamp.
+/// Keeps the downloaded BIF and reads its on-disk index directly while scrubbing.
 class BifThumbnailService implements ScrubPreviewSource {
-  List<BifEntry>? _entries;
-
+  _BifIndex? _index;
   double? _aspectRatio;
+  int _generation = 0;
 
-  /// Largest BIF this service holds. The whole file stays in memory while the
-  /// player is open, so an item whose BIF is larger goes without previews.
   static int get _maxFileBytes => PlatformDetector.isDesktopOS() ? 200 * 1024 * 1024 : 50 * 1024 * 1024;
 
-  /// Download and parse the BIF file through [fetchBytes] (Plex's
-  /// `/library/parts/{id}/indexes/sd`, Emby's `/Videos/{id}/index.bif`).
-  /// Returns silently on failure (thumbnails simply won't be available).
-  ///
-  /// [fetchBytes] receives the size budget and must stop reading once the body
-  /// exceeds it: checking only the finished download let an oversized BIF be
-  /// buffered whole first, which ran 32-bit Android TV boxes out of memory.
-  Future<void> load(Future<Uint8List?> Function(int maxBytes) fetchBytes, {double? aspectRatio}) async {
+  /// Download a Plex or Emby preview. The transport enforces the budget as bytes arrive.
+  Future<void> load(Future<Uint8List?> Function(int maxBytes) fetchBytes, {double? aspectRatio, int? maxBytes}) async {
+    final generation = ++_generation;
+    final limit = (maxBytes ?? _maxFileBytes).clamp(0, _maxFileBytes);
     _aspectRatio = aspectRatio;
-    _entries = null;
+    _index = null;
+    if (limit == 0) return;
     try {
-      final bytes = await fetchBytes(_maxFileBytes);
-      if (bytes == null || bytes.isEmpty) return;
-      // Parsed in place: the walk only reads the index table and hands out
-      // views into [bytes] (well under a millisecond for thousands of
-      // entries), where Isolate.run would first copy the whole file — tens of
-      // MB — into the worker.
-      _entries = _parseBifBytes(bytes);
+      final bytes = await fetchBytes(limit);
+      if (generation != _generation || bytes == null || bytes.length > limit) return;
+      final retained = bytes.buffer.lengthInBytes > limit ? Uint8List.fromList(bytes) : bytes;
+      _index = _BifIndex.parse(retained);
     } catch (e) {
       appLogger.w('BIF download/parse failed', error: e);
     }
   }
 
-  /// Whether thumbnails have been loaded successfully.
+  /// The whole stacked movie shares the same budget as a single file. Give
+  /// the playing part first claim and keep the other parts on the item clock.
+  static Future<StackedScrubPreviewSource?> loadStacked(
+    MediaPartTimeline timeline,
+    Future<Uint8List?> Function(int partId, int maxBytes) fetch, {
+    double? aspectRatio,
+    int? maxBytes,
+  }) async {
+    var remaining = (maxBytes ?? _maxFileBytes).clamp(0, _maxFileBytes);
+    final sources = List<BifThumbnailService?>.filled(timeline.parts.length, null);
+    for (var n = 0; n < sources.length && remaining > 0; n++) {
+      final i = (timeline.currentIndex + n) % sources.length;
+      final partId = int.tryParse(timeline.parts[i].partId);
+      if (partId == null) continue;
+      final service = BifThumbnailService();
+      await service.load((limit) => fetch(partId, limit), aspectRatio: aspectRatio, maxBytes: remaining);
+      final index = service._index;
+      if (index == null) continue;
+      remaining -= index.data.buffer.lengthInBytes;
+      sources[i] = service;
+    }
+    return sources.any((s) => s != null) ? StackedScrubPreviewSource(timeline: timeline, sources: sources) : null;
+  }
+
   @override
-  bool get isAvailable => _entries != null && _entries!.isNotEmpty;
+  bool get isAvailable => _index != null;
 
   @override
   ScrubFrame? getFrame(Duration time) {
     final bytes = getThumbnail(time);
-    if (bytes == null) return null;
-    return BytesScrubFrame(bytes, aspectRatio: _aspectRatio ?? 16 / 9);
+    return bytes == null ? null : BytesScrubFrame(bytes, aspectRatio: _aspectRatio ?? 16 / 9);
   }
 
-  /// Return the JPEG bytes for the thumbnail nearest to [time].
-  /// Uses binary search for O(log n) lookup.
-  Uint8List? getThumbnail(Duration time) {
-    final entries = _entries;
-    if (entries == null || entries.isEmpty) return null;
+  Uint8List? getThumbnail(Duration time) => _index?.frameAt(time);
 
-    final ms = time.inMilliseconds;
-
-    // Binary search for the largest timestamp <= ms.
-    var lo = 0;
-    var hi = entries.length - 1;
-    while (lo < hi) {
-      final mid = (lo + hi + 1) ~/ 2; // bias right
-      if (entries[mid].timestampMs <= ms) {
-        lo = mid;
-      } else {
-        hi = mid - 1;
-      }
-    }
-
-    return entries[lo].imageBytes;
-  }
-
-  /// Release cached data.
   @override
   void dispose() {
-    _entries = null;
+    _generation++;
+    _index = null;
   }
 }

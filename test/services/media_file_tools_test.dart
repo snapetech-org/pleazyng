@@ -72,6 +72,32 @@ void main() {
     final repeated = EpisodeFileBounds.identify('p', episode(2), version(path: '/TV/S01E01E02E03.mkv'), 1, [])!;
     expect(repeated.last, 3);
   });
+  test('episode filenames with audio and release numbers do not create multi-episode cuts', () {
+    for (final path in ['/TV/Show S01E01 10bit.mkv', '/TV/Show S01E01 2.0.mkv', '/TV/Show S01E01 - 10bit.mkv']) {
+      expect(EpisodeFileBounds.identify('p', episode(1), version(path: path), 1, []), isNull, reason: path);
+    }
+    expect(EpisodeFileBounds.identify('p', episode(1), version(path: '/TV/Show S01E01-03.mkv'), 1, [])?.last, 3);
+  });
+  test('chapter labels from another season do not set episode start times', () async {
+    final bounds = EpisodeFileBounds.identify('p', episode(2), version(), 1, [])!;
+    final starts = await bounds.starts([
+      MediaChapter(id: 1, title: 'S02E02: Recap', startTimeOffset: 2000),
+      MediaChapter(id: 2, title: 'S01E02: The episode', startTimeOffset: 600000),
+      MediaChapter(id: 3, title: 'S03E03', startTimeOffset: 2000000),
+    ]);
+    expect(starts, {1: 0, 2: 600000});
+  });
+  test('overlapping manual marks for the same file preserve both edits and validate their order', () async {
+    final first = EpisodeFileBounds.identify('p', episode(2), version(), 1, [])!;
+    final second = EpisodeFileBounds.identify('p', episode(3), version(), 1, [])!;
+    await Future.wait([first.mark(2, 600000, []), second.mark(3, 1200000, [])]);
+    expect(await first.starts([]), {1: 0, 2: 600000, 3: 1200000});
+    final edit = first.mark(2, 900000, []);
+    await expectLater(second.mark(3, 800000, []), throwsFormatException);
+    await edit;
+    expect(await first.starts([]), {1: 0, 2: 900000, 3: 1200000});
+  });
+
   test('queue visits bounded shared-file siblings in both directions', () async {
     final q = PlaybackStateProvider();
     addTearDown(q.dispose);
