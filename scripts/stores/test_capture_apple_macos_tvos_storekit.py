@@ -666,6 +666,12 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn("XCTAssertTrue(unavailableFrameValues[0] is NSNull)", UI_TEST)
         self.assertIn("XCTAssertTrue(unavailableFrameValues[1] is NSNull)", UI_TEST)
 
+    def test_mac_ocr_uses_the_supported_cpu_devices(self) -> None:
+        self.assertIn("request.recognitionLevel = .fast", UI_TEST)
+        self.assertIn("try request.supportedComputeStageDevices", UI_TEST)
+        self.assertIn("if case .cpu = device", UI_TEST)
+        self.assertIn("request.setComputeDevice(cpu, for: stage)", UI_TEST)
+
     def test_tvos_screenshot_path_remains_the_existing_xctest_screenshot(self) -> None:
         self.assertIn(
             "#else\n      let screenshot = app.screenshot()\n      attachScreenshot(screenshot, named: name)\n    #endif",
