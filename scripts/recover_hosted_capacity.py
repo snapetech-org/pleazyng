@@ -1,17 +1,23 @@
-"""Retry failed jobs only when GitHub confirms a hosted allocation failure."""
+"""Retry failed jobs only when GitHub confirms a hosted runner failure."""
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import UTC, datetime, timedelta
 
 
 MAX_ATTEMPTS = 8
+MAX_WORKER_DISK_ATTEMPTS = 3
 WORKFLOWS = ("build.yml", "ci.yml", "macos-app-store-signed.yml")
 APPLE_SUITE_GATE_NAMES = ("Apple native reliability", "Release CI / Apple native reliability")
 APPLE_SUITE_PLATFORMS = ("iOS", "macOS", "tvOS")
+WORKER_DISK_ERROR = re.compile(
+    r"System\.IO\.IOException: No space left on device : "
+    r"'/Users/runner/actions-runner/(?:cached/)?_diag/Worker_[\w.-]+\.log'",
+)
 
 
 def api(path, *, pages=False):
@@ -40,11 +46,20 @@ def failed_apple_suite_gate(job):
             == ["Require all Apple native suites"])
 
 
+def interrupted_hosted_ios_suite(job):
+    return (job.get("name") in {f"{name} (iOS)" for name in APPLE_SUITE_GATE_NAMES}
+            and job.get("status") == "completed" and job.get("conclusion") == "failure"
+            and bool(job.get("runner_id")) and job.get("labels") == ["xcode-27"]
+            and not any(step.get("conclusion") == "failure" for step in job["steps"])
+            and any(step.get("name") == "Qualify Apple native components"
+                    and step.get("status") == "in_progress" for step in job["steps"]))
+
+
 def classify_attempt(repository, run_id, attempt):
-    """Return failed job names only if every failure has hosted allocation evidence."""
+    """Return failed job names only when each root failure is infrastructure."""
     base = f"repos/{repository}"
     route = f"{base}/actions/runs/{run_id}"
-    jobs = [job for page in api(f"{route}/attempts/{attempt}/jobs?per_page=100", pages=True)
+    jobs = [job for page in api(f"{route}/attempts/{attempt}/jobs?per_page=30", pages=True)
             for job in page["jobs"] if job["conclusion"] not in {"success", "skipped", "neutral"}]
     if not jobs:
         return [], "No unsuccessful jobs"
@@ -54,15 +69,24 @@ def classify_attempt(repository, run_id, attempt):
         if failed_apple_suite_gate(job):
             suite_gates.append(job["name"])
             continue
-        if job["conclusion"] not in {"failure", "cancelled"} or not unassigned_hosted_job(job):
+        unassigned = job["conclusion"] in {"failure", "cancelled"} and unassigned_hosted_job(job)
+        interrupted = interrupted_hosted_ios_suite(job)
+        if not (unassigned or interrupted):
             return [], f"Requires investigation: {job['name']}"
         annotations = api(f"{base}/check-runs/{job['id']}/annotations?per_page=100", pages=True)
-        if not any("not acquired by Runner of type hosted" in item["message"]
-                   for page in annotations for item in page):
+        if interrupted:
+            failures = [item["message"] for page in annotations for item in page
+                        if item.get("annotation_level") == "failure"]
+            if not failures or not all(WORKER_DISK_ERROR.search(message) for message in failures):
+                return [], f"No hosted worker disk exhaustion recorded for {job['name']}"
+            if attempt >= MAX_WORKER_DISK_ATTEMPTS:
+                return [], f"Requires investigation after hosted worker disk exhaustion: {job['name']}"
+        elif not any("not acquired by Runner of type hosted" in item["message"]
+                     for page in annotations for item in page):
             return [], f"No hosted allocation failure recorded for {job['name']}"
         capacity_failures.add(job["name"])
     # The aggregate runs after the matrix and only tests its result. Its failure
-    # is a consequence of an unassigned suite when every other failure above
+    # is a consequence of an unavailable suite when every other failure above
     # was verified. The same failed-jobs request also reruns this dependency.
     for name in suite_gates:
         if not any(f"{name} ({platform})" in capacity_failures for platform in APPLE_SUITE_PLATFORMS):
@@ -89,7 +113,7 @@ def recover(repository, run_id, attempt, retry):
     if attempt >= MAX_ATTEMPTS:
         raise SystemExit(f"Hosted capacity still unavailable after {attempt} attempts: {names}")
     if not retry:
-        return f"Confirmed hosted allocation failure: {names}"
+        return f"Confirmed hosted runner failure: {names}"
     if not current_failure():
         return "Run has already advanced"
     try:

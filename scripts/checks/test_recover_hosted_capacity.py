@@ -13,6 +13,10 @@ import recover_hosted_capacity as capacity
 
 NOT_ACQUIRED = "The job was not acquired by Runner of type hosted even after multiple attempts"
 QUEUE_WARNING = "Due to capacity constraints, jobs targeting macOS arm64 runners may experience longer queue times."
+WORKER_NO_SPACE = (
+    "Unhandled exception. System.IO.IOException: No space left on device : "
+    "'/Users/runner/actions-runner/cached/_diag/Worker_20261124-180538-utc.log'"
+)
 
 
 class HostedCapacityTests(unittest.TestCase):
@@ -52,7 +56,7 @@ class HostedCapacityTests(unittest.TestCase):
     def api(self, path, *, pages=False):
         if path == self.route and not pages:
             return self.workflow.copy()
-        if path == f"{self.route}/attempts/{self.attempt}/jobs?per_page=100" and pages:
+        if path == f"{self.route}/attempts/{self.attempt}/jobs?per_page=30" and pages:
             return self.jobs
         for job_id, annotations in self.annotations.items():
             if path == f"repos/{self.repository}/check-runs/{job_id}/annotations?per_page=100" and pages:
@@ -81,6 +85,28 @@ class HostedCapacityTests(unittest.TestCase):
             "conclusion": "failure", "runner_id": 11,
             "steps": [{"name": "Qualify Apple native components", "conclusion": "failure"}],
         }])
+        self.assertIn("Requires investigation", self.recover())
+        self.mutate.assert_not_called()
+
+    def test_retries_a_hosted_ios_worker_disk_failure_once_with_its_gate(self):
+        self.attempt = self.workflow["run_attempt"] = 2
+        suite = {
+            **self.macos, "id": 106, "name": "Release CI / Apple native reliability (iOS)",
+            "conclusion": "failure", "runner_id": 11, "labels": ["xcode-27"],
+            "steps": [{"name": "Qualify Apple native components", "status": "in_progress", "conclusion": None}],
+        }
+        self.jobs[-1]["jobs"].extend([self.apple_gate, suite])
+        self.annotations[106] = [[{"annotation_level": "failure", "message": WORKER_NO_SPACE}]]
+        self.assertIn(suite["name"], self.recover())
+        self.mutate.assert_called_once()
+
+        self.mutate.reset_mock()
+        self.annotations[106][0].append({"annotation_level": "failure", "message": "Swift test failed"})
+        self.assertIn("No hosted worker disk exhaustion recorded", self.recover())
+        self.mutate.assert_not_called()
+
+        self.annotations[106][0].pop()
+        self.attempt = self.workflow["run_attempt"] = 3
         self.assertIn("Requires investigation", self.recover())
         self.mutate.assert_not_called()
 
