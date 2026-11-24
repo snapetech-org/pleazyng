@@ -609,7 +609,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertNotIn(".hasFocus", UI_TEST)
 
     def test_macos_fresh_install_uses_visible_onboarding_and_bounded_ocr_fallback(self) -> None:
-        self.assertIn('try tapMacVisibleText("Start fresh", in: app', UI_TEST)
+        self.assertIn('try clickMacVisibleText("Start fresh", in: app', UI_TEST)
         self.assertIn('"Start my 7-day free trial", in: app', UI_TEST)
         self.assertIn('"Use files and books", in: app', UI_TEST)
         self.assertIn('"Pleazyng lifetime access", in: app', UI_TEST)
@@ -617,8 +617,10 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn("import Vision", UI_TEST)
         self.assertIn("VNRecognizeTextRequest()", UI_TEST)
         self.assertIn("button.exists && button.isHittable", UI_TEST)
+        self.assertIn("button.click()", UI_TEST)
+        self.assertNotIn("button.tap()", UI_TEST)
         self.assertIn("guard matchingLines.count == 1", UI_TEST)
-        self.assertIn("window.coordinate(withNormalizedOffset: offset).tap()", UI_TEST)
+        self.assertIn("window.coordinate(withNormalizedOffset: offset).click()", UI_TEST)
         self.assertIn("private func macWindowOffset(", UI_TEST)
         self.assertIn("forVisionBounds bounds: CGRect, geometry: MacScreenshotGeometry", UI_TEST)
         self.assertIn("XCTAssertEqual(upperOffset.dy, 0.2, accuracy: 0.0001)", UI_TEST)
@@ -655,7 +657,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn("XCTAssertThrowsError(try resolveMacScreenshotMapping(", UI_TEST)
         self.assertIn("guard matchingLines.count == 1", UI_TEST)
         self.assertIn("macWindowOffset(forVisionBounds: match.boundingBox, geometry: lines.screenshot.geometry)", UI_TEST)
-        self.assertIn("window.coordinate(withNormalizedOffset: offset).tap()", UI_TEST)
+        self.assertIn("window.coordinate(withNormalizedOffset: offset).click()", UI_TEST)
 
     def test_mac_geometry_metadata_serializes_nonfinite_frames_as_null(self) -> None:
         self.assertIn("private func macJSONNumber(_ value: CGFloat) -> Any", UI_TEST)

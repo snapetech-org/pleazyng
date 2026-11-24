@@ -59,7 +59,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     attachText(app.debugDescription, named: "pleazyng-diagnostic-accessibility-after-launch-\(platformName())")
 
     #if os(macOS)
-      try tapMacVisibleText("Start fresh", in: app, attachmentName: "pleazyng-macos-legacy-onboarding")
+      try clickMacVisibleText("Start fresh", in: app, attachmentName: "pleazyng-macos-legacy-onboarding")
       let afterOnboarding = try waitForMacVisibleText(
         "Start my 7-day free trial", in: app, attachmentName: "pleazyng-diagnostic-after-onboarding-macos",
         timeout: 90)
@@ -84,7 +84,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       trialOfferShown = true
       trialOfferLifetimePriceShown = offerText.contains("Unlock every feature") && offerText.contains("$2.99")
       lifetimeDisplayPrice = offer.lines.first(where: { $0.text.contains("$2.99") })?.text ?? "$2.99"
-      try tapMacVisibleText(
+      try clickMacVisibleText(
         "Start my 7-day free trial", in: app, attachmentName: "pleazyng-macos-trial-offer-action")
     #else
       let offerText = try waitForTVScreen(
@@ -115,7 +115,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     XCTAssertFalse(trialTransactions.contains { $0.productIdentifier == lifetimeProductID })
 
     #if os(macOS)
-      try tapMacVisibleText("Use files and books", in: app, attachmentName: "pleazyng-macos-use-files-action")
+      try clickMacVisibleText("Use files and books", in: app, attachmentName: "pleazyng-macos-use-files-action")
     #else
       // The TV QR sign-in CTA takes initial focus. The next four
       // actions are Jellyfin, Emby, direct Plex, then Files and Books.
@@ -150,7 +150,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       _ = try waitForMacVisibleText(
         "Pleazyng lifetime access", in: app, attachmentName: "pleazyng-diagnostic-settings-macos",
         timeout: 60)
-      try tapMacVisibleText(
+      try clickMacVisibleText(
         "Pleazyng lifetime access", in: app, attachmentName: "pleazyng-macos-lifetime-settings-action")
     #else
       try openTVSettings(in: app)
@@ -457,7 +457,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
           "crop_rect_in_raw_image_pixels": macRectJSON(cropRectInPixels),
           "output_window_image_pixels": [outputImageSize.width, outputImageSize.height],
           "pixels_per_point": [scaleX, scaleY],
-          "ocr_coordinate_basis": "The cropped PNG maps one-to-one to the XCTest window frame; Vision bounds are normalized from bottom-left and converted to the window's top-left normalized offset before tapping.",
+          "ocr_coordinate_basis": "The cropped PNG maps one-to-one to the XCTest window frame; Vision bounds are normalized from bottom-left and converted to the window's top-left normalized offset before clicking.",
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
               let string = String(data: data, encoding: .utf8) else {
@@ -521,13 +521,13 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
         userInfo: [NSLocalizedDescriptionKey: "Timed out waiting for visible text \(expected.debugDescription); OCR saw: \(joinedText(latest))"])
     }
 
-    private func tapMacVisibleText(
+    private func clickMacVisibleText(
       _ expected: String, in app: XCUIApplication, attachmentName: String, timeout: TimeInterval = 30
     ) throws {
       let window = app.windows.firstMatch
       let button = app.buttons[expected]
       if button.exists && button.isHittable {
-        button.tap()
+        button.click()
         attachText("Used the real XCTest accessibility button for \(expected)", named: "\(attachmentName)-action")
         return
       }
@@ -542,9 +542,9 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       }
       let offset = try macWindowOffset(forVisionBounds: match.boundingBox, geometry: lines.screenshot.geometry)
       attachText(
-        "Used one visible OCR match for \(expected.debugDescription). OCR bounds in the cropped app screenshot: \(NSStringFromRect(match.boundingBox)); normalized window tap offset: (\(offset.dx), \(offset.dy)). Screenshot geometry: \(lines.screenshot.geometry.json(name: attachmentName)).",
+        "Used one visible OCR match for \(expected.debugDescription). OCR bounds in the cropped app screenshot: \(NSStringFromRect(match.boundingBox)); normalized window click offset: (\(offset.dx), \(offset.dy)). Screenshot geometry: \(lines.screenshot.geometry.json(name: attachmentName)).",
         named: "\(attachmentName)-action")
-      window.coordinate(withNormalizedOffset: offset).tap()
+      window.coordinate(withNormalizedOffset: offset).click()
     }
 
     private func macWindowOffset(
@@ -564,7 +564,7 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
                 - geometry.windowFrame.width / geometry.windowFrame.height) <= 0.02 else {
         throw NSError(
           domain: "PleazyngStoreKitReviewCapture", code: 6,
-          userInfo: [NSLocalizedDescriptionKey: "The OCR target is not safely inside the cropped app window: \(NSStringFromRect(bounds)); geometry: \(geometry.json(name: "tap"))"])
+          userInfo: [NSLocalizedDescriptionKey: "The OCR target is not safely inside the cropped app window: \(NSStringFromRect(bounds)); geometry: \(geometry.json(name: "click"))"])
       }
       return offset
     }
