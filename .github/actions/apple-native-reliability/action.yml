@@ -67,6 +67,23 @@ runs:
         fi
         ln -s "$APPLE_LOCAL_BUILD_DIR" "$SUITE_ROOT/build"
 
+    - name: Stage iOS DV runtime before compiling the Swift test host
+      if: inputs.platform == 'iOS'
+      id: ios-dv-runtime
+      shell: bash
+      working-directory: ${{ steps.scratch.outputs.PLEZYNG_APPLE_WORKSPACE }}
+      env:
+        APPLE_LOCAL_BUILD_DIR: ${{ steps.scratch.outputs.APPLE_LOCAL_BUILD_DIR }}
+      run: |
+        set -euo pipefail
+        stage="$APPLE_LOCAL_BUILD_DIR/ios-dv-runtime"
+        df -h "$APPLE_LOCAL_BUILD_DIR"
+        python3 tools/dv-engine/build_apple_runtime.py --sdk iphonesimulator \
+          --configuration Debug --arch arm64 --stage-dir "$stage"
+        du -sh "$stage"
+        df -h "$APPLE_LOCAL_BUILD_DIR"
+        echo "path=$stage" >> "$GITHUB_OUTPUT"
+
     - name: Restore platform Pub dependencies
       id: pub
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -83,12 +100,18 @@ runs:
       if: inputs.platform == 'iOS'
       shell: bash
       working-directory: ${{ steps.scratch.outputs.PLEZYNG_APPLE_WORKSPACE }}
+      env:
+        APPLE_LOCAL_BUILD_DIR: ${{ steps.scratch.outputs.APPLE_LOCAL_BUILD_DIR }}
       run: |
         python3 scripts/p2p/build_apple.py ios
         framework=packages/plezy_torrent/ios/Frameworks/ios/PlezyTorrent.xcframework
         test -f "$framework/Info.plist"
         test -d "$framework/ios-arm64/PlezyTorrent.framework"
         test -d "$framework/ios-arm64_x86_64-simulator/PlezyTorrent.framework"
+        # Both slices are copied into the XCFramework. CocoaPods uses that
+        # product, so the task's CMake checkouts and object files can go now.
+        python3 -c 'from pathlib import Path; import shutil, sys; shutil.rmtree(Path(sys.argv[1]) / "p2p")' "$APPLE_LOCAL_BUILD_DIR"
+        df -h "$APPLE_LOCAL_BUILD_DIR"
 
     - name: Build and verify macOS native torrent framework
       if: inputs.platform == 'macOS'
@@ -393,12 +416,17 @@ runs:
         APPLE_TEST_DESTINATION: ${{ steps.destination.outputs.APPLE_TEST_DESTINATION }}
         PLATFORM: ${{ inputs.platform }}
         MOTION_TEST_ONLY: ${{ inputs.motion-test-only }}
+        IOS_DV_STAGE: ${{ steps.ios-dv-runtime.outputs.path }}
       shell: bash
       working-directory: ${{ steps.scratch.outputs.PLEZYNG_APPLE_WORKSPACE }}
       run: |
         result_bundle="$APPLE_RESULT_BUNDLE"
         test_log="$APPLE_LOCAL_BUILD_DIR/native-test-output.log"
         test_selection=()
+        compiler_settings=()
+        if [[ -n "$IOS_DV_STAGE" ]]; then
+          compiler_settings+=("PLEAZYNG_PREBUILT_APPLE_DV_RUNTIME=$IOS_DV_STAGE")
+        fi
         if [[ "$MOTION_TEST_ONLY" == true ]]; then
           test_selection=(-only-testing:RunnerTests/AVFoundationMotionPlaybackTests/testVideoMotionOptionsCanChangeOnAnOpenAVFoundationStream)
         fi
@@ -416,7 +444,7 @@ runs:
           -resultBundlePath "$result_bundle" \
           CODE_SIGNING_ALLOWED=NO \
           COMPILER_INDEX_STORE_ENABLE=NO \
-          ARCHS=arm64 2>&1 | tee "$test_log"
+          ARCHS=arm64 "${compiler_settings[@]}" 2>&1 | tee "$test_log"
         test_status=$?
         set -e
         if [[ "$test_status" -ne 0 && -d "$result_bundle" ]]; then
@@ -447,10 +475,14 @@ runs:
         APPLE_SOURCE_PACKAGES_DIR: ${{ steps.scratch.outputs.APPLE_SOURCE_PACKAGES_DIR }}
         NATIVE_WORKSPACE: ${{ steps.scratch.outputs.project }}/Runner.xcworkspace
         APPLE_TEST_DESTINATION: ${{ steps.destination.outputs.APPLE_TEST_DESTINATION || steps.scratch.outputs.destination || format('generic/platform={0} Simulator', inputs.platform) }}
+        IOS_DV_STAGE: ${{ steps.ios-dv-runtime.outputs.path }}
       shell: bash
       working-directory: ${{ steps.scratch.outputs.PLEZYNG_APPLE_WORKSPACE }}
       run: |
         compiler_settings=()
+        if [[ -n "$IOS_DV_STAGE" ]]; then
+          compiler_settings+=("PLEAZYNG_PREBUILT_APPLE_DV_RUNTIME=$IOS_DV_STAGE")
+        fi
         if [[ -n "${PLEAZYNG_APPLE_TIDY:-}" ]]; then
           mkdir -p "$RUNNER_TEMP/pleazyng-clang-database"
           compiler_settings+=(

@@ -11,6 +11,36 @@ import build_apple_runtime as runtime
 
 
 class AppleRuntimeEnvironmentTest(unittest.TestCase):
+    def test_staging_keeps_the_embeddable_runtime_after_removing_build_scratch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stage = Path(directory) / 'stage'
+            provenance = {
+                'sdk': 'iphonesimulator', 'configuration': 'Debug', 'architectures': ['arm64'],
+                'lock_sha256': runtime.hashlib.sha256(runtime.ADAPTER_LOCK.read_bytes()).hexdigest(),
+            }
+
+            def build(work, sdk, configuration, architectures):
+                self.assertEqual((sdk, configuration, architectures), ('iphonesimulator', 'Debug', ['arm64']))
+                products = work / 'Products'
+                framework = products / 'PackageFrameworks/PlezyNGDVRuntime.framework'
+                framework.mkdir(parents=True)
+                (framework / 'PlezyNGDVRuntime').write_bytes(b'compiled runtime')
+                (products / 'PlezyNGDVRuntime-Licenses').mkdir()
+                (products / 'PlezyNGDVRuntime.provenance.json').write_text(json.dumps(provenance))
+                return products
+
+            with patch.object(runtime, 'build', side_effect=build) as compiler:
+                runtime.stage_runtime(stage, 'iphonesimulator', 'Debug', ['arm64'])
+            compiler.assert_called_once()
+            self.assertEqual(list(stage.parent.iterdir()), [stage])
+            runtime.verify_staged_runtime(stage, 'iphonesimulator', 'Debug', ['arm64'])
+            with self.assertRaisesRegex(ValueError, 'differs from the requested build'):
+                runtime.verify_staged_runtime(stage, 'iphonesimulator', 'Release', ['arm64'])
+            app = stage.parent / 'Pleazyng.app'
+            runtime.embed(stage, app / 'Frameworks', app, sign=False)
+            self.assertEqual((app / 'Frameworks/PlezyNGDVRuntime.framework/PlezyNGDVRuntime').read_bytes(),
+                             b'compiled runtime')
+
     def test_copied_read_only_framework_becomes_signable_without_changing_bytes_or_symlink_targets(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

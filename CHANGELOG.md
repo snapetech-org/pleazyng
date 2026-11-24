@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Compile and stage the iOS simulator’s Dolby Vision runtime before the native test build and reclaim dependency build scratch so hosted Macs have room to finish qualification.
+
 - Build and verify the universal MilkRust runtime before macOS app compilation so its logs and timeout are independent of Xcode.
 
 - Preserve explicit word-to-cue links when caching generated subtitles. Keep cached transcripts within their profile and protect concurrent saves.

@@ -16,11 +16,13 @@ import platform
 import shutil
 import signal
 import subprocess
+import tempfile
 
 from build_adapters import verify_swift_pins
 
 ROOT = Path(__file__).resolve().parents[2]
 AETHER_XCODE26_PATCH = ROOT / "tools/dv-engine/patches/aether-xcode26-swift62.patch"
+ADAPTER_LOCK = ROOT / "tools/dv-engine/adapters.lock.json"
 
 
 def run(args, *, cwd=None, env=None):
@@ -120,7 +122,7 @@ def build(work: Path, sdk: str, configuration: str, architectures: list[str]) ->
         "appletvos": ("tvOS", "18.0", "generic/platform=tvOS"),
         "appletvsimulator": ("tvOS", "18.0", "generic/platform=tvOS Simulator"),
     }[sdk]
-    lock = json.loads((ROOT / "tools/dv-engine/adapters.lock.json").read_text())
+    lock = json.loads(ADAPTER_LOCK.read_text())
     aether = lock["sources"]["aether"]
     pins = list(aether["swift_pins"]) + [{
         "identity": "aetherengine", "kind": "remoteSourceControl",
@@ -190,12 +192,12 @@ def build(work: Path, sdk: str, configuration: str, architectures: list[str]) ->
             target.unlink(missing_ok=True)
             shutil.copyfile(source, target)
     provenance = {
-        "schema_version": 1, "abi_version": 1, "sdk": sdk,
+        "schema_version": 1, "abi_version": 1, "sdk": sdk, "configuration": configuration,
         "architectures": architectures, "aether_commit": aether["commit"],
         "aether_compatibility_patch": "fa8cc48b93a5b9c83367bf4fb3d731fb3862a177",
         "traits": ["DualLayerDolbyVision"], "activation": "runtime-settings-automatic-with-fallback",
         "qualification": "unqualified", "pins": pins,
-        "lock_sha256": hashlib.sha256((ROOT / "tools/dv-engine/adapters.lock.json").read_bytes()).hexdigest(),
+        "lock_sha256": hashlib.sha256(ADAPTER_LOCK.read_bytes()).hexdigest(),
     }
     (product_root / "PlezyNGDVRuntime.provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     return product_root
@@ -210,7 +212,7 @@ def make_framework_writable(target: Path) -> None:
             path.chmod(path.stat().st_mode | 0o200)
 
 
-def embed(products: Path, frameworks: Path, resources: Path) -> None:
+def embed(products: Path, frameworks: Path, resources: Path, *, sign: bool = True) -> None:
     frameworks.mkdir(parents=True, exist_ok=True)
     resources.mkdir(parents=True, exist_ok=True)
     # Binary package dependencies and the API travel beside the runtime.
@@ -242,9 +244,27 @@ def embed(products: Path, frameworks: Path, resources: Path) -> None:
     if not (frameworks / "PlezyNGDVRuntime.framework/PlezyNGDVRuntime").exists():
         raise ValueError("app packaging did not include the DV runtime")
     identity = os.environ.get("EXPANDED_CODE_SIGN_IDENTITY")
-    if os.environ.get("CODE_SIGNING_ALLOWED") != "NO" and identity:
+    if sign and os.environ.get("CODE_SIGNING_ALLOWED") != "NO" and identity:
         for target in copied:
             run(["codesign", "--force", "--sign", identity, "--preserve-metadata=identifier,entitlements", target])
+
+
+def stage_runtime(stage: Path, sdk: str, configuration: str, architectures: list[str]) -> None:
+    stage.mkdir(mode=0o700)
+    with tempfile.TemporaryDirectory(prefix="apple-dv-build-", dir=stage.parent) as work:
+        products = build(Path(work), sdk, configuration, architectures)
+        embed(products, stage, stage, sign=False)
+
+
+def verify_staged_runtime(stage: Path, sdk: str, configuration: str, architectures: list[str]) -> None:
+    provenance_path = stage / "PlezyNGDVRuntime.provenance.json"
+    if stage.is_symlink() or provenance_path.is_symlink() or not provenance_path.is_file():
+        raise ValueError("Apple DV runtime staging provenance is missing")
+    provenance = json.loads(provenance_path.read_text())
+    if (provenance.get("sdk") != sdk or provenance.get("configuration") != configuration
+            or sorted(provenance.get("architectures", [])) != sorted(architectures)
+            or provenance.get("lock_sha256") != hashlib.sha256(ADAPTER_LOCK.read_bytes()).hexdigest()):
+        raise ValueError("Staged Apple DV runtime differs from the requested build")
 
 
 def main():
@@ -253,8 +273,16 @@ def main():
     parser.add_argument("--sdk", choices=("macosx", "iphoneos", "iphonesimulator", "appletvos", "appletvsimulator"))
     parser.add_argument("--configuration", default="Release")
     parser.add_argument("--arch", action="append")
+    parser.add_argument("--stage-dir", type=Path,
+                        help="Retain only embeddable products in a new directory and discard compilation scratch")
     parser.add_argument("--xcode-phase", action="store_true")
     args = parser.parse_args()
+    if args.stage_dir:
+        if args.xcode_phase or args.work_dir or not args.sdk:
+            parser.error("--stage-dir requires --sdk and manages its own compilation scratch")
+        stage_runtime(args.stage_dir.absolute(), args.sdk, args.configuration, args.arch or ["arm64"])
+        print(args.stage_dir.absolute())
+        return
     if args.xcode_phase:
         sdk = os.environ["PLATFORM_NAME"]
         configuration = "Debug" if os.environ.get("CONFIGURATION") == "Debug" else "Release"
@@ -264,7 +292,12 @@ def main():
         if not args.work_dir or not args.sdk:
             parser.error("--work-dir and --sdk are required outside Xcode")
         sdk, configuration, architectures, work = args.sdk, args.configuration, args.arch or ["arm64"], args.work_dir
-    products = build(work.absolute(), sdk, configuration, architectures)
+    prebuilt = os.environ.get("PLEAZYNG_PREBUILT_APPLE_DV_RUNTIME") if args.xcode_phase else None
+    if prebuilt:
+        products = Path(prebuilt).absolute()
+        verify_staged_runtime(products, sdk, configuration, architectures)
+    else:
+        products = build(work.absolute(), sdk, configuration, architectures)
     if args.xcode_phase:
         target = Path(os.environ["TARGET_BUILD_DIR"])
         embed(products, target / os.environ["FRAMEWORKS_FOLDER_PATH"], target / os.environ["UNLOCALIZED_RESOURCES_FOLDER_PATH"])
