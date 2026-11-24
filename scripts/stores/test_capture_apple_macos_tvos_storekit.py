@@ -601,7 +601,9 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         self.assertIn("markers.allSatisfy", UI_TEST)
         self.assertIn("hasTVRailFocus(settings.boundingBox, in: screen.image)", UI_TEST)
         self.assertIn("XCUIRemote.shared.press(.menu)", UI_TEST)
-        self.assertIn('["Files and books", "Add a source or import a book", "Search saved library"]', UI_TEST)
+        self.assertIn('["Files and books", "Search saved library", "import a book"]', UI_TEST)
+        self.assertIn("try captureTVLocalLibrary(in: app)", UI_TEST)
+        self.assertIn('"pleazyng-diagnostic-files-books-arrival-tvos"', UI_TEST)
         self.assertIn('["Your 7-day full-feature trial is active", "Restore lifetime purchase", "$2.99"]', UI_TEST)
         self.assertNotIn(".hasFocus", UI_TEST)
 

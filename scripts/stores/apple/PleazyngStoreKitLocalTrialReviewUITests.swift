@@ -131,10 +131,10 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       XCTAssertTrue(filesText.contains("Import files"), "The real local library Import files action is missing")
       filesBooksScreenOpened = true
     #else
-      // Add Source and Import are icon-only buttons on the TV layout.
       _ = try waitForTVScreen(
-        ["Files and books", "Add a source or import a book", "Search saved library"],
-        in: app, attachmentName: "pleazyng-localtest-files-books-tvos", timeout: 60)
+        ["Files and books", "Read, listen, and watch from your own files", "Open media"],
+        in: app, attachmentName: "pleazyng-diagnostic-files-books-arrival-tvos", timeout: 60)
+      try captureTVLocalLibrary(in: app)
       filesBooksScreenOpened = true
     #endif
 
@@ -363,6 +363,28 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       try attachScreenshot(of: app, named: "pleazyng-diagnostic-sidebar-settings-unfocused-tvos")
       throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 22,
                     userInfo: [NSLocalizedDescriptionKey: "The Settings row did not receive visible tvOS remote focus"])
+    }
+
+    private func captureTVLocalLibrary(in app: XCUIApplication) throws {
+      // The TV layout places local search and the empty library under the
+      // Podcast, Open Media, and streaming cards. Move focus down so the
+      // app scrolls the actual local library controls into view.
+      let markers = ["Files and books", "Search saved library", "import a book"]
+      for _ in 0..<14 {
+        let screen = try captureTVScreen(in: app)
+        let text = joinedText(screen.lines)
+        if markers.allSatisfy({ text.localizedCaseInsensitiveContains($0) }) &&
+           !text.localizedCaseInsensitiveContains("unlock the saved streaming settings") {
+          attachScreenshot(screen.screenshot, named: "pleazyng-localtest-files-books-tvos")
+          attachText(text, named: "pleazyng-localtest-files-books-tvos-visible-text")
+          return
+        }
+        XCUIRemote.shared.press(.down)
+        Thread.sleep(forTimeInterval: 0.4)
+      }
+      try attachScreenshot(of: app, named: "pleazyng-diagnostic-local-library-not-visible-tvos")
+      throw NSError(domain: "PleazyngStoreKitReviewCapture", code: 23,
+                    userInfo: [NSLocalizedDescriptionKey: "The local Files and Books controls did not scroll fully into view"])
     }
 
     // The tvOS Flutter engine can render controls without exposing them
