@@ -275,9 +275,10 @@ guard CommandLine.arguments.count == 2,
   exit(2)
 }
 let request = VNRecognizeTextRequest()
-request.usesLanguageCorrection = false
+request.usesLanguageCorrection = true
 request.recognitionLanguages = ["en-US"]
-request.recognitionLevel = .fast
+request.recognitionLevel = .accurate
+request.minimumTextHeight = 0.008
 for (stage, devices) in try request.supportedComputeStageDevices {
   guard let cpu = devices.first(where: { if case .cpu = $0 { return true }; return false }) else {
     fputs("Vision OCR has no CPU for required stage.\n", stderr)
