@@ -264,6 +264,18 @@ class WindowsPackageRecoveryTests(unittest.TestCase):
         rerun_jobs = [{'name': 'create-release', 'id': 703, 'status': 'in_progress',
                        'conclusion': None, 'run_id': assembly_id, 'run_attempt': 2,
                        'head_sha': assembly_sha}]
+        # GitHub returns skipped placeholders for each Linux matrix entry with
+        # the same literal expression name. They are irrelevant to this proof
+        # and must not make the Windows-only attempt merge ambiguous.
+        for attempt_jobs, attempt in ((jobs, 1), (rerun_jobs, 2)):
+            attempt_jobs.extend([
+                {'name': 'Compile Linux (${{ matrix.arch }})', 'id': 710 + attempt,
+                 'status': 'completed', 'conclusion': 'skipped', 'run_id': assembly_id,
+                 'run_attempt': attempt, 'head_sha': assembly_sha},
+                {'name': 'Compile Linux (${{ matrix.arch }})', 'id': 720 + attempt,
+                 'status': 'completed', 'conclusion': 'skipped', 'run_id': assembly_id,
+                 'run_attempt': attempt, 'head_sha': assembly_sha},
+            ])
         proof = {'source_run_id': 55, 'source_sha': self.sha, 'version': '3.0.52',
                  'qualification_run_id': 88, 'rebuild_tvos': True, 'repackage_windows': True,
                  'windows_repackaging': {'artifact_id': 900, 'artifact_digest': self.raw['digest']}}

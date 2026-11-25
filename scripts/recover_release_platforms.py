@@ -2049,13 +2049,6 @@ def verify_windows_repackaging_assembly(proof, assembly_run_id, repository=REPOS
 
     if not 1 <= assembly['run_attempt'] <= 100:
         raise RecoveryError('Windows packaging assembly attempt count is outside the supported bound')
-    attempts = [collection(
-        f'repos/{repository}/actions/runs/{assembly_run_id}/attempts/{attempt}/jobs', 'jobs')
-        for attempt in range(1, assembly['run_attempt'] + 1)]
-    try:
-        jobs = latest_attempt_jobs(attempts)
-    except release_ci.GateError as error:
-        raise RecoveryError(f'Windows packaging assembly attempt history is invalid: {error}') from error
     expected_jobs = {
         'package-windows': ('Recover verified immutable Windows x64 checkpoint',
                             'Build installer and portables', 'Attest Windows artifacts',
@@ -2063,6 +2056,28 @@ def verify_windows_repackaging_assembly(proof, assembly_run_id, repository=REPOS
         'Package Windows Chocolatey': ('Package Chocolatey release', 'Attest Chocolatey package',
                                        'Upload Chocolatey package'),
     }
+    expected_names = set(expected_jobs)
+    attempts = [collection(
+        f'repos/{repository}/actions/runs/{assembly_run_id}/attempts/{attempt}/jobs', 'jobs')
+        for attempt in range(1, assembly['run_attempt'] + 1)]
+    relevant_attempts = []
+    for attempt, page in enumerate(attempts, start=1):
+        if not isinstance(page, list):
+            raise RecoveryError(f'Windows packaging assembly attempt {attempt} omitted its job inventory')
+        relevant = []
+        for job in page:
+            if not isinstance(job, dict) or not isinstance(job.get('name'), str):
+                raise RecoveryError(f'Windows packaging assembly attempt {attempt} contains a malformed job')
+            if job['name'] in expected_names:
+                relevant.append(job)
+        relevant_attempts.append(relevant)
+    try:
+        # Matrix placeholders can repeat their literal name across unrelated
+        # platforms. Merge rerun history only for the two exact Windows jobs
+        # whose outputs this provenance record consumes.
+        jobs = latest_attempt_jobs(relevant_attempts)
+    except release_ci.GateError as error:
+        raise RecoveryError(f'Windows packaging assembly attempt history is invalid: {error}') from error
     selected_jobs = {}
     for name, required_steps in expected_jobs.items():
         matches = [job for job in jobs if job.get('name') == name]
