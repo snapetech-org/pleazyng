@@ -362,6 +362,8 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null
           set -o pipefail
           "$SDKMANAGER" --install emulator platform-tools 'build-tools;36.1.0' 'system-images;android-36;android-tv;x86_64'
+          test -x "$ANDROID_HOME/platform-tools/adb"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           printf 'no\n' | "$AVDMANAGER" create avd --force --name pleazyng-firetv-api36 \
             --package 'system-images;android-36;android-tv;x86_64' --device tv_1080p
 
