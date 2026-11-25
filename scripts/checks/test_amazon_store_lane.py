@@ -127,6 +127,27 @@ class AutomaticAmazonDeliveryTest(unittest.TestCase):
             delivery.submit(store, Mock(), 3210, "v3.0.51", {})
         store.call.assert_called_once_with("read open edit", "GET")
 
+    def test_large_attach_waits_for_the_same_uploaded_file(self):
+        not_ready = delivery.AmazonError("attach", 400, {"errors": [{"errorCode": "asset_not_ready"}]})
+        updated = {"id": "new", "versionCode": 3210}
+        store = Mock()
+        store.call.side_effect = [not_ready, not_ready, (updated, None)]
+        with patch.object(delivery.time, "sleep") as sleep:
+            self.assertEqual(delivery.attach_large_binary(store, "/edit", "uploaded-file"), updated)
+        self.assertEqual([attempt.args for attempt in sleep.call_args_list], [(2,), (4,)])
+        for attempt in store.call.call_args_list:
+            self.assertEqual(attempt.args, ("attach large APK", "POST", "/edit/apks/attach"))
+            self.assertEqual(attempt.kwargs, {"payload": {"fileId": "uploaded-file"}})
+
+    def test_large_attach_does_not_retry_other_errors(self):
+        store = Mock()
+        store.call.side_effect = delivery.AmazonError("attach", 400, {"errors": [{"errorCode": "invalid_apk"}]})
+        with patch.object(delivery.time, "sleep") as sleep:
+            with self.assertRaisesRegex(delivery.AmazonError, "invalid_apk"):
+                delivery.attach_large_binary(store, "/edit", "uploaded-file")
+        sleep.assert_not_called()
+        store.call.assert_called_once()
+
     def test_version_already_current_or_newer_clears_only_the_new_draft(self):
         store = Mock()
         store.call.side_effect = [

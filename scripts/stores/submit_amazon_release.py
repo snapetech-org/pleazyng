@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from urllib.parse import quote, urlencode
 
 STORE = "developer.amazon.com"
@@ -21,6 +22,7 @@ class AmazonError(RuntimeError):
         errors = result.get("errors") if isinstance(result, dict) else None
         codes = [item.get("errorCode") for item in errors or [] if isinstance(item, dict)]
         codes = [code for code in codes if isinstance(code, str) and re.fullmatch(r"[\w.-]{1,100}", code)]
+        self.codes = tuple(codes)
         super().__init__(f"Amazon {operation} returned HTTP {status}" + (f" ({', '.join(codes)})" if codes else ""))
 
 
@@ -113,6 +115,19 @@ def targeting_choices(targeting):
     )
 
 
+def attach_large_binary(store, edit, file_id):
+    for delay in (2, 4, 8, 15, 30, 60, 60, 60, 60, 60, 0):
+        try:
+            updated, _ = store.call("attach large APK", "POST", edit + "/apks/attach",
+                                    payload={"fileId": file_id})
+            return updated
+        except AmazonError as error:
+            if not delay or error.status != 400 or error.codes != ("asset_not_ready",):
+                raise
+            print(f"Amazon is processing the uploaded APK. Retrying attachment in {delay} seconds.", flush=True)
+            time.sleep(delay)
+
+
 def replace_binary(store, edit, old, apk, code):
     binary = edit + "/apks" + resource_path(old)
     if apk.stat().st_size <= LARGE_APK_BYTES:
@@ -124,7 +139,7 @@ def replace_binary(store, edit, old, apk, code):
         file_id = uploaded["fileId"]
         if not isinstance(file_id, str) or not file_id:
             raise ValueError("Amazon large upload did not return a file ID")
-        updated, _ = store.call("attach large APK", "POST", edit + "/apks/attach", payload={"fileId": file_id})
+        updated = attach_large_binary(store, edit, file_id)
         if updated["versionCode"] != code or updated["id"] == old["id"]:
             raise ValueError("Amazon did not attach the expected new APK")
         _, etag = store.call("read replaced APK", "GET", binary)
