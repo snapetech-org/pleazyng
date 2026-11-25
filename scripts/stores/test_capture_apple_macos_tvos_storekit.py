@@ -896,7 +896,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         window_source = window_support.read_text(encoding="utf-8")
         self.assertIn("try resizeMacWindowForStoreScreenshot(app)", source)
         self.assertIn("window.coordinate(withNormalizedOffset:", window_source)
-        self.assertIn("press(forDuration: 0.15, thenDragTo: target)", window_source)
+        self.assertIn("click(forDuration: 0.15, thenDragTo: target)", window_source)
         self.assertIn("private static let targetSize = CGSize(width: 912, height: 570)", window_source)
         self.assertNotIn("/usr/bin/osascript", window_source)
         self.assertLess(

@@ -42,7 +42,7 @@ private enum MacWindowResizeSupport {
         dx: targetSize.width - initialFrame.width,
         dy: targetSize.height - initialFrame.height
       ))
-      lowerRight.press(forDuration: 0.15, thenDragTo: target)
+      lowerRight.click(forDuration: 0.15, thenDragTo: target)
     }
 
     let deadline = Date().addingTimeInterval(10)
