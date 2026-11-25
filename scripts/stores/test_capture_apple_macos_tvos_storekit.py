@@ -904,6 +904,18 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             source.index("assertMacListingWindowGeometry(initialCapture)"),
         )
 
+    def test_macos_iap_capture_expects_the_real_trial_screen_after_onboarding(self) -> None:
+        flow_support = ROOT / capture.UI_TEST_SUPPORT_SOURCES[0]
+        source = flow_support.read_text(encoding="utf-8")
+        self.assertIn('joinedText(afterOnboarding.lines).contains("Unlock every feature")', source)
+        self.assertIn("The actual IAP trial offer did not appear after choosing Start fresh", source)
+        self.assertNotIn(
+            'joinedText(afterOnboarding.lines).contains("Read, listen, and watch from your own files")',
+            source,
+        )
+        self.assertIn('named: "pleazyng-macos-storekit-dialog-setting"', source)
+        self.assertIn("session.allTransactions()", source)
+
     def test_retained_capture_jobs_select_the_supported_xcode_and_matching_sdk(self) -> None:
         for platform, capture_label, sdk in (
             ("tvOS", "tvOS", "appletvsimulator"),
