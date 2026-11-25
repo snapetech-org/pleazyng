@@ -65,7 +65,7 @@ jobs:
     env:
       LANG: en_US.UTF-8
       GH_TOKEN: ${{ github.token }}
-      PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA: 67374d1ff76dd7f1d89a0e92ce678c6d3dd5ff7e
+      PLEAZYNG_CANDIDATE_TEST_HARNESS_SHA: 45fbbdde37a570cda979e27c602e447f5e7a6dd4
       PLEAZYNG_CANDIDATE_DV_BUILD_TOOL_SHA: 70c267ba92eba5f90e3abdcfa86f7518268df9ae
     steps:
       - name: Check out current trusted main tooling
