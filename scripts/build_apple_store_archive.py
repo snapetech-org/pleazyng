@@ -266,7 +266,13 @@ def archive(platform: str, archive_path: Path, export_path: Path, derived_data: 
                     binary = stage / 'exported-runner'
                     with package.open(plist_name.rsplit('/', 1)[0] + '/' + executable) as src, binary.open('wb') as dst:
                         shutil.copyfileobj(src, dst)
-                    signed = plistlib.loads(run(['codesign', '-d', '--entitlements', '-', str(binary)]))
+                    # Ask codesign for the plist without the raw entitlement blob header.
+                    try:
+                        signed = plistlib.loads(run(['codesign', '-d', '--entitlements', ':-', str(binary)]))
+                    except plistlib.InvalidFileException:
+                        raise ValueError('Exported iOS signature contains no readable entitlement plist') from None
+                    if not isinstance(signed, dict):
+                        raise ValueError('Exported iOS signature entitlement plist is not a dictionary')
                     actual = [key for key in ALL_CAR_CAPABILITIES if signed.get(key) is True]
                     if actual != bindings['Runner']['car_capabilities']:
                         raise ValueError('Exported car capabilities differ from the authorized host configuration')
