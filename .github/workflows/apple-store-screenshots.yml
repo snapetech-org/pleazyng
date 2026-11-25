@@ -909,7 +909,35 @@ jobs:
           PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
           PRODUCER_RUN_ATTEMPT: ${{ steps.producer.outputs.run_attempt }}
           PRODUCER_TOOLS_SHA: ${{ steps.producer.outputs.tool_sha }}
+          CAPTURE_TARGET: ${{ inputs.target }}
         run: |
+          if [[ "$CAPTURE_TARGET" == macos-in-use-capture-macos26-only ]]; then
+            expected_build_source_tag="v${PLEAZYNG_CAPTURE_PRODUCT_VERSION}-candidate.${PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA}"
+            receipt_path="$RUNNER_TEMP/apple-store-build-macos-input/build-provenance.json"
+            [[ -f "$receipt_path" && ! -L "$receipt_path" ]]
+            python3 - "$receipt_path" "$PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA" "$PLEAZYNG_CAPTURE_PRODUCT_VERSION" "$PLEAZYNG_CAPTURE_PRODUCT_BUILD" "$expected_build_source_tag" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          receipt = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected = {
+              "source_sha": sys.argv[2],
+              "product_version": sys.argv[3],
+              "product_build": sys.argv[4],
+              "source_tag": sys.argv[5],
+              "platform": "macOS",
+          }
+          mismatches = {key: (receipt.get(key), value) for key, value in expected.items()
+                        if receipt.get(key) != value}
+          if mismatches:
+              raise SystemExit(f"Producer build provenance does not match the frozen Mac source: {mismatches}")
+          PY
+            git fetch --no-tags origin "refs/tags/$expected_build_source_tag:refs/tags/$expected_build_source_tag"
+            [[ "$(git cat-file -t "refs/tags/$expected_build_source_tag")" == tag ]]
+            [[ "$(git rev-parse "refs/tags/$expected_build_source_tag^{commit}")" == "$PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA" ]]
+            export PLEAZYNG_CAPTURE_PRODUCT_SOURCE_TAG="$expected_build_source_tag"
+          fi
           python3 capture-tools/scripts/capture_apple_store_screenshots.py restore-build \
             --product-root "$GITHUB_WORKSPACE" \
             --artifact-dir "$RUNNER_TEMP/apple-store-build-macos-input" \
@@ -918,6 +946,9 @@ jobs:
             --producer-run-attempt "$PRODUCER_RUN_ATTEMPT" \
             --expected-capture-tools-sha "$PRODUCER_TOOLS_SHA" \
             --output-dir "$RUNNER_TEMP/apple-store-build-macos-restored"
+          if [[ "$CAPTURE_TARGET" == macos-in-use-capture-macos26-only ]]; then
+            echo "PLEAZYNG_CAPTURE_PRODUCT_SOURCE_TAG=$PLEAZYNG_CAPTURE_PRODUCT_SOURCE_TAG" >> "$GITHUB_ENV"
+          fi
           echo "APPLE_STORE_APP_PATH=$RUNNER_TEMP/apple-store-build-macos-restored/Pleazyng.app" >> "$GITHUB_ENV"
           echo "APPLE_STORE_BUILD_RECEIPT=$RUNNER_TEMP/apple-store-build-macos-restored/build-provenance.json" >> "$GITHUB_ENV"
 

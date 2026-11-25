@@ -208,6 +208,22 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
             "Validate and restore prior macOS build",
         ):
             self.assertIn(target, named_step_condition(macos, step_name), step_name)
+        restore = named_step_text(macos, "Validate and restore prior macOS build")
+        self.assertIn(
+            'expected_build_source_tag="v${PLEAZYNG_CAPTURE_PRODUCT_VERSION}-candidate.${PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA}"',
+            restore,
+        )
+        self.assertIn('"source_tag": sys.argv[5]', restore)
+        self.assertIn('"source_sha": sys.argv[2]', restore)
+        self.assertIn(
+            'git fetch --no-tags origin "refs/tags/$expected_build_source_tag:refs/tags/$expected_build_source_tag"',
+            restore,
+        )
+        self.assertIn('export PLEAZYNG_CAPTURE_PRODUCT_SOURCE_TAG="$expected_build_source_tag"', restore)
+        self.assertIn(
+            'echo "PLEAZYNG_CAPTURE_PRODUCT_SOURCE_TAG=$PLEAZYNG_CAPTURE_PRODUCT_SOURCE_TAG" >> "$GITHUB_ENV"',
+            restore,
+        )
         for step_name in (
             "Build the unsigned Mac App Store candidate",
             "Preserve the compiled unsigned Mac app before capture",
