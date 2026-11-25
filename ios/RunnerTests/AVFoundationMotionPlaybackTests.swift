@@ -18,16 +18,32 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     let clip = try XCTUnwrap(
       Bundle(for: type(of: self)).url(forResource: "Butterfly-209", withExtension: "mp4")
     )
-    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+    let scene = try XCTUnwrap(
+      UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first {
+        $0.session.role == .windowApplication && $0.activationState != .unattached
+      },
+      "The live video test requires the host app's window scene"
+    )
+    let window = UIWindow(windowScene: scene)
+    window.frame = CGRect(x: 0, y: 0, width: 320, height: 180)
     window.isHidden = false
     let core = MpvPlayerCore()
     core.experimentalDolbyVisionRequested = false
     XCTAssertTrue(core.initialize(in: window))
     defer {
-      let destroyed = expectation(description: "MPV video output disposed")
+      let destroyed = DispatchSemaphore(value: 0)
       core.dispose()
-      core.queue.async { destroyed.fulfill() }
-      wait(for: [destroyed], timeout: nativeCompletionTimeout)
+      core.queue.async { destroyed.signal() }
+      // Pump main during native teardown without XCTest's asynchronous
+      // diagnostics, which can fail to decode the simulator display.
+      let deadline = ProcessInfo.processInfo.systemUptime + playbackAdvanceTimeout
+      while destroyed.wait(timeout: .now()) == .timedOut {
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+          XCTFail("The AVFoundation output did not finish disposal")
+          break
+        }
+        pump(0.05)
+      }
       window.isHidden = true
     }
     core.setVisible(true)
@@ -42,13 +58,18 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
       // an audio track that the test does not exercise.
       XCTAssertSuccess(awaitProperty(core, name: "aid", value: "no"))
       XCTAssertSuccess(awaitProperty(core, name: "hwdec", value: "no"))
+      // Use the test window's resolution for the CPU mixer. The fixture's
+      // source rate, real video output, and later 45 fps requirement are unchanged.
+      _ = try runMotionCommand(core, ["vf", "add", "@fixture-scale:lavfi=[scale=320:180]"])
     #endif
     // Set play intent before loading so the first decoded frame does not race
     // AVFoundation output startup against a pause-property write.
     XCTAssertSuccess(awaitProperty(core, name: "pause", value: "no"))
     _ = try runMotionCommand(core, ["loadfile", clip.path])
+    print("AVFoundation motion fixture opened")
     try requirePlaybackAdvance(core, from: 0, timeout: playbackStartTimeout)
     XCTAssertEqual(try awaitGetProperty(core, name: "current-vo").get(), "avfoundation")
+    print("AVFoundation motion fixture video advanced")
     let entry = try XCTUnwrap(try awaitGetProperty(core, name: "playlist/0/id").get())
     for preset in ["performance", "quality"] {
       let before = core.timePos
@@ -56,6 +77,7 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
       XCTAssertSuccess(awaitProperty(core, name: "avfoundation-motion-interpolation", value: "yes"))
       try requirePlaybackAdvance(core, from: before, timeout: playbackAdvanceTimeout)
       XCTAssertEqual(try awaitGetProperty(core, name: "playlist/0/id").get(), entry)
+      print("AVFoundation motion fixture advanced with the \(preset) preset")
     }
     XCTAssertSuccess(awaitProperty(core, name: "avfoundation-motion-interpolation", value: "no"))
     let before = core.timePos
