@@ -294,6 +294,11 @@ class SimulatorSigningTests(unittest.TestCase):
 
 
 class IpadSimulatorSelectionTests(unittest.TestCase):
+    def test_xcode_project_inventory_is_skipped_only_for_ipad_capture(self) -> None:
+        self.assertTrue(capture.should_skip_xcode_project_inventory("iOS", "ipad"))
+        self.assertFalse(capture.should_skip_xcode_project_inventory("iOS", "iphone"))
+        self.assertFalse(capture.should_skip_xcode_project_inventory("tvOS", "ipad"))
+
     def test_reads_minimum_os_from_the_retained_app_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             app = Path(temporary) / "Pleazyng.app"

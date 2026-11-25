@@ -2142,6 +2142,10 @@ def sign_ios_app_for_simulator(
     return signing_state
 
 
+def should_skip_xcode_project_inventory(platform: str, category: str) -> bool:
+    return platform == "iOS" and category == "ipad"
+
+
 def run_app_in_use_ui_test(
     platform: str,
     simulator_udid: str,
@@ -2155,6 +2159,7 @@ def run_app_in_use_ui_test(
     simulator_entitlements: Path | None,
     extension_entitlements_source_path: Path | None,
     signing_state: dict[str, Any] | None,
+    skip_project_inventory: bool = False,
 ) -> tuple[Path, dict[str, Any], dict[str, Any] | None]:
     xcode_platform = "tvOS" if platform == "tvOS" else "iOS"
     deployment_target = "15.0" if platform == "tvOS" else "15.5"
@@ -2207,10 +2212,14 @@ def run_app_in_use_ui_test(
             "xcodegen", "generate", "--spec", str(project_spec), "--project", str(project_root),
         ], timeout=180)
         project = project_root / "PleazyngInUseCapture.xcodeproj"
-        project_inventory = json.loads(run([
-            "xcodebuild", "-list", "-json", "-project", str(project),
-        ], capture=True, timeout=180))
-        targets = project_inventory.get("project", {}).get("targets", [])
+        if skip_project_inventory:
+            targets = sorted(project_spec_data["targets"])
+            print("Using the generated single-target XCTest specification; build-for-testing will validate the scheme.")
+        else:
+            project_inventory = json.loads(run([
+                "xcodebuild", "-list", "-json", "-project", str(project),
+            ], capture=True, timeout=180))
+            targets = project_inventory.get("project", {}).get("targets", [])
         if targets != ["PleazyngInUseCaptureTests"]:
             raise RuntimeError(f"The UI capture project contains an unexpected target set: {targets}")
 
@@ -2226,6 +2235,7 @@ def run_app_in_use_ui_test(
             "-derivedDataPath", str(derived_data),
             "-parallel-testing-enabled", "NO",
         ]
+        print("Building the generated XCTest UI runner for the selected iPad simulator.")
         with build_log_path.open("w", encoding="utf-8") as log_file:
             result = subprocess.run(
                 build_command,
@@ -2241,6 +2251,7 @@ def run_app_in_use_ui_test(
                 f"The test-only UI runner build failed with exit code {result.returncode}; "
                 f"runner build log is retained at {build_log_path}:\n" + "\n".join(tail)
             )
+        print(f"Generated XCTest UI runner built successfully; log: {build_log_path.name}")
 
         runner_xcent = None
         runner_entitlements: dict[str, Any] = {}
@@ -2436,6 +2447,10 @@ def run_app_in_use_ui_test(
         runner_metadata = {
             "project_target": "PleazyngInUseCaptureTests",
             "project_targets": targets,
+            "project_target_inventory_method": (
+                "Known single-target XcodeGen project spec; xcodebuild build-for-testing validates the scheme"
+                if skip_project_inventory else "xcodebuild -list -json"
+            ),
             "project_sha256": sha256_file(project_spec),
             "test_source_sha256": sha256_file(test_source),
             "test_runner_entitlements_sha256": sha256_file(runner_xcent) if runner_xcent is not None else None,
@@ -2935,6 +2950,7 @@ def capture_simulator(
                 simulator_entitlements=simulator_entitlements,
                 extension_entitlements_source_path=extension_entitlements_source_path,
                 signing_state=signing_state,
+                skip_project_inventory=should_skip_xcode_project_inventory(platform, category),
             )
             if platform == "iOS":
                 simulator_runtime_diagnostics = capture_ios_keychain_diagnostics(
