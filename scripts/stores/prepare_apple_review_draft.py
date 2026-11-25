@@ -18,13 +18,6 @@ REQUIRED_SCREENSHOT_GROUPS = {
     'MAC_OS': {'MAC_PROFILE'},
     'TV_OS': {'TV_PROFILE'},
 }
-REVIEW_ITEM_RELATIONSHIPS = (
-    'appStoreVersion', 'appCustomProductPageVersion', 'appStoreVersionExperiment', 'appStoreVersionExperimentV2',
-    'appEvent', 'appAssetLibraryImage', 'appAssetLibraryVideo', 'backgroundAssetVersion',
-    'gameCenterAchievementVersion', 'gameCenterActivityVersion', 'gameCenterChallengeVersion',
-    'gameCenterLeaderboardSetVersion', 'gameCenterLeaderboardVersion', 'inAppPurchaseVersion',
-    'subscriptionVersion', 'subscriptionGroupVersion', 'retentionMessageVersion',
-)
 
 
 def exact_record(records, kind, matches):
@@ -120,8 +113,7 @@ def inspect_review(api, draft_id, platform):
         summary = {key: attributes.get(key) for key in ('platform', 'state', 'submittedDate')}
         if summary['state'] == 'READY_FOR_REVIEW':
             validated = exact_record([submission], 'reviewSubmissions', lambda _: True)
-            query = urlencode({'include': ','.join(REVIEW_ITEM_RELATIONSHIPS)})
-            items = api.items(f'/v1/reviewSubmissions/{validated["id"]}/items?{query}')
+            items = api.items(f'/v1/reviewSubmissions/{validated["id"]}/items?include=appStoreVersion')
             summary['items'] = [review_item_summary(item, draft_id) for item in items]
         submissions.append(summary)
     return {'localizations': localizations, 'app_review_detail': review_detail,
