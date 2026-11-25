@@ -709,6 +709,30 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "found 0"):
                 capture.verify_built_storekit_test_resource(products, catalog_hash)
 
+    def test_unsigned_simulator_app_is_recorded_without_weakening_signature_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "Pleazyng.app"
+            app.mkdir()
+            unsigned = subprocess.CompletedProcess(
+                ["codesign"], 1, "", "Pleazyng.app: code object is not signed at all\n"
+            )
+            with patch("subprocess.run", return_value=unsigned) as run:
+                self.assertEqual(capture.codesign_identity(app), {"status": "unsigned"})
+                run.assert_called_once()
+
+            (app / "_CodeSignature").mkdir()
+            with patch("subprocess.run", return_value=unsigned):
+                with self.assertRaisesRegex(RuntimeError, "invalid code signature"):
+                    capture.codesign_identity(app)
+
+            (app / "_CodeSignature").rmdir()
+            invalid = subprocess.CompletedProcess(
+                ["codesign"], 1, "", "code has restricted entitlements that fail validation\n"
+            )
+            with patch("subprocess.run", return_value=invalid):
+                with self.assertRaisesRegex(RuntimeError, "invalid code signature"):
+                    capture.codesign_identity(app)
+
     def test_retained_app_is_staged_unchanged_and_associated_in_xctestrun(self) -> None:
         identity = {
             "bundle_id": capture.BUNDLE_ID,

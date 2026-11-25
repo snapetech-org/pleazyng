@@ -3429,6 +3429,14 @@ def capture_ios_in_use_with_localtest_trial(
     test_source_sha = sha256_file(trial_test_source)
     if test_source_sha != localtest_provenance.get("ui_test_source_sha256"):
         raise ValueError("The LOCALTEST XCTest source hash differs from its capture provenance")
+    app_stage = json.loads((localtest_output / "xctestrun-app-association.json").read_text(encoding="utf-8"))
+    app_signature_before = app_stage.get("product_app_codesign_identity_before")
+    app_signature_staged = app_stage.get("product_app_codesign_identity_staged")
+    if (not isinstance(app_signature_before, dict)
+            or app_signature_before != app_signature_staged
+            or app_stage.get("product_app_bundle_sha256_before") != app_digest
+            or app_stage.get("product_app_bundle_sha256_staged") != app_digest):
+        raise ValueError("The XCTest staged app signature state differs from the retained product app")
 
     return {
         "filename": filename,
@@ -3474,6 +3482,8 @@ def capture_ios_in_use_with_localtest_trial(
             "test_identifier": listing_attachments[0].get("suggestedHumanReadableName"),
             "test_target_bundle_id": "org.snapetech.pleazyng.localtest.trial-review-tests",
             "product_app_bundle_id": BUNDLE_ID,
+            "product_app_codesign_identity": app_signature_staged,
+            "product_app_staged_bundle_sha256": app_stage.get("product_app_bundle_sha256_staged"),
             "simulator_udid": simulator.get("udid"),
             "xcode_version": localtest_provenance.get("xcode_version"),
             "screenshot_attachment": listing_attachments[0].get("exportedFileName"),
@@ -3485,6 +3495,13 @@ def capture_ios_in_use_with_localtest_trial(
             "environment": "LOCALTEST",
             "capture_provenance_file": "localtest/capture-provenance.json",
             "transaction_record": localtest_record,
+            "product_app_signature_evidence": {
+                "file": "localtest/xctestrun-app-association.json",
+                "identity_before": app_signature_before,
+                "identity_staged": app_signature_staged,
+                "app_bundle_sha256_before": app_stage.get("product_app_bundle_sha256_before"),
+                "app_bundle_sha256_staged": app_stage.get("product_app_bundle_sha256_staged"),
+            },
             "storekit_configuration_sha256": localtest_provenance.get("storekit_configuration_sha256"),
             "ui_test_source_sha256": test_source_sha,
             "lifetime_purchase_button_activated": False,

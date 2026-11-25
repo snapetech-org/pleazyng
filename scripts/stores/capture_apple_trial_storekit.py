@@ -589,8 +589,23 @@ def associate_xctestrun_with_app(xctestrun: Path, app_relative_path: str) -> dic
 
 
 def codesign_identity(app: Path) -> dict[str, str]:
-    """Verify the app signature and return stable, path-independent signature fields."""
-    command(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], timeout=300)
+    """Verify a signed app, or explicitly record a wholly unsigned Simulator bundle."""
+    verification = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=300,
+    )
+    verification_output = verification.stdout + verification.stderr
+    if verification.returncode != 0:
+        unsigned_diagnostic = "code object is not signed at all" in verification_output.lower()
+        has_bundle_signature = (app / "_CodeSignature").exists()
+        if unsigned_diagnostic and not has_bundle_signature:
+            return {"status": "unsigned"}
+        raise RuntimeError(
+            f"The retained Simulator app has an invalid code signature: {verification_output.strip()}"
+        )
     result = subprocess.run(
         ["/usr/bin/codesign", "-dv", "--verbose=4", str(app)],
         check=True,
