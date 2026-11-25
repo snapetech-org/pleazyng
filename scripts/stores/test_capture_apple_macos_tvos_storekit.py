@@ -876,7 +876,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             WORKFLOW,
         )
         self.assertIn(
-            "inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26'",
+            "inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26-intel'",
             WORKFLOW,
         )
 

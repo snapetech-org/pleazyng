@@ -166,7 +166,7 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
     def test_mac_listing_capture_probes_public_arm_display_before_restoring_the_app(self) -> None:
         macos = job_text("macos", "package")
         self.assertIn(
-            "runs-on: ${{ inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26' || ((inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel') }}",
+            "runs-on: ${{ inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26-intel' || ((inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel') }}",
             macos,
         )
         probe = named_step_text(macos, "Probe and select native Mac display mode before downloading the app")
@@ -195,7 +195,7 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         self.assertNotIn(target, ios)
         self.assertNotIn(target, tvos)
         self.assertNotIn(target, package)
-        self.assertIn("&& 'macos-26'", macos)
+        self.assertIn("&& 'macos-26-intel'", macos)
         self.assertIn("Select public macOS 26 Xcode for retained-app LOCALTEST", macos)
         xcode = named_step_text(macos, "Select public macOS 26 Xcode for retained-app LOCALTEST")
         self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", xcode)
