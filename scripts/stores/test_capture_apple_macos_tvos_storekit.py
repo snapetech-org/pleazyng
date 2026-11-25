@@ -770,7 +770,10 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             "(inputs.target == 'tvos-in-use-capture-only' || inputs.target == 'tvos-in-use-producer-only') && 'xcode-27'",
             WORKFLOW,
         )
-        self.assertIn("inputs.target == 'macos-in-use-capture-only' && 'xcode-27'", WORKFLOW)
+        self.assertIn(
+            "(inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27'",
+            WORKFLOW,
+        )
 
     def test_retained_capture_jobs_select_the_supported_xcode_and_matching_sdk(self) -> None:
         for platform, capture_label, sdk in (

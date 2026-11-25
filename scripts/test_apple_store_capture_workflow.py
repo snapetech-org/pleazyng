@@ -69,7 +69,7 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
             self.assertIn(f"APPLE_STORE_BUILD_RECEIPT={restored_path}", job, platform)
             self.assertIn(f"APPLE_STORE_BUILD_RECEIPT={fresh_receipt}", job, platform)
             self.assertIn(f"--build-receipt \"$APPLE_STORE_BUILD_RECEIPT\"", job, platform)
-            self.assertEqual(job.count('--build-receipt "$APPLE_STORE_BUILD_RECEIPT"'), {"ios": 1, "tvos": 3, "macos": 4}[platform])
+            self.assertEqual(job.count('--build-receipt "$APPLE_STORE_BUILD_RECEIPT"'), {"ios": 1, "tvos": 3, "macos": 5}[platform])
             self.assertNotIn(f"--build-receipt \"{restored_path}\"", job, platform)
 
             restore_name = {
@@ -118,6 +118,25 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         ))
         self.assertNotIn("tvos-in-use-capture-only", named_step_condition(
             tvos, "Capture the post-onboarding tvOS Files and Books screen"
+        ))
+
+    def test_mac_listing_capture_probes_public_arm_display_before_restoring_the_app(self) -> None:
+        macos = job_text("macos", "package")
+        self.assertIn(
+            "runs-on: ${{ (inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel' }}",
+            macos,
+        )
+        probe = named_step_text(macos, "Probe native Mac display modes before downloading the app")
+        self.assertIn("inputs.target == 'macos-listing-capture-only'", probe)
+        self.assertIn('"enumerated_modes": modes.map(record)', probe)
+        self.assertIn('"accepted_usable_native_mode_found": !usableAcceptedModes.isEmpty', probe)
+        self.assertIn("swift \"$RUNNER_TEMP/mac-display-capability.swift\"", probe)
+        self.assertLess(
+            macos.index("Probe native Mac display modes before downloading the app"),
+            macos.index("Download prior macOS build"),
+        )
+        self.assertIn("/Applications/Xcode_27.2.app/Contents/Developer", named_step_text(
+            macos, "Select supported Xcode for Mac XCTest capture"
         ))
 
     def test_pinned_macos_tvos_producer_builds_only_those_platforms_and_retains_evidence(self) -> None:
