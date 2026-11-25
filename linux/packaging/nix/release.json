@@ -1,9 +1,9 @@
 {
-  "version": "3.0.51",
-  "tag": "v3.0.51",
+  "version": "3.0.52",
+  "tag": "v3.0.52",
   "repository": "snapetech-org/pleazyng",
   "sha256": {
-    "x64": "30832ba1b818e73f0b2863dccd47320e9be8fef006c612a5a65fc153cbedd3b6",
-    "arm64": "850580445e1d264a485cc5d7d7a9eb5bb9e58ecb4ab5e00a08bb3503774746dd"
+    "x64": "d3d0d6cbc763faf048bf78e13c9de2ed6289c893ee1b1dc8728c225e2efe2676",
+    "arm64": "7161dc93a16c7541cdd53270a79be9f190aefe3d3cece21bef097ac022027424"
   }
 }
