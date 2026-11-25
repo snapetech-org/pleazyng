@@ -1,6 +1,6 @@
 # ng-runner-policy: hosted-default-v2
 name: Prepare an Apple review draft
-run-name: prepare-apple-review:${{ inputs.release_tag }}:${{ inputs.platform }}
+run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
 
 on:
   workflow_dispatch:
@@ -18,6 +18,10 @@ on:
         description: Successful run that delivered the selected platform and verified Apple processing
         type: string
         required: true
+      inspect_only:
+        description: Read the draft, screenshot placements, and purchase states without editing
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -74,7 +78,7 @@ jobs:
           [[ "$version_build" == "${RELEASE_TAG#v}"+* ]]
           printf 'version=%s\nbuild_number=%s\n' "${RELEASE_TAG#v}" "${version_build##*+}" >> "$GITHUB_OUTPUT"
 
-      - name: Attach the processed build to the existing draft
+      - name: Inspect or attach the processed build to the existing draft
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -82,10 +86,13 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build_number }}
+          INSPECT_ONLY: ${{ inputs.inspect_only }}
           PYTHONPATH: scripts
         run: |
+          args=()
+          if [[ "$INSPECT_ONLY" == true ]]; then args+=(--inspect-only); fi
           python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \
-            --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json"
+            --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json" "${args[@]}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

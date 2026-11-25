@@ -58,5 +58,21 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
         self.assertFalse(review.prepare(self.api, 'TV_OS', '3.0.51', '210')['changed'])
         self.assert_no_patch()
 
+    def test_inspect_reports_gaps_without_attaching_a_build(self):
+        self.api.items.side_effect = [
+            *tuple(self.api.items.side_effect),
+            [{'id': 'en-id', 'attributes': {'locale': 'en-US', 'description': 'Media player'}}],
+            [{'attributes': {'placementGroup': 'TV', 'placementType': 'APP_SCREENSHOT', 'state': 'APPROVED'}}],
+            [{'attributes': {'productId': 'pleazyng_lifetime_unlock', 'state': 'READY_TO_SUBMIT'}}],
+            [{'attributes': {'platform': 'TV_OS', 'state': 'READY_FOR_REVIEW', 'submittedDate': None}}],
+        ]
+        receipt = review.prepare(self.api, 'TV_OS', '3.0.51', '210', inspect_only=True)
+        self.assertFalse(receipt['exact_build_attached'])
+        self.assertFalse(receipt['changed'])
+        self.assertEqual(receipt['localizations'][0]['screenshots'], [{'group': 'TV', 'state': 'APPROVED'}])
+        self.assertEqual(receipt['purchases'][0]['state'], 'READY_TO_SUBMIT')
+        self.assertEqual(receipt['review_submissions'][0]['state'], 'READY_FOR_REVIEW')
+        self.assert_no_patch()
+
     def assert_no_patch(self):
         self.assertFalse(any(call.kwargs.get('method') == 'PATCH' for call in self.api.request.call_args_list))
