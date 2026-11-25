@@ -72,6 +72,7 @@ def inspect_review(api, draft_id, platform):
         metadata = locale['attributes']
         placements = api.items(f'/v1/appStoreVersionLocalizations/{locale["id"]}/placements')
         localizations.append({
+            'id': locale['id'],
             'locale': metadata.get('locale'),
             'description_present': bool(metadata.get('description')),
             'support_url_present': bool(metadata.get('supportUrl')),

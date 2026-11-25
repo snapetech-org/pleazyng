@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Place the exact release's reviewed Open media screenshot in its tvOS draft."""
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import struct
+import tempfile
+import time
+from urllib.parse import urlencode, urlsplit
+from urllib.request import Request
+
+from build_apple_store_archive import AppleProfileAPI, BUNDLE, _apple_api_token
+from stores.prepare_apple_review_draft import APP_ID, exact_record, prepare
+
+
+SCREENSHOT = 'tvos-01-files-and-books-localtest.png'
+SCREENSHOT_TYPE = 'APP_SCREENSHOT'
+CATEGORY = 'APP_SCREENSHOTS_AND_PREVIEWS'
+SIZE = (1920, 1080)
+
+
+def read_capture(directory, version, build, source, run, attempt, workflow_source):
+    data = json.loads((directory / 'capture-provenance.json').read_text())
+    product = data['product']
+    capture = data['capture']
+    lineage = product['source_lineage']
+    record = data['screenshots'][SCREENSHOT]
+    if ((product['version'], product['build'], product['bundle_id'], product['source_sha'])
+            != (version, build, BUNDLE, source)
+            or lineage['workflow_source_sha'] != workflow_source
+            or (capture['run_id'], capture['run_attempt'], capture['platform']) != (run, attempt, 'tvos')
+            or tuple(record['dimensions']) != SIZE or not 0 < record['size_bytes'] <= 4 * 1024 * 1024):
+        raise ValueError('Screenshot capture does not match the exact published tvOS release')
+    with (directory / SCREENSHOT).open('rb') as stream:
+        image = stream.read(4 * 1024 * 1024 + 1)
+    digest = hashlib.sha256(image).hexdigest()
+    if (len(image) != record['size_bytes'] or digest != record['sha256']
+            or image[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+            or struct.unpack('>IIBB', image[16:26]) != (*SIZE, 8, 2)):
+        raise ValueError('Unexpected tvOS screenshot digest, PNG format, or dimensions')
+    return image, digest
+
+
+def screenshot_spec(api, size_bytes):
+    data = exact_record(api.items('/v1/appAssetLibraryRefData'), 'appAssetLibraryRefData', lambda _: True)
+    catalog = data['attributes']
+    types = [entry for entry in catalog['placementTypes'] if entry['placementTypeId'] == SCREENSHOT_TYPE]
+    if len(types) != 1 or CATEGORY not in types[0]['acceptsAssetCategories']:
+        raise ValueError('Apple does not accept screenshot images in the expected asset category')
+    limits = {
+        group: limit['maxCount']
+        for feature in catalog['features'] if feature['featureId'] == 'APP_STORE_VERSIONS'
+        for policy in feature['placementPolicies'] if policy['placementType'] == SCREENSHOT_TYPE
+        for limit in policy['groupLimits'] for group in limit['groupIds']
+    }
+    tv_groups = {group['placementProfileGroupId'] for group in catalog['placementProfileGroups']
+                 if group['platform'] == 'TV_APP_STORE'}
+    specs = {spec['specId'] for spec in catalog['imageSpecs']
+             if spec['dimensions'] == dict(zip(('minWidth', 'maxWidth', 'minHeight', 'maxHeight'),
+                                               (SIZE[0], SIZE[0], SIZE[1], SIZE[1])))
+             and 'image/png' in spec['mimeTypes'] and size_bytes <= spec['maxFileSize']}
+    matches = [(mapping['placementGroupId'], specs.intersection(mapping['specs']))
+               for mapping in types[0]['specMappings']
+               if mapping['placementGroupId'] in tv_groups & limits.keys() and specs.intersection(mapping['specs'])]
+    if len(matches) != 1:
+        raise ValueError('The approved 1920×1080 PNG does not match one Apple TV placement group')
+    group, accepted_specs = matches[0]
+    return group, accepted_specs, limits[group]
+
+
+def upload_parts(api, operations, image):
+    offset = 0
+    for operation in sorted(operations, key=lambda item: item['offset']):
+        url = urlsplit(operation['url'])
+        length = operation['length']
+        headers = {item['name']: item['value'] for item in operation['requestHeaders']}
+        if (operation['method'] != 'PUT' or url.scheme != 'https' or url.username or url.password
+                or not re.fullmatch(r'(?:[a-z0-9-]+\.)+blobstore\.apple\.com', url.netloc)
+                or operation['offset'] != offset or not 0 < length <= len(image) - offset
+                or {'authorization', 'cookie', 'proxy-authorization'} & {name.lower() for name in headers}):
+            raise ValueError('Unexpected Apple asset-upload operation')
+        request = Request(operation['url'], data=image[offset:offset + length], headers=headers, method='PUT')
+        try:
+            with api.opener.open(request, timeout=60) as response:
+                if response.status not in (200, 201, 202, 204):
+                    raise ValueError('Apple asset storage did not accept the screenshot part')
+        except OSError:
+            raise RuntimeError('Apple asset storage could not accept the screenshot upload') from None
+        offset += length
+    if offset != len(image):
+        raise ValueError('Apple upload operations did not cover the complete screenshot')
+
+
+def wait_for_asset(api, path, *, accepted, pending):
+    for _ in range(24):
+        item = api.request(path)['data']
+        state = item['attributes']['state']
+        if state in accepted:
+            return item
+        if state not in pending:
+            raise RuntimeError(f'Apple cannot use the screenshot in state {state}')
+        time.sleep(5)
+    raise TimeoutError('Apple is still processing the exact screenshot')
+
+
+def stage(api, version, build, image, digest):
+    inspection = prepare(api, 'TV_OS', version, build, inspect_only=True)
+    if not inspection['exact_build_attached'] or inspection['observed_draft_state'] != 'PREPARE_FOR_SUBMISSION':
+        raise ValueError('The exact attached build must be an editable Apple TV review draft')
+    localizations = [locale for locale in inspection['localizations'] if locale['locale'] == 'en-US']
+    if len(localizations) != 1:
+        raise ValueError('Expected one en-US App Store version localization')
+    locale_id = localizations[0]['id']
+    library = api.request(f'/v1/apps/{APP_ID}/assetLibrary')['data']
+    if library.get('type') != 'appAssetLibraries':
+        raise ValueError('App Store Connect returned an unexpected asset library')
+    group, accepted_specs, limit = screenshot_spec(api, len(image))
+
+    reference = f'Pleazyng {version} Apple TV Open media {digest[:16]}'
+    filter_query = urlencode({'filter[referenceName]': reference})
+    assets = api.items(f'/v1/appAssetLibraries/{library["id"]}/images?{filter_query}')
+    expected_name = f'pleazyng-{version}-tvos-open-media.png'
+    if assets:
+        asset = exact_record(assets, 'appAssetLibraryImages', lambda meta:
+                             meta['referenceName'] == reference and meta['fileName'] == expected_name
+                             and meta['fileSize'] == len(image) and meta['category'] == CATEGORY)
+    else:
+        if sum(item['group'] == group for item in localizations[0]['screenshots']) >= limit:
+            raise ValueError('The Apple TV screenshot group has reached its placement limit')
+        asset = api.request('/v1/appAssetLibraryImages', {'data': {
+            'type': 'appAssetLibraryImages',
+            'attributes': {'fileName': expected_name, 'fileSize': len(image), 'category': CATEGORY,
+                           'referenceName': reference},
+            'relationships': {'assetLibrary': {'data': {'type': library['type'], 'id': library['id']}}},
+        }})['data']
+    image_path = f'/v1/appAssetLibraryImages/{asset["id"]}'
+    if asset['attributes']['state'] == 'AWAITING_UPLOAD':
+        upload_parts(api, asset['attributes']['uploadOperations'], image)
+        api.request(image_path, {'data': {'type': 'appAssetLibraryImages', 'id': asset['id'],
+                                          'attributes': {'uploaded': True}}}, method='PATCH')
+    asset = wait_for_asset(api, image_path, accepted={'PREPARE_FOR_SUBMISSION', 'APPROVED'},
+                           pending={'UPLOAD_COMPLETE', 'PROCESSING'})
+    if asset['attributes']['specId'] not in accepted_specs:
+        raise ValueError('Apple processed the image against an incompatible screenshot specification')
+
+    placement_query = urlencode({'filter[appStoreVersionLocalization]': locale_id,
+                                 'filter[placementType]': SCREENSHOT_TYPE, 'filter[placementGroup]': group})
+    placements = api.items(f'{image_path}/placements?{placement_query}')
+    if placements:
+        placement = exact_record(placements, 'appAssetLibraryPlacements', lambda attrs:
+                                 attrs['placementGroup'] == group and attrs['placementType'] == SCREENSHOT_TYPE)
+    else:
+        if sum(item['group'] == group for item in localizations[0]['screenshots']) >= limit:
+            raise ValueError('The Apple TV screenshot group has reached its placement limit')
+        placement = api.request('/v1/appAssetLibraryPlacements', {'data': {
+            'type': 'appAssetLibraryPlacements',
+            'attributes': {'placementType': SCREENSHOT_TYPE, 'placementGroup': group},
+            'relationships': {
+                'image': {'data': {'type': 'appAssetLibraryImages', 'id': asset['id']}},
+                'appStoreVersionLocalization': {'data': {'type': 'appStoreVersionLocalizations', 'id': locale_id}},
+            },
+        }})['data']
+    placement = wait_for_asset(api, f'/v1/appAssetLibraryPlacements/{placement["id"]}',
+                               accepted={'ACTIVE'}, pending={'ASSET_PROCESSING'})
+    return {'version': version, 'build': build, 'platform': 'TV_OS', 'locale': 'en-US',
+            'capture_sha256': digest, 'placement_group': group, 'placement_id': placement['id'],
+            'image_id': asset['id'], 'placement_state': placement['attributes']['state']}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for field in ('version', 'build', 'source', 'capture-run', 'capture-attempt', 'capture-workflow-source'):
+        parser.add_argument(f'--{field}', required=True)
+    parser.add_argument('--capture-dir', type=Path, required=True)
+    parser.add_argument('--receipt', type=Path, required=True)
+    args = parser.parse_args()
+    image, digest = read_capture(args.capture_dir, args.version, args.build, args.source,
+                                 args.capture_run, args.capture_attempt, args.capture_workflow_source)
+    with tempfile.TemporaryDirectory(prefix='pleazyng-apple-screenshots-') as directory:
+        api = AppleProfileAPI(_apple_api_token(Path(directory)))
+        receipt = stage(api, args.version, args.build, image, digest)
+    args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')
+    print(f'Apple TV Open media screenshot is active on the {args.version} draft')
+
+
+if __name__ == '__main__':
+    main()
