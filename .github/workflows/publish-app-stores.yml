@@ -475,7 +475,8 @@ jobs:
     needs: validate-release
     if: ${{ inputs.channel == 'app-store-ios' || inputs.channel == 'app-store-tvos' }}
     timeout-minutes: 120
-    runs-on: macos-15
+    # Transporter uploads the existing signed IPA without compiling or executing it.
+    runs-on: macos-26-intel
     permissions:
       actions: read
       contents: read
