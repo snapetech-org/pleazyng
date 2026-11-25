@@ -898,6 +898,10 @@ class MacListingCaptureTests(unittest.TestCase):
         capture.require_macos_listing_markers(
             {"recognized_text": "IMPORT FILES  Add source"}, before_navigation=False
         )
+        capture.require_macos_listing_markers(
+            {"recognized_text": "FILESAND BOOKS Search saved library Add a source or import a book"},
+            before_navigation=False,
+        )
 
     def test_mac_native_click_point_comes_from_visible_ocr_inside_product_window(self) -> None:
         evidence = {

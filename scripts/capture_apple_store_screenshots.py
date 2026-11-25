@@ -2608,9 +2608,11 @@ def require_macos_listing_markers(evidence: dict[str, Any], *, before_navigation
         if "start fresh" not in text and "use files and books" not in text:
             raise ValueError(f"The fresh app screen did not visibly offer a local setup path; Vision saw: {text}")
         return
-    has_import = "import files" in text
+    has_library_controls = "import files" in text or (
+        "filesandbooks" in text.replace(" ", "") and "search saved library" in text
+    )
     has_empty_state = "add a source or import a book" in text or "add source" in text
-    if not has_import or not has_empty_state:
+    if not has_library_controls or not has_empty_state:
         raise ValueError(f"The real empty Files and Books screen was not visible; Vision saw: {text}")
 
 
