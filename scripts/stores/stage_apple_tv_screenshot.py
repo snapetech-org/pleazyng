@@ -81,7 +81,11 @@ def upload_parts(api, operations, image):
                 or not re.fullmatch(r'(?:[a-z0-9-]+\.)+blobstore\.apple\.com', url.netloc)
                 or operation['offset'] != offset or not 0 < length <= len(image) - offset
                 or {'authorization', 'cookie', 'proxy-authorization'} & {name.lower() for name in headers}):
-            raise ValueError('Unexpected Apple asset-upload operation')
+            # Apple storage URLs and header values are temporary credentials. Keep those out of logs.
+            raise ValueError('Unexpected Apple asset-upload operation '
+                             f'(method {operation["method"]}, scheme {url.scheme}, host {url.hostname}, '
+                             f'offset {operation["offset"]}, length {length}, expected offset {offset}, '
+                             f'image bytes {len(image)}, header names {sorted(headers)})')
         request = Request(operation['url'], data=image[offset:offset + length], headers=headers, method='PUT')
         try:
             with api.opener.open(request, timeout=60) as response:
