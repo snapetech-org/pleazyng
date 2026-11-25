@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import binascii
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import posixpath
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -152,6 +154,100 @@ final class PleazyngAppInUseCaptureTests: XCTestCase {
         #endif
 
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = "pleazyng-app-in-use-screen"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}
+'''
+
+MACOS_APP_IN_USE_UI_TEST = r'''import CoreGraphics
+import Foundation
+import XCTest
+
+final class PleazyngMacAppInUseCaptureTests: XCTestCase {
+    func testCaptureFilesAndBooksScreen() throws {
+        let app = XCUIApplication(url: URL(fileURLWithPath: __PLEAZYNG_CAPTURE_APP_PATH__))
+        app.launch()
+
+        let useFiles = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Use files and books")
+        ).firstMatch
+        XCTAssertTrue(useFiles.waitForExistence(timeout: 60), "The real first-launch Files and Books action was not available")
+        useFiles.tap()
+
+        XCTAssertTrue(app.buttons["Add source"].waitForExistence(timeout: 60), "The local Files and Books screen did not open")
+        XCTAssertTrue(app.buttons["Import files"].exists, "The local Files and Books import action is missing")
+        XCTAssertTrue(
+            app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "Add a source or import a book")).firstMatch.exists,
+            "The empty local library state is missing"
+        )
+
+        let window = app.windows.firstMatch
+        let initialScreenshot = XCTAttachment(screenshot: window.screenshot())
+        initialScreenshot.name = "pleazyng-macos-window-before-fullscreen"
+        initialScreenshot.lifetime = .keepAlways
+        add(initialScreenshot)
+
+        let displayID = CGMainDisplayID()
+        guard let modes = CGDisplayCopyAllDisplayModes(displayID, nil) as? [CGDisplayMode] else {
+            XCTFail("The hosted Mac did not expose supported display modes")
+            return
+        }
+        let acceptedSizes: Set<String> = ["1280x800", "1440x900", "2560x1600", "2880x1800"]
+        let candidates = modes.filter { mode in
+            acceptedSizes.contains("\(mode.pixelWidth)x\(mode.pixelHeight)")
+                && mode.isUsableForDesktopGUI()
+        }
+        guard let selectedMode = candidates.max(by: {
+            $0.pixelWidth * $0.pixelHeight < $1.pixelWidth * $1.pixelHeight
+        }) else {
+            XCTFail("The hosted Mac exposed no usable display mode matching an Apple Mac screenshot size")
+            return
+        }
+
+        let switchResult = CGDisplaySetDisplayMode(displayID, selectedMode, nil)
+        guard switchResult == .success else {
+            XCTFail("Could not select a native Apple-approved Mac screenshot display mode: \(switchResult)")
+            return
+        }
+        Thread.sleep(forTimeInterval: 2)
+        guard let activeMode = CGDisplayCopyDisplayMode(displayID) else {
+            XCTFail("The selected Mac screenshot display mode could not be read back")
+            return
+        }
+        XCTAssertEqual(activeMode.pixelWidth, selectedMode.pixelWidth)
+        XCTAssertEqual(activeMode.pixelHeight, selectedMode.pixelHeight)
+
+        let modeEvidence: [String: Any] = [
+            "display_id": Int(displayID),
+            "selected_mode_points": "\(selectedMode.width)x\(selectedMode.height)",
+            "selected_mode_pixels": "\(selectedMode.pixelWidth)x\(selectedMode.pixelHeight)",
+            "active_mode_points": "\(activeMode.width)x\(activeMode.height)",
+            "active_mode_pixels": "\(activeMode.pixelWidth)x\(activeMode.pixelHeight)",
+            "usable_for_desktop_gui": activeMode.isUsableForDesktopGUI(),
+            "native_fullscreen_shortcut": "Control-Command-F",
+        ]
+        let modeEvidenceData = try JSONSerialization.data(withJSONObject: modeEvidence, options: [.sortedKeys])
+        try modeEvidenceData.write(
+            to: URL(fileURLWithPath: __PLEAZYNG_CAPTURE_DISPLAY_MODE_EVIDENCE__),
+            options: .atomic
+        )
+
+        app.typeKey("f", modifierFlags: [.control, .command])
+        let fullScreenDeadline = Date().addingTimeInterval(30)
+        while Date() < fullScreenDeadline {
+            let frame = window.frame
+            if abs(frame.width - CGFloat(selectedMode.width)) < 1
+                && abs(frame.height - CGFloat(selectedMode.height)) < 1 {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        XCTAssertEqual(window.frame.width, CGFloat(selectedMode.width), accuracy: 1, "The app did not enter native fullscreen width")
+        XCTAssertEqual(window.frame.height, CGFloat(selectedMode.height), accuracy: 1, "The app did not enter native fullscreen height")
+
+        let attachment = XCTAttachment(screenshot: window.screenshot())
         attachment.name = "pleazyng-app-in-use-screen"
         attachment.lifetime = .keepAlways
         add(attachment)
@@ -389,8 +485,8 @@ def sha256_tree(root: Path) -> str:
 
 def png_dimensions(path: Path) -> tuple[int, int]:
     with path.open("rb") as source:
-        header = source.read(24)
-    if len(header) != 24 or header[:8] != PNG_SIGNATURE or header[12:16] != b"IHDR":
+        header = source.read(26)
+    if len(header) != 26 or header[:8] != PNG_SIGNATURE or header[12:16] != b"IHDR":
         raise ValueError(f"Capture is not a valid PNG: {path}")
     width = int.from_bytes(header[16:20], "big")
     height = int.from_bytes(header[20:24], "big")
@@ -399,6 +495,152 @@ def png_dimensions(path: Path) -> tuple[int, int]:
     if path.stat().st_size < 16_000:
         raise ValueError(f"Capture is unexpectedly small to be a complete app screenshot: {path}")
     return width, height
+
+
+def png_color_type(path: Path) -> int:
+    with path.open("rb") as source:
+        header = source.read(26)
+    if len(header) != 26 or header[:8] != PNG_SIGNATURE or header[12:16] != b"IHDR":
+        raise ValueError(f"Capture is not a valid PNG: {path}")
+    return header[25]
+
+
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    checksum = binascii.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + chunk_type + payload + struct.pack(">I", checksum)
+
+
+def normalize_opaque_rgb_png(path: Path) -> dict[str, Any]:
+    """Strip an all-opaque PNG alpha channel without changing screenshot RGB samples."""
+    data = path.read_bytes()
+    if data[:8] != PNG_SIGNATURE:
+        raise ValueError(f"Capture is not a valid PNG: {path}")
+    chunks: list[tuple[bytes, bytes]] = []
+    offset = len(PNG_SIGNATURE)
+    while offset < len(data):
+        if len(data) - offset < 12:
+            raise ValueError(f"PNG has a truncated chunk header: {path}")
+        length = struct.unpack(">I", data[offset:offset + 4])[0]
+        chunk_type = data[offset + 4:offset + 8]
+        payload_start = offset + 8
+        payload_end = payload_start + length
+        checksum_end = payload_end + 4
+        if checksum_end > len(data):
+            raise ValueError(f"PNG has a truncated {chunk_type!r} chunk: {path}")
+        payload = data[payload_start:payload_end]
+        expected_checksum = struct.unpack(">I", data[payload_end:checksum_end])[0]
+        actual_checksum = binascii.crc32(chunk_type + payload) & 0xFFFFFFFF
+        if actual_checksum != expected_checksum:
+            raise ValueError(f"PNG chunk {chunk_type!r} has an invalid checksum: {path}")
+        chunks.append((chunk_type, payload))
+        offset = checksum_end
+        if chunk_type == b"IEND":
+            break
+    if offset != len(data) or not chunks or chunks[0][0] != b"IHDR":
+        raise ValueError(f"PNG chunk ordering or trailing data is invalid: {path}")
+    header = chunks[0][1]
+    if len(header) != 13:
+        raise ValueError(f"PNG IHDR chunk has an invalid length: {path}")
+    width, height = struct.unpack(">II", header[:8])
+    bit_depth, color_type, _compression, _filter, interlace = header[8:13]
+    if color_type == 2:
+        return {
+            "source_color_type": 2,
+            "output_color_type": 2,
+            "alpha_was_opaque": None,
+            "rgb_samples_modified": False,
+        }
+    if color_type != 6 or bit_depth != 8 or interlace != 0:
+        raise ValueError(
+            f"Apple listing PNG must be RGB or opaque 8-bit RGBA; received color type {color_type}, "
+            f"bit depth {bit_depth}, interlace {interlace}: {path}"
+        )
+    compressed = b"".join(payload for kind, payload in chunks if kind == b"IDAT")
+    if not compressed:
+        raise ValueError(f"PNG has no image data: {path}")
+    filtered_data = zlib.decompress(compressed)
+    bytes_per_pixel = 4
+    row_bytes = width * bytes_per_pixel
+    expected_length = height * (row_bytes + 1)
+    if len(filtered_data) != expected_length:
+        raise ValueError(f"PNG scanline data has an unexpected size: {path}")
+
+    def paeth(left: int, above: int, upper_left: int) -> int:
+        estimate = left + above - upper_left
+        left_distance = abs(estimate - left)
+        above_distance = abs(estimate - above)
+        upper_left_distance = abs(estimate - upper_left)
+        if left_distance <= above_distance and left_distance <= upper_left_distance:
+            return left
+        if above_distance <= upper_left_distance:
+            return above
+        return upper_left
+
+    rgb_scanlines = bytearray()
+    previous = bytearray(row_bytes)
+    source_offset = 0
+    for _row in range(height):
+        filter_type = filtered_data[source_offset]
+        source_offset += 1
+        filtered = filtered_data[source_offset:source_offset + row_bytes]
+        source_offset += row_bytes
+        reconstructed = bytearray(row_bytes)
+        for index, value in enumerate(filtered):
+            left = reconstructed[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+            above = previous[index]
+            upper_left = previous[index - bytes_per_pixel] if index >= bytes_per_pixel else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            elif filter_type == 4:
+                predictor = paeth(left, above, upper_left)
+            else:
+                raise ValueError(f"PNG uses an unsupported scanline filter {filter_type}: {path}")
+            reconstructed[index] = (value + predictor) & 0xFF
+        for index in range(0, row_bytes, bytes_per_pixel):
+            if reconstructed[index + 3] != 255:
+                raise ValueError(f"Screenshot contains non-opaque pixels; refusing to flatten its UI: {path}")
+            rgb_scanlines.extend(reconstructed[index:index + 3])
+        previous = reconstructed
+
+    rgb_rows = bytearray()
+    row_rgb_bytes = width * 3
+    for row in range(height):
+        start = row * row_rgb_bytes
+        rgb_rows.append(0)
+        rgb_rows.extend(rgb_scanlines[start:start + row_rgb_bytes])
+
+    updated_header = bytearray(header)
+    updated_header[9] = 2
+    output_data = bytearray(PNG_SIGNATURE)
+    inserted_image_data = False
+    for chunk_type, payload in chunks:
+        if chunk_type == b"IHDR":
+            payload = bytes(updated_header)
+        elif chunk_type == b"IDAT":
+            if not inserted_image_data:
+                output_data.extend(_png_chunk(b"IDAT", zlib.compress(bytes(rgb_rows), level=9)))
+                inserted_image_data = True
+            continue
+        elif chunk_type == b"tRNS":
+            continue
+        output_data.extend(_png_chunk(chunk_type, payload))
+    if not inserted_image_data:
+        raise ValueError(f"PNG image data was not preserved during RGB conversion: {path}")
+    path.write_bytes(output_data)
+    if png_color_type(path) != 2:
+        raise ValueError(f"Could not normalize screenshot to an opaque RGB PNG: {path}")
+    return {
+        "source_color_type": 6,
+        "output_color_type": 2,
+        "alpha_was_opaque": True,
+        "rgb_samples_modified": False,
+    }
 
 
 def require_visible_screen_content(path: Path) -> dict[str, Any]:
@@ -2044,6 +2286,142 @@ def run_app_in_use_ui_test(
         return screenshot, runner_metadata, signing_state
 
 
+def run_macos_app_in_use_ui_test(app: Path, output: Path) -> tuple[Path, dict[str, Any]]:
+    project_spec_data = {
+        "name": "PleazyngMacInUseCapture",
+        "options": {
+            "bundleIdPrefix": "org.snapetech.pleazyng.capture",
+            "xcodeVersion": "26.5",
+            "deploymentTarget": {"macOS": "14.0"},
+        },
+        "targets": {
+            "PleazyngMacAppInUseCaptureTests": {
+                "type": "bundle.ui-testing",
+                "platform": "macOS",
+                "sources": ["CaptureTests.swift"],
+                "settings": {
+                    "base": {
+                        "PRODUCT_BUNDLE_IDENTIFIER": "org.snapetech.pleazyng.capture-macos-ui-tests",
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "SWIFT_VERSION": "5.0",
+                        "CODE_SIGN_IDENTITY": "-",
+                    },
+                },
+            },
+        },
+        "schemes": {
+            "PleazyngMacInUseCapture": {
+                "build": {"targets": {"PleazyngMacAppInUseCaptureTests": ["test"]}},
+                "test": {
+                    "targets": ["PleazyngMacAppInUseCaptureTests"],
+                    "captureScreenshotsAutomatically": False,
+                    "deleteScreenshotsWhenEachTestSucceeds": True,
+                },
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory(prefix="pleazyng-macos-in-use-ui-test-") as temporary:
+        project_root = Path(temporary)
+        project_spec = project_root / "project.json"
+        project_spec.write_text(json.dumps(project_spec_data, indent=2) + "\n", encoding="utf-8")
+        test_source = project_root / "CaptureTests.swift"
+        test_source.write_text(
+            MACOS_APP_IN_USE_UI_TEST
+            .replace("__PLEAZYNG_CAPTURE_APP_PATH__", json.dumps(str(app)))
+            .replace(
+                "__PLEAZYNG_CAPTURE_DISPLAY_MODE_EVIDENCE__",
+                json.dumps(str(output / "macos-01-files-and-books.display-mode.json")),
+            ),
+            encoding="utf-8",
+        )
+        run([
+            "xcodegen", "generate", "--spec", str(project_spec), "--project", str(project_root),
+        ], timeout=180)
+        project = project_root / "PleazyngMacInUseCapture.xcodeproj"
+        project_inventory = json.loads(run([
+            "xcodebuild", "-list", "-json", "-project", str(project),
+        ], capture=True, timeout=180))
+        targets = project_inventory.get("project", {}).get("targets", [])
+        if targets != ["PleazyngMacAppInUseCaptureTests"]:
+            raise RuntimeError(f"The Mac UI capture project contains an unexpected target set: {targets}")
+
+        result_bundle = project_root / "capture.xcresult"
+        log_path = output / "macos-01-files-and-books.ui-test.log"
+        command = [
+            "xcodebuild", "test",
+            "-project", str(project),
+            "-scheme", "PleazyngMacInUseCapture",
+            "-destination", "platform=macOS",
+            "-derivedDataPath", str(project_root / "derived-data"),
+            "-resultBundlePath", str(result_bundle),
+            "-parallel-testing-enabled", "NO",
+            "-testLanguage", "en",
+            "-testRegion", "US",
+            "-only-testing:PleazyngMacAppInUseCaptureTests/PleazyngMacAppInUseCaptureTests/testCaptureFilesAndBooksScreen",
+        ]
+        with log_path.open("w", encoding="utf-8") as log_file:
+            result = subprocess.run(
+                command,
+                check=False,
+                text=True,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                timeout=1800,
+            )
+        if result.returncode != 0:
+            failed_result_bundle = output / "macos-01-files-and-books.failed.xcresult"
+            if result_bundle.is_dir():
+                shutil.copytree(result_bundle, failed_result_bundle)
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
+            raise RuntimeError(
+                f"The Mac app-in-use UI test failed with exit code {result.returncode}; "
+                f"runner log is retained at {log_path}; failure result bundle is retained at "
+                f"{failed_result_bundle if failed_result_bundle.exists() else 'unavailable'}:\n"
+                + "\n".join(tail)
+            )
+
+        export_dir = project_root / "exported-attachments"
+        run([
+            "xcrun", "xcresulttool", "export", "attachments",
+            "--path", str(result_bundle),
+            "--output-path", str(export_dir),
+        ], timeout=180)
+        manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
+        matches = [
+            attachment
+            for test in manifest
+            for attachment in test.get("attachments", [])
+            if attachment.get("suggestedHumanReadableName", "").startswith("pleazyng-app-in-use-screen")
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(f"Expected one named Mac app screenshot attachment; found {len(matches)}")
+        exported_name = matches[0].get("exportedFileName", "")
+        if not exported_name or Path(exported_name).name != exported_name:
+            raise ValueError("The Mac XCTest screenshot attachment has an invalid exported filename")
+        exported_screenshot = export_dir / exported_name
+        if not exported_screenshot.is_file():
+            raise FileNotFoundError(f"XCTest did not export its named Mac screenshot: {exported_screenshot}")
+        screenshot = output / "macos-01-files-and-books.png"
+        shutil.copyfile(exported_screenshot, screenshot)
+        metadata = {
+            "project_target": "PleazyngMacAppInUseCaptureTests",
+            "project_targets": targets,
+            "project_sha256": sha256_file(project_spec),
+            "test_source_sha256": sha256_file(test_source),
+            "test_identifier": matches[0].get("suggestedHumanReadableName"),
+            "test_target_bundle_id": "org.snapetech.pleazyng.capture-macos-ui-tests",
+            "product_app_bundle_id": BUNDLE_ID,
+            "product_app_path": str(app),
+            "xcode_version": run(["xcodebuild", "-version"], capture=True, timeout=60),
+            "screenshot_attachment": exported_name,
+            "product_target_compiled": False,
+            "purchase_actions_performed": False,
+        }
+        display_mode_path = output / "macos-01-files-and-books.display-mode.json"
+        metadata["display_mode"] = json.loads(display_mode_path.read_text(encoding="utf-8"))
+        return screenshot, metadata
+
+
 def capture_simulator(
     app: Path,
     output: Path,
@@ -2098,6 +2476,22 @@ def capture_simulator(
             time.sleep(SIMULATOR_SETTLE_SECONDS)
             run(["xcrun", "simctl", "io", device["udid"], "screenshot", "--type=png", str(screenshot)], timeout=120)
         width, height = png_dimensions(screenshot)
+        png_encoding = normalize_opaque_rgb_png(screenshot) if app_in_use else {
+            "source_color_type": png_color_type(screenshot),
+            "output_color_type": png_color_type(screenshot),
+            "alpha_was_opaque": None,
+            "rgb_samples_modified": False,
+        }
+        color_type = png_color_type(screenshot)
+        if app_in_use and (color_type != 2 or png_encoding["alpha_was_opaque"] is False):
+            raise ValueError(
+                f"Apple listing screenshots must be opaque RGB PNGs; received PNG color type {color_type}: {screenshot}"
+            )
+        if app_in_use and platform == "iOS" and category == "ipad" and (width, height) not in (
+                (2064, 2752), (2048, 2732)):
+            raise ValueError(
+                f"The iPad listing screenshot must use an accepted 13-inch size; received {width}x{height}: {screenshot}"
+            )
         screen_content_check = require_visible_screen_content(screenshot) if app_in_use else None
         capture = {
             "filename": filename,
@@ -2124,6 +2518,9 @@ def capture_simulator(
             "app_bundle_sha256": app_digest,
             "capture_sha256": sha256_file(screenshot),
             "dimensions": [width, height],
+            "png_color_type": color_type,
+            "png_alpha_channel": color_type in (4, 6),
+            "png_encoding": png_encoding,
             "device": device,
             "build_defines": build_defines,
             "qualification": (
@@ -2168,10 +2565,22 @@ def write_capture_manifest(output: Path, platform: str, captures: list[dict[str,
         or capture["capture_scene"].startswith("Real lifetime-access sheet")
         for capture in captures
     )
+    capture_scope = {"macOS": "Mac", "tvOS": "tvOS"}.get(platform, platform)
+    if platform == "iOS and iPadOS":
+        device_names = {
+            str(capture.get("device", {}).get("device_name", "")).lower()
+            for capture in captures
+        }
+        scopes = []
+        if any(name.startswith("iphone") for name in device_names):
+            scopes.append("iPhone")
+        if any(name.startswith("ipad") for name in device_names):
+            scopes.append("iPad")
+        capture_scope = " and ".join(scopes) if scopes else "iOS and iPadOS"
     qualification = (
-        f"Authentic app-in-use screenshots from the actual v{VERSION} product app bundles. iPhone, iPad, and tvOS show the "
-        "local Files and Books library after real onboarding. They do not claim server connection, media playback, StoreKit "
-        "transactions, or physical-device qualification."
+        f"Authentic app-in-use screenshots from the actual v{VERSION} product app bundle(s) on {capture_scope}. "
+        "They show the local Files and Books library after real onboarding and do not claim server connection, media "
+        "playback, StoreKit transactions, or physical-device qualification."
         if in_use else
         "Authentic application screenshots for App Store listing review. The images show first-launch onboarding only; "
         "they do not claim media playback, billing, StoreKit, or device qualification."
@@ -2281,10 +2690,14 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
     shutil.copyfile(build_receipt_path, output / "producer-build-provenance.json")
     captures = []
     signing_state = None
-    for category, filename in (
+    selected_category = getattr(args, "device_category", "both")
+    categories = (
         ("iphone", "iphone-01-files-and-books.png"),
         ("ipad", "ipad-01-files-and-books.png"),
-    ):
+    )
+    for category, filename in categories:
+        if selected_category not in ("both", category):
+            continue
         capture = capture_simulator(
             app, output, platform="iOS", category=category, filename=filename,
             run_id=args.run_id, attempt=args.run_attempt, app_digest=app_digest,
@@ -2298,7 +2711,8 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
         signing_state = capture.get("simulator_signing")
         captures.append(capture)
     write_capture_manifest(output, "iOS and iPadOS", captures)
-    print(f"Captured post-onboarding iPhone and iPad Files and Books screens in {output}")
+    selected_scope = {"both": "iPhone and iPad", "iphone": "iPhone", "ipad": "iPad"}[selected_category]
+    print(f"Captured post-onboarding {selected_scope} Files and Books screen(s) in {output}")
 
 
 def capture_tvos_in_use(args: argparse.Namespace) -> None:
@@ -2501,6 +2915,7 @@ def capture_macos_paywall(args: argparse.Namespace) -> None:
         raise RuntimeError("The captured app process changed during paywall navigation")
     screenshot = output / "macos-iap-review-paywall.png"
     run(["/usr/sbin/screencapture", "-x", "-l", window_id, str(screenshot)], timeout=120)
+    png_encoding = normalize_opaque_rgb_png(screenshot)
     width, height = png_dimensions(screenshot)
     capture = {
         "filename": screenshot.name,
@@ -2657,6 +3072,90 @@ def capture_macos_in_use(args: argparse.Namespace) -> None:
     })
     write_capture_manifest(output, "macOS", captures)
     print(f"Captured authentic Mac Files and Books and lifetime-access screens in {output}")
+
+
+def capture_macos_in_use_xctest(args: argparse.Namespace) -> None:
+    product_root = args.product_root.resolve(strict=True)
+    require_source(product_root)
+    tool_source_sha = require_capture_tools_sha()
+    app = args.app.resolve(strict=True)
+    identity = app_info(app)
+    receipt_path = args.build_receipt.resolve(strict=True)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    app_digest = sha256_tree(app)
+    if (receipt.get("source_sha") != SOURCE_SHA
+            or receipt.get("product_version") != VERSION
+            or receipt.get("product_build") != BUILD_NUMBER
+            or receipt.get("platform") != "macOS"
+            or receipt.get("build_configuration") != BUILD_CONFIGURATION["macos"]
+            or receipt.get("build_mode") != "App Store IAP"
+            or receipt.get("app_bundle_sha256") != app_digest
+            or receipt.get("bundle_id") != identity["bundle_id"]
+            or receipt.get("distribution_signing") != "disabled"
+            or not re.fullmatch(r"[0-9]+", str(receipt.get("producer_run_id", "")))
+            or not re.fullmatch(r"[0-9]+", str(receipt.get("producer_run_attempt", "")))):
+        raise ValueError(f"The restored Mac app does not match its unsigned v{VERSION} App Store build receipt")
+    configuration_evidence = build_configuration_evidence(receipt, "macos")
+    if configuration_evidence is None:
+        raise ValueError("The restored Mac app has no verifiable build-configuration evidence")
+
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    screenshot, ui_test_metadata = run_macos_app_in_use_ui_test(app, output)
+    width, height = png_dimensions(screenshot)
+    if (width, height) not in ((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)):
+        raise ValueError(
+            f"Mac App Store screenshots must be 16:10 at a supported pixel size; received {width}x{height}. "
+            f"The unmodified XCTest screenshot is retained at {screenshot}."
+        )
+    color_type = png_color_type(screenshot)
+    if color_type != 2:
+        raise ValueError(
+            f"Mac App Store screenshots must be opaque RGB PNGs; received PNG color type {color_type}. "
+            f"The unmodified XCTest screenshot is retained at {screenshot}."
+        )
+    device = {
+        "kind": "GitHub-hosted macOS desktop",
+        "model": run(["sysctl", "-n", "hw.model"], capture=True, timeout=30),
+        "architecture": run(["uname", "-m"], capture=True, timeout=30),
+        "os_version": run(["sw_vers", "-productVersion"], capture=True, timeout=30),
+    }
+    capture = {
+        "filename": screenshot.name,
+        "platform": "macOS",
+        "build_configuration": receipt["build_configuration"],
+        "capture_scene": (
+            "Post-onboarding local Files and Books screen. A real local profile was created; "
+            "no media server, account, or media was configured."
+        ),
+        "capture_method": ["XCTest UI automation; app.windows.firstMatch.screenshot() exported from the test result bundle"],
+        "capture_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "capture_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "source_tag": SOURCE_TAG,
+        "source_sha": SOURCE_SHA,
+        "capture_tools_sha": tool_source_sha,
+        "build_receipt": receipt,
+        "build_configuration_evidence": configuration_evidence,
+        "bundle_id": identity["bundle_id"],
+        "app_version": identity["version"],
+        "app_build": identity["build_number"],
+        "app_bundle_sha256": app_digest,
+        "capture_sha256": sha256_file(screenshot),
+        "dimensions": [width, height],
+        "png_color_type": color_type,
+        "png_alpha_channel": False,
+        "png_encoding": png_encoding,
+        "screen_content_check": require_visible_screen_content(screenshot),
+        "device": device,
+        "build_defines": IOS_MAC_STORE_DEFINES,
+        "ui_test_runner": ui_test_metadata,
+        "qualification": (
+            "Authentic post-onboarding local Files and Books interface from the exact unsigned App Store app bundle. "
+            "No content, server connection, playback, StoreKit transaction, or purchase is represented."
+        ),
+    }
+    write_capture_manifest(output, "macOS", [capture])
+    print(f"Captured authentic Mac Files and Books screen in {output}")
 
 
 MACOS_DIAGNOSTIC_WINDOWS_SWIFT = r'''
@@ -3433,6 +3932,7 @@ def parse_args() -> argparse.Namespace:
         if name == "capture-ios-in-use":
             command.add_argument("--simulator-entitlements", required=True, type=Path)
             command.add_argument("--extension-entitlements", required=True, type=Path)
+            command.add_argument("--device-category", choices=("both", "iphone", "ipad"), default="both")
         command.set_defaults(handler=handler)
     paywall = subparsers.add_parser("capture-macos-paywall")
     paywall.add_argument("--product-root", required=True, type=Path)
@@ -3446,6 +3946,12 @@ def parse_args() -> argparse.Namespace:
     macos_in_use.add_argument("--build-receipt", required=True, type=Path)
     macos_in_use.add_argument("--output-dir", required=True, type=Path)
     macos_in_use.set_defaults(handler=capture_macos_in_use)
+    macos_in_use_xctest = subparsers.add_parser("capture-macos-in-use-xctest")
+    macos_in_use_xctest.add_argument("--product-root", required=True, type=Path)
+    macos_in_use_xctest.add_argument("--app", required=True, type=Path)
+    macos_in_use_xctest.add_argument("--build-receipt", required=True, type=Path)
+    macos_in_use_xctest.add_argument("--output-dir", required=True, type=Path)
+    macos_in_use_xctest.set_defaults(handler=capture_macos_in_use_xctest)
     macos_diagnostic = subparsers.add_parser("diagnose-macos-in-use")
     macos_diagnostic.add_argument("--product-root", required=True, type=Path)
     macos_diagnostic.add_argument("--app", required=True, type=Path)

@@ -6,8 +6,10 @@ from __future__ import annotations
 import plistlib
 import hashlib
 import json
+import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -567,6 +569,117 @@ class TvOSSimulatorFrameworkClosureTests(unittest.TestCase):
 
         self.assertEqual("failed", result["status"])
         self.assertTrue(any("only weakly loaded" in item for item in result["errors"]))
+
+
+class ListingCaptureMetadataTests(unittest.TestCase):
+    def make_rgba_png(self, path: Path, *, alpha: int) -> bytes:
+        header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+        png = (
+            capture.PNG_SIGNATURE
+            + capture._png_chunk(b"IHDR", header)
+            + capture._png_chunk(b"IDAT", zlib.compress(bytes((0, 12, 34, 56, alpha))))
+            + capture._png_chunk(b"IEND", b"")
+        )
+        path.write_bytes(png)
+        return png
+
+    def test_png_color_type_reads_the_ihdr_color_type(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "capture.png"
+            header = (
+                b"\x89PNG\r\n\x1a\n"
+                + (13).to_bytes(4, "big")
+                + b"IHDR"
+                + (1).to_bytes(4, "big")
+                + (1).to_bytes(4, "big")
+                + bytes((8, 2, 0, 0, 0))
+            )
+            path.write_bytes(header)
+
+            self.assertEqual(2, capture.png_color_type(path))
+
+    def test_normalizes_fully_opaque_rgba_without_changing_rgb_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "capture.png"
+            self.make_rgba_png(path, alpha=255)
+
+            encoding = capture.normalize_opaque_rgb_png(path)
+            data = path.read_bytes()
+
+            self.assertEqual(2, capture.png_color_type(path))
+            self.assertEqual((1, 1), (
+                int.from_bytes(data[16:20], "big"),
+                int.from_bytes(data[20:24], "big"),
+            ))
+            self.assertEqual(6, encoding["source_color_type"])
+            self.assertTrue(encoding["alpha_was_opaque"])
+            self.assertFalse(encoding["rgb_samples_modified"])
+            offset = len(capture.PNG_SIGNATURE)
+            image_data = b""
+            while offset < len(data):
+                length = struct.unpack(">I", data[offset:offset + 4])[0]
+                chunk_type = data[offset + 4:offset + 8]
+                start = offset + 8
+                if chunk_type == b"IDAT":
+                    image_data += data[start:start + length]
+                offset = start + length + 4
+                if chunk_type == b"IEND":
+                    break
+            self.assertEqual(b"\0\x0c\x22\x38", zlib.decompress(image_data))
+
+    def test_rejects_transparent_rgba_without_changing_source_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "capture.png"
+            source = self.make_rgba_png(path, alpha=254)
+
+            with self.assertRaisesRegex(ValueError, "non-opaque pixels"):
+                capture.normalize_opaque_rgb_png(path)
+
+            self.assertEqual(source, path.read_bytes())
+
+    def test_single_ipad_capture_is_not_reported_as_an_iphone_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            capture.write_capture_manifest(output, "iOS and iPadOS", [{
+                "build_defines": capture.IOS_MAC_STORE_DEFINES,
+                "build_configuration": "Debug Simulator",
+                "capture_scene": "Post-onboarding local Files and Books screen.",
+                "capture_tools_sha": "a" * 40,
+                "device": {"device_name": "iPad Pro 13-inch (M5)"},
+            }])
+            manifest = json.loads((output / "capture-provenance.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("iOS and iPadOS", manifest["platform"])
+        self.assertIn("on iPad.", manifest["qualification"])
+        self.assertNotIn("iPhone", manifest["qualification"])
+
+    def test_both_ios_device_families_are_reported_when_both_are_captured(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            captures = [{
+                "build_defines": capture.IOS_MAC_STORE_DEFINES,
+                "build_configuration": "Debug Simulator",
+                "capture_scene": "Post-onboarding local Files and Books screen.",
+                "capture_tools_sha": "a" * 40,
+                "device": {"device_name": device_name},
+            } for device_name in ("iPhone 17 Pro Max", "iPad Pro 13-inch (M5)")]
+            capture.write_capture_manifest(output, "iOS and iPadOS", captures)
+            manifest = json.loads((output / "capture-provenance.json").read_text(encoding="utf-8"))
+
+        self.assertIn("on iPhone and iPad.", manifest["qualification"])
+
+    def test_ipad_producer_option_selects_only_ipad(self) -> None:
+        argv = [
+            "capture_apple_store_screenshots.py", "capture-ios-in-use",
+            "--product-root", "product", "--app", "Pleazyng.app",
+            "--build-receipt", "receipt.json", "--simulator-entitlements", "sim.entitlements",
+            "--extension-entitlements", "extension.entitlements",
+            "--device-category", "ipad", "--output-dir", "output",
+        ]
+        with patch("sys.argv", argv):
+            parsed = capture.parse_args()
+
+        self.assertEqual("ipad", parsed.device_category)
 
 
 if __name__ == "__main__":
