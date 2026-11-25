@@ -22,6 +22,7 @@ on:
           - macos-in-use-capture-only
           - macos-in-use-capture-macos26-only
           - macos-listing-capture-only
+          - macos-published-listing-capture-only
           - macos-in-use-diagnostic-only
           - tvos-listing-only
           - tvos-in-use-capture-only
@@ -1202,6 +1203,64 @@ jobs:
           path: ${{ runner.temp }}/apple-store-iap-review-paywall/
           if-no-files-found: error
           retention-days: 90
+
+  macos-published-listing:
+    if: github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && inputs.target == 'macos-published-listing-capture-only'
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.product_source_tag }}
+          path: product
+          persist-credentials: false
+
+      - name: Capture the local library from the verified public Mac release
+        env:
+          PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version="$PLEAZYNG_CAPTURE_PRODUCT_VERSION"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          git -C product fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+          test "$(git -C product rev-parse "refs/tags/$tag^{commit}")" = "$PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA"
+          test "$(git -C product rev-parse HEAD)" = "$PLEAZYNG_CAPTURE_PRODUCT_SOURCE_SHA"
+
+          work="$(mktemp -d "$RUNNER_TEMP/pleazyng-published-listing.XXXXXXXX")"
+          dmg="$work/pleazyng-macos-notarized.dmg"
+          mount="$work/mount"
+          mkdir "$mount"
+          trap 'hdiutil detach "$mount" >/dev/null 2>&1 || true' EXIT
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern pleazyng-macos-notarized.dmg --dir "$work"
+          expected="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[] | select(.name == "pleazyng-macos-notarized.dmg") | .digest')"
+          [[ "$expected" =~ ^sha256:[0-9a-f]{64}$ ]]
+          observed="$(shasum -a 256 "$dmg" | cut -d ' ' -f1)"
+          test "sha256:$observed" = "$expected"
+          gh attestation verify "$dmg" --repo "$GITHUB_REPOSITORY" --deny-self-hosted-runners
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$dmg"
+          ditto "$mount/Pleazyng.app" "$work/Pleazyng.app"
+          hdiutil detach "$mount"
+          app="$work/Pleazyng.app"
+          codesign --verify --deep --strict \
+            --test-requirement='=identifier "org.snapetech.pleazyng" and anchor apple generic and certificate leaf[subject.OU] = "DM9A59DC85"' "$app"
+          xcrun stapler validate "$app"
+          python3 scripts/capture_apple_store_screenshots.py capture-macos-published-listing \
+            --product-root product --app "$app" --dmg-sha256 "$observed" \
+            --output-dir "$RUNNER_TEMP/apple-published-listing-captures-macos"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: apple-published-listing-captures-macos-${{ inputs.product_version }}
+          path: ${{ runner.temp }}/apple-published-listing-captures-macos/
+          if-no-files-found: warn
+          retention-days: 7
 
   package:
     if: >-

@@ -4068,6 +4068,43 @@ def capture_macos_listing_window(args: argparse.Namespace) -> None:
     print(f"Captured authentic Mac Files and Books app window in {output}")
 
 
+def capture_macos_published_listing(args: argparse.Namespace) -> None:
+    require_source(args.product_root.resolve(strict=True))
+    tool_source_sha = require_capture_tools_sha()
+    app = args.app.resolve(strict=True)
+    identity = app_info(app)
+    if re.fullmatch(r"[0-9a-f]{64}", args.dmg_sha256) is None:
+        raise ValueError("Expected the verified public DMG SHA-256")
+
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise FileExistsError(f"Expected an empty Mac screenshot output directory: {output}")
+    bundle_digest = sha256_tree(app)
+    screenshot, native_capture = run_macos_listing_window_capture(app, output)
+    width, height = png_dimensions(screenshot)
+    receipt = {
+        "release_tag": f"v{VERSION}",
+        "source_sha": SOURCE_SHA,
+        "capture_tools_sha": tool_source_sha,
+        "capture_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+        "capture_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "app_identity": identity,
+        "build_flavor": "Public notarized macOS release",
+        "app_bundle_sha256": bundle_digest,
+        "dmg_sha256": args.dmg_sha256,
+        "screenshot": screenshot.name,
+        "screenshot_sha256": sha256_file(screenshot),
+        "screenshot_dimensions": [width, height],
+        "scene": "Files and Books local library after using the app's onboarding.",
+        "native_capture": native_capture,
+    }
+    (output / "published-listing-receipt.json").write_text(
+        json.dumps(receipt, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"Captured Mac Files and Books from the published v{VERSION} app in {output}")
+
+
 MACOS_DIAGNOSTIC_WINDOWS_SWIFT = r'''
 import CoreGraphics
 import Foundation
@@ -4880,6 +4917,12 @@ def parse_args() -> argparse.Namespace:
     macos_listing_window.add_argument("--build-receipt", required=True, type=Path)
     macos_listing_window.add_argument("--output-dir", required=True, type=Path)
     macos_listing_window.set_defaults(handler=capture_macos_listing_window)
+    published_listing = subparsers.add_parser("capture-macos-published-listing")
+    published_listing.add_argument("--product-root", required=True, type=Path)
+    published_listing.add_argument("--app", required=True, type=Path)
+    published_listing.add_argument("--dmg-sha256", required=True)
+    published_listing.add_argument("--output-dir", required=True, type=Path)
+    published_listing.set_defaults(handler=capture_macos_published_listing)
     macos_diagnostic = subparsers.add_parser("diagnose-macos-in-use")
     macos_diagnostic.add_argument("--product-root", required=True, type=Path)
     macos_diagnostic.add_argument("--app", required=True, type=Path)
