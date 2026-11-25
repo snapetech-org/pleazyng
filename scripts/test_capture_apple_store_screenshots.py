@@ -17,6 +17,7 @@ import capture_apple_store_screenshots as capture
 from capture_apple_store_screenshots import (
     BUNDLE_ID,
     BUILD_NUMBER,
+    MACOS_APP_IN_USE_UI_TEST,
     SOURCE_SHA,
     SOURCE_TAG,
     VERSION,
@@ -680,6 +681,27 @@ class ListingCaptureMetadataTests(unittest.TestCase):
             parsed = capture.parse_args()
 
         self.assertEqual("ipad", parsed.device_category)
+
+
+class MacListingCaptureTests(unittest.TestCase):
+    def test_mac_listing_capture_uses_real_fullscreen_ui_and_ocr(self) -> None:
+        self.assertIn("XCUIScreen.main.screenshot()", MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn("VNRecognizeTextRequest()", MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn('app.coordinate(withNormalizedOffset: offset).click()', MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn('try clickVisibleText("Use files and books"', MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn("Add a source or import a book", MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn("Import files", MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn("CGDisplaySetDisplayMode", MACOS_APP_IN_USE_UI_TEST)
+        self.assertIn("native_fullscreen_shortcut", MACOS_APP_IN_USE_UI_TEST)
+        self.assertNotIn("app.buttons", MACOS_APP_IN_USE_UI_TEST)
+        self.assertNotIn("app.screenshot()", MACOS_APP_IN_USE_UI_TEST)
+        self.assertNotIn("window.screenshot()", MACOS_APP_IN_USE_UI_TEST)
+        self.assertNotIn("StoreKit", MACOS_APP_IN_USE_UI_TEST)
+
+    def test_mac_listing_export_keeps_accepted_dimensions_and_rgb_provenance(self) -> None:
+        self.assertIn("normalize_opaque_rgb_png", capture.run_macos_app_in_use_ui_test.__code__.co_names)
+        self.assertIn("screenshot_was_resized_or_cropped", capture.run_macos_app_in_use_ui_test.__code__.co_consts)
+        self.assertIn(((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)), capture.capture_macos_in_use_xctest.__code__.co_consts)
 
 
 if __name__ == "__main__":
