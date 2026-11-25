@@ -5,105 +5,69 @@ import XCTest
 import AppKit
 
 extension PleazyngStoreKitLocalTrialReviewUITests {
-  func resizeMacWindowForStoreScreenshot() throws {
-    let geometry = try MacWindowResizeSupport.resize(bundleIdentifier: appBundleID)
+  func resizeMacWindowForStoreScreenshot(_ app: XCUIApplication) throws {
+    let geometry = try MacWindowResizeSupport.resize(app: app)
     attachText(
-      "System Events resized the real product window to \(geometry) before XCTest captured it.",
+      "XCTest resized the real product window to \(geometry) before capturing it.",
       named: "pleazyng-macos-window-resize"
     )
   }
 }
 
 private enum MacWindowResizeSupport {
-  static func resize(bundleIdentifier: String) throws -> String {
-    let processIdentifier = try processIdentifier(bundleIdentifier: bundleIdentifier)
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-    process.arguments = ["-e", script(processIdentifier: processIdentifier)]
-    let stdout = Pipe()
-    let stderr = Pipe()
-    process.standardOutput = stdout
-    process.standardError = stderr
-    do {
-      try process.run()
-    } catch {
-      throw resizeError(17, "Could not start bounded Mac window resize: \(error)")
+  private static let targetSize = CGSize(width: 912, height: 570)
+
+  static func resize(app: XCUIApplication) throws -> String {
+    let window = app.windows.firstMatch
+    guard window.waitForExistence(timeout: 30), window.isHittable else {
+      throw resizeError("The launched product window is not available for XCTest resizing")
     }
-    try waitForExit(process)
-    let output = pipeText(stdout)
-    let errorOutput = pipeText(stderr)
-    guard process.terminationStatus == 0, output == "912|570|56|80" else {
-      let detail = errorOutput.isEmpty ? output : errorOutput
+
+    let initialFrame = window.frame
+    let screenFrame = CGDisplayBounds(CGMainDisplayID())
+    guard screenFrame.width >= targetSize.width, screenFrame.height >= targetSize.height,
+          initialFrame.minX >= screenFrame.minX, initialFrame.minY >= screenFrame.minY,
+          initialFrame.minX + targetSize.width <= screenFrame.maxX,
+          initialFrame.minY + targetSize.height <= screenFrame.maxY else {
       throw resizeError(
-        19,
-        "System Events could not apply the requested 912x570 app window: \(detail)"
+        "The 912x570 screenshot window does not fit the visible display at the current origin: " +
+          "window=\(NSStringFromRect(initialFrame)), display=\(NSStringFromRect(screenFrame))"
       )
     }
-    return "912x570 points at 56,80"
-  }
 
-  private static func processIdentifier(bundleIdentifier: String) throws -> Int32 {
-    let deadline = Date().addingTimeInterval(20)
+    guard abs(initialFrame.width - targetSize.width) <= 0.5,
+          abs(initialFrame.height - targetSize.height) <= 0.5 else {
+      let lowerRight = window.coordinate(withNormalizedOffset: CGVector(dx: 0.995, dy: 0.995))
+      let target = lowerRight.withOffset(CGVector(
+        dx: targetSize.width - initialFrame.width,
+        dy: targetSize.height - initialFrame.height
+      ))
+      lowerRight.press(forDuration: 0.15, thenDragTo: target)
+    }
+
+    let deadline = Date().addingTimeInterval(10)
+    var finalFrame = window.frame
     while Date() < deadline {
-      let matches = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
-      let identified = matches.filter { $0.processIdentifier > 0 }
-      if identified.count > 1 {
-        throw resizeError(16, "More than one running app matches bundle ID \(bundleIdentifier)")
-      }
-      if let app = identified.first, app.isFinishedLaunching {
-        return app.processIdentifier
+      finalFrame = window.frame
+      if abs(finalFrame.width - targetSize.width) <= 0.5,
+         abs(finalFrame.height - targetSize.height) <= 0.5 {
+        return "\(Int(finalFrame.width))x\(Int(finalFrame.height)) points at " +
+          "\(Int(finalFrame.minX)),\(Int(finalFrame.minY))"
       }
       Thread.sleep(forTimeInterval: 0.25)
     }
-    throw resizeError(16, "The launched product app has no finished process for bundle ID \(bundleIdentifier)")
-  }
-
-  private static func waitForExit(_ process: Process) throws {
-    let completed = DispatchSemaphore(value: 0)
-    DispatchQueue.global(qos: .userInitiated).async {
-      process.waitUntilExit()
-      completed.signal()
-    }
-    guard completed.wait(timeout: .now() + 30) == .success else {
-      process.terminate()
-      throw resizeError(18, "System Events did not resize the Mac window within 30 seconds")
-    }
-  }
-
-  private static func pipeText(_ pipe: Pipe) -> String {
-    String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-  }
-
-  private static func resizeError(_ code: Int, _ message: String) -> NSError {
-    NSError(
-      domain: "PleazyngStoreKitReviewCapture",
-      code: code,
-      userInfo: [NSLocalizedDescriptionKey: message]
+    throw resizeError(
+      "XCTest did not resize the native product window to 912x570 points: " +
+        NSStringFromRect(finalFrame)
     )
   }
 
-  private static func script(processIdentifier: Int32) -> String {
-    """
-    on run
-      set targetPid to \(processIdentifier)
-      tell application "System Events"
-        set targetProcess to first application process whose unix id is targetPid
-        set frontmost of targetProcess to true
-        set targetWindow to first window of targetProcess
-        set position of targetWindow to {56, 80}
-        set size of targetWindow to {912, 570}
-        delay 1
-        set actualSize to size of targetWindow
-        set actualPosition to position of targetWindow
-        set widthText to (item 1 of actualSize) as text
-        set heightText to (item 2 of actualSize) as text
-        set xText to (item 1 of actualPosition) as text
-        set yText to (item 2 of actualPosition) as text
-        return widthText & "|" & heightText & "|" & xText & "|" & yText
-      end tell
-    end run
-    """
+  private static func resizeError(_ message: String) -> NSError {
+    NSError(
+      domain: "PleazyngStoreKitReviewCapture",
+      code: 19,
+      userInfo: [NSLocalizedDescriptionKey: message]
+    )
   }
 }
 #endif

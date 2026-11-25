@@ -894,13 +894,13 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
         source = flow_support.read_text(encoding="utf-8")
         window_support = ROOT / capture.UI_TEST_SUPPORT_SOURCES[1]
         window_source = window_support.read_text(encoding="utf-8")
-        self.assertIn("try resizeMacWindowForStoreScreenshot()", source)
-        self.assertIn("set size of targetWindow to {912, 570}", window_source)
-        self.assertIn("runningApplications(withBundleIdentifier: bundleIdentifier)", window_source)
-        self.assertIn("appBundleID", window_source)
-        self.assertIn("identified.count > 1", window_source)
+        self.assertIn("try resizeMacWindowForStoreScreenshot(app)", source)
+        self.assertIn("window.coordinate(withNormalizedOffset:", window_source)
+        self.assertIn("press(forDuration: 0.15, thenDragTo: target)", window_source)
+        self.assertIn("private static let targetSize = CGSize(width: 912, height: 570)", window_source)
+        self.assertNotIn("/usr/bin/osascript", window_source)
         self.assertLess(
-            source.index("try resizeMacWindowForStoreScreenshot()"),
+            source.index("try resizeMacWindowForStoreScreenshot(app)"),
             source.index("assertMacListingWindowGeometry(initialCapture)"),
         )
 
