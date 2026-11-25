@@ -31,19 +31,7 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     core.experimentalDolbyVisionRequested = false
     XCTAssertTrue(core.initialize(in: window))
     defer {
-      let destroyed = DispatchSemaphore(value: 0)
-      core.dispose()
-      core.queue.async { destroyed.signal() }
-      // Pump main during native teardown without XCTest's asynchronous
-      // diagnostics, which can fail to decode the simulator display.
-      let deadline = ProcessInfo.processInfo.systemUptime + playbackAdvanceTimeout
-      while destroyed.wait(timeout: .now()) == .timedOut {
-        guard ProcessInfo.processInfo.systemUptime < deadline else {
-          XCTFail("The AVFoundation output did not finish disposal")
-          break
-        }
-        pump(0.05)
-      }
+      disposeAndWait(core)
       window.isHidden = true
     }
     core.setVisible(true)
@@ -85,6 +73,22 @@ final class AVFoundationMotionPlaybackTests: XCTestCase {
     XCTAssertEqual(try awaitGetProperty(core, name: "playlist/0/id").get(), entry)
 
     try verifyFallbackFrameMixing(core, entry: entry)
+  }
+
+  private func disposeAndWait(_ core: MpvPlayerCore) {
+    let destroyed = DispatchSemaphore(value: 0)
+    core.dispose()
+    core.queue.async { destroyed.signal() }
+    // Pump main during native teardown without XCTest's asynchronous
+    // diagnostics, which can fail to decode the simulator display.
+    let deadline = ProcessInfo.processInfo.systemUptime + playbackAdvanceTimeout
+    while destroyed.wait(timeout: .now()) == .timedOut {
+      guard ProcessInfo.processInfo.systemUptime < deadline else {
+        XCTFail("The AVFoundation output did not finish disposal")
+        return
+      }
+      pump(0.05)
+    }
   }
 
   private func runMotionCommand(
