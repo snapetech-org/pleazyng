@@ -24,6 +24,11 @@ on:
         required: false
         default: '1'
         type: string
+      ubuntu_series:
+        description: Ubuntu series to publish
+        type: choice
+        default: all
+        options: [all, jammy, noble]
 
 # Several publication gates run before checkout on public hosted runners.
 env:
@@ -44,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ubuntu_series: [jammy, noble]
+        ubuntu_series: ${{ fromJSON(inputs.ubuntu_series == 'jammy' && '["jammy"]' || inputs.ubuntu_series == 'noble' && '["noble"]' || '["jammy","noble"]') }}
     steps:
       - name: Require main for manual publication
         if: github.event_name == 'workflow_dispatch'
@@ -204,7 +209,9 @@ jobs:
           # Launchpad requires every upload of one upstream version to carry a
           # byte-identical orig tarball. Reuse the PPA's copy when it exists.
           orig_url="https://ppa.launchpadcontent.net/${PPA_OWNER}/${PPA_ARCHIVE}/ubuntu/pool/main/p/pleazyng/pleazyng_${version}.orig.tar.gz"
-          status="$(curl --silent --show-error --location --output "$orig" --write-out '%{http_code}' "$orig_url")"
+          status="$(curl --silent --show-error --location --connect-timeout 15 \
+            --retry 4 --retry-connrefused --retry-max-time 120 \
+            --output "$orig" --write-out '%{http_code}' "$orig_url")"
           if [[ "$status" == "200" ]]; then
             tar -xzf "$orig" -C "$work"
             test -d "$source_dir"
