@@ -39,6 +39,11 @@ TRIAL_PRODUCT_ID = "pleazyng_7_day_trial"
 LIFETIME_PRODUCT_ID = "pleazyng_lifetime_unlock"
 STOREKIT_CONFIG = Path("scripts/stores/apple/pleazyng-trial-review.storekit")
 UI_TEST_SOURCE = Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewUITests.swift")
+UI_TEST_SUPPORT_SOURCES = (
+    Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewFlowSupport.swift"),
+    Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewTVSupport.swift"),
+    Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewMacSupport.swift"),
+)
 TEST_TARGET = "PleazyngStoreKitLocalTrialReviewUITests"
 TEST_BUNDLE_ID = "org.snapetech.pleazyng.localtest.review-tests"
 MACOS_TEST_PLAN = "PleazyngStoreKitLocalTrialReview.xctestplan"
@@ -341,6 +346,7 @@ def ui_test_project_spec(platform: str) -> dict[str, Any]:
                 "platform": config["xcode_platform"],
                 "sources": [
                     {"path": UI_TEST_SOURCE.name, "buildPhase": "sources"},
+                    *({"path": source.name, "buildPhase": "sources"} for source in UI_TEST_SUPPORT_SOURCES),
                     {"path": STOREKIT_CONFIG.name, "buildPhase": "resources"},
                 ],
                 "settings": {
@@ -1241,7 +1247,9 @@ def capture(args: argparse.Namespace) -> None:
     lineage = capture_tools.source_lineage(product_root, tools_root)
     config_path = tools_root / STOREKIT_CONFIG
     test_source_path = tools_root / UI_TEST_SOURCE
-    if not config_path.is_file() or not test_source_path.is_file():
+    test_support_paths = {source.name: tools_root / source for source in UI_TEST_SUPPORT_SOURCES}
+    missing_support = [str(path) for path in test_support_paths.values() if not path.is_file()]
+    if not config_path.is_file() or not test_source_path.is_file() or missing_support:
         raise FileNotFoundError("Capture tools checkout is missing the StoreKit config or platform XCTest source")
     catalog = verify_catalog(config_path)
     receipt, identity = verify_build_identity(
@@ -1274,6 +1282,7 @@ def capture(args: argparse.Namespace) -> None:
     output.mkdir(parents=True, exist_ok=False)
     config_sha = sha256_file(config_path)
     test_source_sha = sha256_file(test_source_path)
+    test_support_shas = {name: sha256_file(path) for name, path in test_support_paths.items()}
     build_receipt_path = args.build_receipt.resolve(strict=True)
     app = args.app.resolve(strict=True)
     app_hash = capture_tools.sha256_tree(app)
@@ -1301,6 +1310,8 @@ def capture(args: argparse.Namespace) -> None:
         project_root = Path(args.runner_root).resolve()
         project_root.mkdir(parents=True, exist_ok=False)
         (project_root / UI_TEST_SOURCE.name).write_bytes(test_source_path.read_bytes())
+        for name, path in test_support_paths.items():
+            shutil.copyfile(path, project_root / name)
         (project_root / STOREKIT_CONFIG.name).write_bytes(config_path.read_bytes())
         project_spec_path = project_root / "project.json"
         write_json(project_spec_path, ui_test_project_spec(platform))
@@ -1498,6 +1509,7 @@ def capture(args: argparse.Namespace) -> None:
                 "scheme_configuration": scheme_evidence,
                 "prior_attempt_diagnostic": PRIOR_STOREKIT_FAILURE,
                 "test_source_sha256": test_source_sha,
+                "test_support_sources_sha256": test_support_shas,
                 "test_project_spec_sha256": project_spec_sha,
                 "built_test_bundle_sha256": test_bundle_sha,
                 "built_test_resource_sha256": sha256_file(storekit_resource),

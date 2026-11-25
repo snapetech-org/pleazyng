@@ -16,7 +16,10 @@ import capture_apple_macos_tvos_storekit as capture
 
 
 ROOT = Path(__file__).resolve().parents[2]
-UI_TEST = (ROOT / capture.UI_TEST_SOURCE).read_text(encoding="utf-8")
+UI_TEST = "\n".join(
+    (ROOT / source).read_text(encoding="utf-8")
+    for source in (capture.UI_TEST_SOURCE, *capture.UI_TEST_SUPPORT_SOURCES)
+)
 STOREKIT = (ROOT / capture.STOREKIT_CONFIG).read_text(encoding="utf-8")
 WORKFLOW = (ROOT / ".github/workflows/apple-store-screenshots.yml").read_text(encoding="utf-8")
 
@@ -206,7 +209,13 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             self.assertEqual(target["platform"], platform)
             self.assertEqual(spec["options"]["deploymentTarget"], {platform: minimum})
             self.assertEqual(target["type"], "bundle.ui-testing")
-            self.assertEqual(target["sources"][1]["path"], capture.STOREKIT_CONFIG.name)
+            source_paths = [source["path"] for source in target["sources"] if source["buildPhase"] == "sources"]
+            self.assertEqual(
+                source_paths,
+                [capture.UI_TEST_SOURCE.name, *(source.name for source in capture.UI_TEST_SUPPORT_SOURCES)],
+            )
+            self.assertEqual(target["sources"][-1]["path"], capture.STOREKIT_CONFIG.name)
+            self.assertEqual(target["sources"][-1]["buildPhase"], "resources")
             self.assertEqual(spec["schemes"]["PleazyngStoreKitLocalTrialReview"]["test"]["targets"], [capture.TEST_TARGET])
             self.assertEqual(
                 spec["schemes"]["PleazyngStoreKitLocalTrialReview"]["run"]["storeKitConfiguration"],
