@@ -2,9 +2,11 @@ import Foundation
 import XCTest
 
 #if os(macOS)
+import AppKit
+
 extension PleazyngStoreKitLocalTrialReviewUITests {
-  func resizeMacWindowForStoreScreenshot(_ app: XCUIApplication) throws {
-    let geometry = try MacWindowResizeSupport.resize(processIdentifier: app.processIdentifier)
+  func resizeMacWindowForStoreScreenshot() throws {
+    let geometry = try MacWindowResizeSupport.resize(bundleIdentifier: appBundleID)
     attachText(
       "System Events resized the real product window to \(geometry) before XCTest captured it.",
       named: "pleazyng-macos-window-resize"
@@ -13,10 +15,8 @@ extension PleazyngStoreKitLocalTrialReviewUITests {
 }
 
 private enum MacWindowResizeSupport {
-  static func resize(processIdentifier: Int32) throws -> String {
-    guard processIdentifier > 0 else {
-      throw resizeError(16, "The launched product app has no process identifier")
-    }
+  static func resize(bundleIdentifier: String) throws -> String {
+    let processIdentifier = try processIdentifier(bundleIdentifier: bundleIdentifier)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
     process.arguments = ["-e", script(processIdentifier: processIdentifier)]
@@ -40,6 +40,22 @@ private enum MacWindowResizeSupport {
       )
     }
     return "912x570 points at 56,80"
+  }
+
+  private static func processIdentifier(bundleIdentifier: String) throws -> Int32 {
+    let deadline = Date().addingTimeInterval(20)
+    while Date() < deadline {
+      let matches = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+      let identified = matches.filter { $0.processIdentifier > 0 }
+      if identified.count > 1 {
+        throw resizeError(16, "More than one running app matches bundle ID \(bundleIdentifier)")
+      }
+      if let app = identified.first, app.isFinishedLaunching {
+        return app.processIdentifier
+      }
+      Thread.sleep(forTimeInterval: 0.25)
+    }
+    throw resizeError(16, "The launched product app has no finished process for bundle ID \(bundleIdentifier)")
   }
 
   private static func waitForExit(_ process: Process) throws {
