@@ -2769,7 +2769,7 @@ def capture_simulator(
         run(["xcrun", "simctl", "boot", device["udid"]], timeout=180)
         run(["xcrun", "simctl", "bootstatus", device["udid"], "-b"], timeout=300)
         simulator_appearance = "platform default"
-        if platform == "iOS":
+        if platform == "iOS" and category != "ipad":
             run(["xcrun", "simctl", "ui", device["udid"], "appearance", "light"], timeout=60)
             simulator_appearance = "light"
         screenshot = output / filename

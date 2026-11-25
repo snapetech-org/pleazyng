@@ -195,6 +195,28 @@ jobs:
           echo "APPLE_STORE_APP_PATH=$RUNNER_TEMP/apple-store-build-ios-restored/Pleazyng.app" >> "$GITHUB_ENV"
           echo "APPLE_STORE_BUILD_RECEIPT=$RUNNER_TEMP/apple-store-build-ios-restored/build-provenance.json" >> "$GITHUB_ENV"
 
+      - name: Select supported Xcode and iOS SDK for retained-app capture
+        if: inputs.target == 'ipad-in-use-capture-only'
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_27.2.app/Contents/Developer
+          [[ "$(xcodebuild -version | sed -n '1p')" == 'Xcode 27.2' ]]
+          [[ "$(xcrun --sdk iphonesimulator --show-sdk-version)" == '27.2' ]]
+          python3 - <<'PY'
+          import json
+          import subprocess
+
+          inventory = json.loads(subprocess.run(
+              ["xcrun", "simctl", "list", "-j"], check=True, text=True, capture_output=True
+          ).stdout)
+          runtimes = [runtime for runtime in inventory.get("runtimes", [])
+                      if runtime.get("identifier", "").startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+                      and runtime.get("version") == "27.2" and runtime.get("isAvailable") is True]
+          if not runtimes:
+              raise SystemExit("Xcode 27.2 has no available iOS 27.2 Simulator runtime")
+          print(json.dumps(runtimes, indent=2))
+          PY
+
       - name: Install the UI capture project generator
         if: inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only'
         run: |

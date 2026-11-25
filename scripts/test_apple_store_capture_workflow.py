@@ -99,6 +99,12 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         self.assertIn("inputs.ios_artifact_run_id", named_step_text(ios, "Download prior iOS build"))
         self.assertIn("apple-store-build-ios-${{ inputs.product_version || '3.0.37' }}", named_step_text(ios, "Download prior iOS build"))
 
+        xcode_step = named_step_text(ios, "Select supported Xcode and iOS SDK for retained-app capture")
+        self.assertIn(target, named_step_condition(ios, "Select supported Xcode and iOS SDK for retained-app capture"))
+        self.assertIn("/Applications/Xcode_27.2.app/Contents/Developer", xcode_step)
+        self.assertIn("xcrun --sdk iphonesimulator --show-sdk-version", xcode_step)
+        self.assertIn('runtime.get("version") == "27.2"', xcode_step)
+
         for step_name in (
             "Load pinned Flutter SDK",
             "Setup Flutter",
