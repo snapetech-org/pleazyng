@@ -253,20 +253,23 @@ let frame = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
 let foregroundWindows = windows.prefix(while: {
   ($0[kCGWindowNumber as String] as? NSNumber)?.intValue != targetWindowID
 })
-let unobstructed = !foregroundWindows.contains { foreground in
-  guard ((foreground[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+let normalLayer = Int(CGWindowLevelForKey(.normalWindow))
+let overlappingWindows = foregroundWindows.compactMap { foreground -> String? in
+  guard (foreground[kCGWindowLayer as String] as? NSNumber)?.intValue == normalLayer,
+        ((foreground[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
         let foregroundBounds = foreground[kCGWindowBounds as String] as? [String: CGFloat] else {
-    return false
+    return nil
   }
   let foregroundFrame = CGRect(x: foregroundBounds["X"] ?? 0, y: foregroundBounds["Y"] ?? 0,
                                width: foregroundBounds["Width"] ?? 0, height: foregroundBounds["Height"] ?? 0)
-  return frame.intersects(foregroundFrame)
+  guard frame.intersects(foregroundFrame) else { return nil }
+  return foreground[kCGWindowOwnerName as String] as? String ?? "Unknown application"
 }
 let result: [String: Any] = [
   "window_id": targetWindowID,
   "owner_pid": targetPID,
   "on_screen": window[kCGWindowIsOnscreen as String] as? Bool ?? false,
-  "unobstructed": unobstructed,
+  "overlapping_windows": overlappingWindows,
   "bounds_points": [
     Double(bounds["X"] ?? 0), Double(bounds["Y"] ?? 0),
     Double(bounds["Width"] ?? 0), Double(bounds["Height"] ?? 0),
@@ -3030,7 +3033,7 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         and bounds[0] + bounds[2] <= desktop_points[0]
         and bounds[1] + bounds[3] <= desktop_points[1]
     )
-    if not fully_visible_on_desktop or geometry.get("unobstructed") is not True:
+    if not fully_visible_on_desktop or geometry.get("overlapping_windows") != []:
         raise ValueError(f"The complete Pleazyng window must be visible for store capture: {geometry}")
     if any(value != round(value) for value in bounds):
         raise ValueError(f"The native window bounds must align with display pixels: {bounds}")
