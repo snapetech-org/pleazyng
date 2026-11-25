@@ -2044,6 +2044,7 @@ jobs:
       - name: Build signed iOS App Store IPA
         id: ios-store-package
         continue-on-error: true
+        timeout-minutes: 120
         if: steps.ios-signing.outputs.configured == 'true' && steps.ios-store-entitlements.outcome == 'success'
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -2061,11 +2062,63 @@ jobs:
             --dart-define=SUPPORTER_MODE=iap \
             --dart-define=ENABLE_UPDATE_CHECK=false \
             --obfuscate --split-debug-info=debug-info/ios-app-store
-          python3 "$GITHUB_WORKSPACE/scripts/build_apple_store_archive.py" \
+          python3 -u - "$GITHUB_WORKSPACE/scripts/build_apple_store_archive.py" \
             --platform ios \
             --archive-path "$APPLE_LOCAL_BUILD_DIR/ios-store.xcarchive" \
             --export-path "$APPLE_LOCAL_BUILD_DIR/ios-store-export" \
-            --derived-data "$APPLE_LOCAL_BUILD_DIR/ios-store-derived-data"
+            --derived-data "$APPLE_LOCAL_BUILD_DIR/ios-store-derived-data" <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import signal
+          import subprocess
+          import sys
+          import tempfile
+
+          gib = 1024 ** 3
+          volumes = [Path.cwd(), Path(os.environ['APPLE_LOCAL_BUILD_DIR']), Path(os.environ['RUNNER_TEMP'])]
+
+          def stop(signum, _frame):
+              raise SystemExit(128 + signum)
+
+          signal.signal(signal.SIGTERM, stop)
+
+          def report(log):
+              free = [shutil.disk_usage(path).free for path in volumes]
+              print(f'iOS Store archive log: {log.stat().st_size // 1024} KiB. Free disk: '
+                    f'source {free[0] / gib:.1f} GiB, build {free[1] / gib:.1f} GiB, '
+                    f'runner {free[2] / gib:.1f} GiB.', flush=True)
+              if min(free) < 4 * gib:
+                  raise RuntimeError('Less than 4 GiB free while archiving iOS. Stopping before the runner log volume fills.')
+
+          with tempfile.TemporaryDirectory(prefix='ios-store-archive-', dir=volumes[2]) as work:
+              log = Path(work) / 'xcode.log'
+              with log.open('wb') as output:
+                  report(log)
+                  with subprocess.Popen([sys.executable, *sys.argv[1:]], stdout=output,
+                                        stderr=subprocess.STDOUT, start_new_session=True) as archive:
+                      try:
+                          while True:
+                              try:
+                                  result = archive.wait(timeout=45)
+                                  break
+                              except subprocess.TimeoutExpired:
+                                  report(log)
+                      finally:
+                          if archive.poll() is None:
+                              os.killpg(archive.pid, signal.SIGTERM)
+                              try:
+                                  archive.wait(timeout=15)
+                              except subprocess.TimeoutExpired:
+                                  os.killpg(archive.pid, signal.SIGKILL)
+              with log.open('rb') as output:
+                  output.seek(max(0, log.stat().st_size - 128 * 1024))
+                  if result:
+                      for line in output.read().decode(errors='replace').splitlines()[-100:]:
+                          print(line[:4000])
+              print(f'iOS Store archive command exited with status {result}.')
+              sys.exit(result)
+          PY
 
 
       - name: Copy signed iOS package to the workflow workspace
