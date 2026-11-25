@@ -1292,109 +1292,161 @@ def device_preference(name: str, category: str) -> tuple[Any, ...]:
     return (size, generation, name)
 
 
-def create_simulator(platform: str, category: str, run_id: str, attempt: str) -> dict[str, str]:
+def app_minimum_os_version(app: Path) -> tuple[int, int]:
+    try:
+        with (app / "Info.plist").open("rb") as source:
+            info = plistlib.load(source)
+    except (OSError, plistlib.InvalidFileException) as error:
+        raise RuntimeError(f"Could not read the retained app's minimum OS version: {app}") from error
+    minimum = info.get("MinimumOSVersion") if isinstance(info, dict) else None
+    if not isinstance(minimum, str):
+        raise RuntimeError("The retained iOS app bundle does not declare a MinimumOSVersion")
+    return version_pair(minimum)
+
+
+def create_simulator(
+    platform: str,
+    category: str,
+    run_id: str,
+    attempt: str,
+    *,
+    minimum_os_version: tuple[int, int] | None = None,
+) -> dict[str, str]:
     sdk = "iphonesimulator" if platform == "iOS" else "appletvsimulator"
     sdk_version = version_pair(run(["xcrun", "--sdk", sdk, "--show-sdk-version"], capture=True, timeout=60))
     inventory = json.loads(run(["xcrun", "simctl", "list", "-j"], capture=True, timeout=60))
-    runtimes = [
+    available_runtimes = [
         runtime for runtime in inventory.get("runtimes", [])
         if runtime.get("isAvailable") is True
         and f".{platform}-" in runtime.get("identifier", "")
-        and version_pair(runtime.get("version", "")) == sdk_version
     ]
-    if not runtimes:
-        raise RuntimeError(f"No {platform} Simulator runtime matches SDK {sdk_version[0]}.{sdk_version[1]}")
-    runtime = sorted(runtimes, key=lambda item: item["identifier"])[-1]
-    devices = [
-        device for device in inventory.get("devices", {}).get(runtime["identifier"], [])
-        if device.get("isAvailable") is True
-        and (device.get("name", "").startswith("iPhone") if category == "iphone"
-             else device.get("name", "").startswith("iPad") if category == "ipad"
-             else device.get("name", "").startswith("Apple TV"))
-        and isinstance(device.get("deviceTypeIdentifier"), str)
-    ]
-    templates: list[dict[str, str]]
-    if category == "ipad" and platform == "iOS":
-        def is_thirteen_inch(name: str) -> bool:
-            return "13-inch" in name.lower() or "13 inch" in name.lower()
+    base_name = f"Pleazyng-{run_id}-{attempt}-{category}"
 
-        thirteen_inch_devices = [device for device in devices if is_thirteen_inch(device["name"])]
-        if thirteen_inch_devices:
-            selected = max(thirteen_inch_devices, key=lambda item: device_preference(item["name"], category))
-            templates = [{
-                "name": selected["name"],
-                "device_type": selected["deviceTypeIdentifier"],
-            }]
-        else:
-            device_types = json.loads(run(["xcrun", "simctl", "list", "devicetypes", "-j"], capture=True, timeout=60))
-            ipad_types = [
-                item for item in device_types.get("devicetypes", [])
+    def available_devices(runtime: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            device for device in inventory.get("devices", {}).get(runtime["identifier"], [])
+            if device.get("isAvailable") is True
+            and (device.get("name", "").startswith("iPhone") if category == "iphone"
+                 else device.get("name", "").startswith("iPad") if category == "ipad"
+                 else device.get("name", "").startswith("Apple TV"))
+            and isinstance(device.get("deviceTypeIdentifier"), str)
+        ]
+
+    if category == "ipad" and platform == "iOS":
+        minimum = minimum_os_version or (0, 0)
+        runtimes = sorted(
+            (runtime for runtime in available_runtimes if version_pair(runtime.get("version", "")) >= minimum),
+            key=lambda runtime: (version_pair(runtime["version"]), runtime["identifier"]),
+            reverse=True,
+        )
+        if not runtimes:
+            raise RuntimeError(
+                f"No available iOS Simulator runtime meets app MinimumOSVersion "
+                f"{minimum[0]}.{minimum[1]}; available runtimes: "
+                f"{[(item.get('identifier'), item.get('version')) for item in available_runtimes]}"
+            )
+
+        def is_thirteen_inch(name: str) -> bool:
+            lowered = name.lower()
+            return "13-inch" in lowered or "13 inch" in lowered
+
+        device_type_inventory = json.loads(
+            run(["xcrun", "simctl", "list", "devicetypes", "-j"], capture=True, timeout=60)
+        )
+        registered_ipads = [
+            item for item in device_type_inventory.get("devicetypes", [])
+            if item.get("productFamily") in (None, "iPad")
+            and isinstance(item.get("name"), str)
+            and item["name"].startswith("iPad")
+            and is_thirteen_inch(item["name"])
+            and isinstance(item.get("identifier"), str)
+        ]
+        registered_ipads.sort(
+            key=lambda item: device_preference(item["name"], category),
+            reverse=True,
+        )
+        if not registered_ipads:
+            available_names = sorted(
+                item.get("name", "") for item in device_type_inventory.get("devicetypes", [])
                 if item.get("productFamily") in (None, "iPad")
                 and isinstance(item.get("name"), str)
                 and item["name"].startswith("iPad")
-                and is_thirteen_inch(item["name"])
-                and isinstance(item.get("identifier"), str)
-            ]
-            templates = [
-                {"name": item["name"], "device_type": item["identifier"]}
-                for item in sorted(
-                    ipad_types,
-                    key=lambda item: device_preference(item["name"], category),
-                    reverse=True,
-                )
-            ]
-            if not templates:
-                registered_ipads = sorted(
-                    item["name"] for item in device_types.get("devicetypes", [])
-                    if item.get("productFamily") in (None, "iPad")
-                    and isinstance(item.get("name"), str)
-                    and item["name"].startswith("iPad")
-                )
-                raise RuntimeError(
-                    f"No available 13-inch iPad simulator exists in runtime {runtime['identifier']}; "
-                    f"registered iPad device types: {registered_ipads}"
-                )
-    else:
-        if not devices:
-            raise RuntimeError(f"No available {category} device exists in runtime {runtime['identifier']}")
-        selected = max(devices, key=lambda item: device_preference(item["name"], category))
-        templates = [{
-            "name": selected["name"],
-            "device_type": selected["deviceTypeIdentifier"],
-        }]
+            )
+            raise RuntimeError(
+                f"No registered 13-inch iPad device type is available; registered iPad device types: {available_names}"
+            )
 
-    base_name = f"Pleazyng-{run_id}-{attempt}-{category}"
-    failures: list[str] = []
-    device: dict[str, str] | None = None
-    for index, template in enumerate(templates):
-        name = base_name if index == 0 else f"{base_name}-{index + 1}"
-        try:
-            udid = run([
-                "xcrun", "simctl", "create", name,
-                template["device_type"], runtime["identifier"],
-            ], capture=True, timeout=120)
-        except subprocess.CalledProcessError as error:
-            detail = (error.stderr or error.stdout or str(error)).strip().splitlines()
-            failures.append(f"{template['name']} ({template['device_type']}): {detail[-1] if detail else error}")
-            continue
-        if re.fullmatch(r"[0-9A-Fa-f-]{36}", udid) is None:
-            raise RuntimeError(f"Simulator returned an invalid device identifier: {udid!r}")
-        device = {
-            "udid": udid,
-            "name": name,
-            "runtime_id": runtime["identifier"],
-            "runtime_version": runtime["version"],
-            "device_name": template["name"],
-            "device_type": template["device_type"],
-            "sdk_version": run(["xcrun", "--sdk", sdk, "--show-sdk-version"], capture=True, timeout=60),
-        }
-        break
-    if device is None:
+        failures: list[str] = []
+        for runtime in runtimes:
+            devices = [device for device in available_devices(runtime) if is_thirteen_inch(device["name"])]
+            if devices:
+                selected = max(devices, key=lambda item: device_preference(item["name"], category))
+                templates = [{
+                    "name": selected["name"],
+                    "device_type": selected["deviceTypeIdentifier"],
+                }]
+            else:
+                templates = [
+                    {"name": item["name"], "device_type": item["identifier"]}
+                    for item in registered_ipads
+                ]
+            runtime_suffix = re.sub(r"[^A-Za-z0-9-]+", "-", runtime["identifier"].rsplit(".", 1)[-1])
+            for template_index, template in enumerate(templates):
+                suffix = f"{runtime_suffix}-{template_index + 1}"
+                name = f"{base_name}-{suffix}"
+                try:
+                    udid = run([
+                        "xcrun", "simctl", "create", name,
+                        template["device_type"], runtime["identifier"],
+                    ], capture=True, timeout=120)
+                except subprocess.CalledProcessError as error:
+                    detail = (error.stderr or error.stdout or str(error)).strip().splitlines()
+                    failures.append(
+                        f"{runtime['version']} {template['name']} ({template['device_type']}): "
+                        f"{detail[-1] if detail else error}"
+                    )
+                    continue
+                if re.fullmatch(r"[0-9A-Fa-f-]{36}", udid) is None:
+                    raise RuntimeError(f"Simulator returned an invalid device identifier: {udid!r}")
+                return {
+                    "udid": udid,
+                    "name": name,
+                    "runtime_id": runtime["identifier"],
+                    "runtime_version": runtime["version"],
+                    "device_name": template["name"],
+                    "device_type": template["device_type"],
+                    "sdk_version": run(["xcrun", "--sdk", sdk, "--show-sdk-version"], capture=True, timeout=60),
+                }
         raise RuntimeError(
-            f"Could not create a {category} simulator for runtime {runtime['identifier']}: "
+            f"Could not create a 13-inch iPad simulator meeting MinimumOSVersion {minimum[0]}.{minimum[1]}. "
+            f"Tried installed iOS runtimes {[(item['identifier'], item['version']) for item in runtimes]}; "
             + "; ".join(failures)
         )
-    return device
+
+    runtimes = [runtime for runtime in available_runtimes if version_pair(runtime.get("version", "")) == sdk_version]
+    if not runtimes:
+        raise RuntimeError(f"No {platform} Simulator runtime matches SDK {sdk_version[0]}.{sdk_version[1]}")
+    runtime = sorted(runtimes, key=lambda item: item["identifier"])[-1]
+    devices = available_devices(runtime)
+    if not devices:
+        raise RuntimeError(f"No available {category} device exists in runtime {runtime['identifier']}")
+    selected = max(devices, key=lambda item: device_preference(item["name"], category))
+    name = base_name
+    udid = run([
+        "xcrun", "simctl", "create", name,
+        selected["deviceTypeIdentifier"], runtime["identifier"],
+    ], capture=True, timeout=120)
+    if re.fullmatch(r"[0-9A-Fa-f-]{36}", udid) is None:
+        raise RuntimeError(f"Simulator returned an invalid device identifier: {udid!r}")
+    return {
+        "udid": udid,
+        "name": name,
+        "runtime_id": runtime["identifier"],
+        "runtime_version": runtime["version"],
+        "device_name": selected["name"],
+        "device_type": selected["deviceTypeIdentifier"],
+        "sdk_version": run(["xcrun", "--sdk", sdk, "--show-sdk-version"], capture=True, timeout=60),
+    }
 
 
 def cleanup_simulator(device: dict[str, str]) -> None:
@@ -2570,7 +2622,14 @@ def capture_simulator(
     extension_entitlements_source_path: Path | None = None,
     signing_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    device = create_simulator(platform, category, run_id, attempt)
+    minimum_os_version = app_minimum_os_version(app) if platform == "iOS" and category == "ipad" else None
+    device = create_simulator(
+        platform,
+        category,
+        run_id,
+        attempt,
+        minimum_os_version=minimum_os_version,
+    )
     simulator_runtime_diagnostics = None
     try:
         run(["xcrun", "simctl", "boot", device["udid"]], timeout=180)

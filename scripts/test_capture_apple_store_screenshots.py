@@ -292,15 +292,27 @@ class SimulatorSigningTests(unittest.TestCase):
 
 
 class IpadSimulatorSelectionTests(unittest.TestCase):
-    def test_creates_registered_thirteen_inch_ipad_when_runtime_has_no_precreated_ipads(self) -> None:
-        runtime_id = "com.apple.CoreSimulator.SimRuntime.iOS-27-1"
+    def test_reads_minimum_os_from_the_retained_app_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "Pleazyng.app"
+            app.mkdir()
+            (app / "Info.plist").write_bytes(plistlib.dumps({"MinimumOSVersion": "15.5"}))
+
+            minimum = capture.app_minimum_os_version(app)
+
+        self.assertEqual(minimum, (15, 5))
+
+    def test_tries_installed_runtime_device_pairs_above_the_retained_app_minimum(self) -> None:
+        phone_runtime_id = "com.apple.CoreSimulator.SimRuntime.iOS-27-1"
+        ipad_runtime_id = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+        too_old_runtime_id = "com.apple.CoreSimulator.SimRuntime.iOS-14-0"
         inventory = {
-            "runtimes": [{
-                "identifier": runtime_id,
-                "version": "27.1",
-                "isAvailable": True,
-            }],
-            "devices": {runtime_id: []},
+            "runtimes": [
+                {"identifier": phone_runtime_id, "version": "27.1", "isAvailable": True},
+                {"identifier": ipad_runtime_id, "version": "26.5", "isAvailable": True},
+                {"identifier": too_old_runtime_id, "version": "14.0", "isAvailable": True},
+            ],
+            "devices": {phone_runtime_id: [], ipad_runtime_id: [], too_old_runtime_id: []},
         }
         device_types = {"devicetypes": [
             {
@@ -312,47 +324,50 @@ class IpadSimulatorSelectionTests(unittest.TestCase):
                 "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4",
             },
             {
+                "name": "iPad Air 13-inch (M2)",
+                "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Air-13-inch-M2",
+            },
+            {
                 "name": "iPad Air 11-inch (M3)",
                 "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Air-11-inch-M3",
                 "productFamily": "iPad",
             },
         ]}
-        create_m5 = subprocess.CalledProcessError(
-            1,
-            ["xcrun", "simctl", "create"],
-            stderr="device type is unsupported by this runtime",
-        )
         created_udid = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        compatible_type = "com.apple.CoreSimulator.SimDeviceType.iPad-Air-13-inch-M2"
+        create_calls: list[list[str]] = []
+
+        def mock_run(command: list[str], *, capture: bool = False, timeout: int = 300) -> str:
+            if command == ["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"]:
+                return "27.1"
+            if command == ["xcrun", "simctl", "list", "-j"]:
+                return json.dumps(inventory)
+            if command == ["xcrun", "simctl", "list", "devicetypes", "-j"]:
+                return json.dumps(device_types)
+            if len(command) == 6 and command[:3] == ["xcrun", "simctl", "create"]:
+                create_calls.append(command)
+                if command[4] == compatible_type and command[5] == ipad_runtime_id:
+                    return created_udid
+                raise subprocess.CalledProcessError(
+                    1, command, stderr="Incompatible device for this runtime"
+                )
+            raise AssertionError(f"Unexpected simulator command: {command}")
+
         with patch(
             "capture_apple_store_screenshots.run",
-            side_effect=[
-                "27.1",
-                json.dumps(inventory),
-                json.dumps(device_types),
-                create_m5,
-                created_udid,
-                "27.1",
-            ],
-        ) as run_command:
-            device = capture.create_simulator("iOS", "ipad", "45569185714", "1")
+            side_effect=mock_run,
+        ):
+            device = capture.create_simulator(
+                "iOS", "ipad", "45569185714", "1", minimum_os_version=(15, 5)
+            )
 
         self.assertEqual(device["udid"], created_udid)
-        self.assertEqual(device["device_name"], "iPad Pro 13-inch (M4)")
-        self.assertEqual(
-            device["device_type"],
-            "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4",
-        )
-        create_calls = [call.args[0] for call in run_command.call_args_list if "create" in call.args[0]]
-        self.assertEqual(create_calls, [
-            [
-                "xcrun", "simctl", "create", "Pleazyng-45569185714-1-ipad",
-                "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5", runtime_id,
-            ],
-            [
-                "xcrun", "simctl", "create", "Pleazyng-45569185714-1-ipad-2",
-                "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4", runtime_id,
-            ],
-        ])
+        self.assertEqual(device["runtime_id"], ipad_runtime_id)
+        self.assertEqual(device["runtime_version"], "26.5")
+        self.assertEqual(device["device_name"], "iPad Air 13-inch (M2)")
+        self.assertEqual(device["device_type"], compatible_type)
+        self.assertEqual(len(create_calls), 6)
+        self.assertTrue(all(command[5] != too_old_runtime_id for command in create_calls))
 
 
 
