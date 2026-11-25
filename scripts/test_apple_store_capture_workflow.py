@@ -159,17 +159,18 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
             "runs-on: ${{ (inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel' }}",
             macos,
         )
-        probe = named_step_text(macos, "Probe native Mac display modes before downloading the app")
+        probe = named_step_text(macos, "Probe and select native Mac display mode before downloading the app")
         self.assertIn("inputs.target == 'macos-listing-capture-only'", probe)
         self.assertIn('"enumerated_modes": modes.map(record)', probe)
-        self.assertIn('"accepted_usable_native_mode_found": !usableAcceptedModes.isEmpty', probe)
+        self.assertIn('"display_mode_activated": displayModeActivated', probe)
+        self.assertIn('"target_window_points": [1440, 900]', probe)
         self.assertIn("swift \"$RUNNER_TEMP/mac-display-capability.swift\"", probe)
         self.assertLess(
-            macos.index("Probe native Mac display modes before downloading the app"),
+            macos.index("Probe and select native Mac display mode before downloading the app"),
             macos.index("Download prior macOS build"),
         )
         self.assertIn("/Applications/Xcode_27.2.app/Contents/Developer", named_step_text(
-            macos, "Select supported Xcode for Mac XCTest capture"
+            macos, "Select supported Xcode for Mac OCR capture"
         ))
 
     def test_pinned_macos_tvos_producer_builds_only_those_platforms_and_retains_evidence(self) -> None:

@@ -748,7 +748,7 @@ jobs:
           test "$merge_base" = "$EXPECTED_SOURCE_SHA"
           test "$(python3 scripts/pubspec_version.py)" = "$EXPECTED_VERSION+$EXPECTED_BUILD"
 
-      - name: Probe native Mac display modes before downloading the app
+      - name: Probe and select native Mac display mode before downloading the app
         if: inputs.target == 'macos-listing-capture-only'
         run: |
           set -euo pipefail
@@ -773,9 +773,22 @@ jobs:
           }
           var currentMode: Any = NSNull()
           if let mode = CGDisplayCopyDisplayMode(displayID) { currentMode = record(mode) }
-          let accepted = Set(["1280x800", "1440x900", "2560x1600", "2880x1800"])
-          let usableAcceptedModes = modes.filter {
-            accepted.contains("\($0.pixelWidth)x\($0.pixelHeight)") && $0.isUsableForDesktopGUI()
+          let windowCaptureMode = modes.first(where: {
+            $0.width == 1920 && $0.height == 1080 && $0.pixelWidth == 1920 && $0.pixelHeight == 1080
+              && $0.isUsableForDesktopGUI()
+          })
+          var selectedModeEvidence: Any = NSNull()
+          var activeMode: Any = NSNull()
+          var displayModeActivated = false
+          if let windowCaptureMode {
+            selectedModeEvidence = record(windowCaptureMode)
+            let status = CGDisplaySetDisplayMode(displayID, windowCaptureMode, nil)
+            if status == .success, let readback = CGDisplayCopyDisplayMode(displayID),
+               readback.width == 1920, readback.height == 1080,
+               readback.pixelWidth == 1920, readback.pixelHeight == 1080 {
+              activeMode = record(readback)
+              displayModeActivated = true
+            }
           }
           let result: [String: Any] = [
             "host_architecture": ProcessInfo.processInfo.environment["RUNNER_ARCH"] ?? "unknown",
@@ -784,13 +797,17 @@ jobs:
             "current_mode": currentMode,
             "enumerated_mode_count": modes.count,
             "enumerated_modes": modes.map(record),
-            "accepted_usable_native_mode_found": !usableAcceptedModes.isEmpty,
+            "target_window_points": [1440, 900],
+            "window_capture_display_mode": selectedModeEvidence,
+            "active_mode_after_selection": activeMode,
+            "display_mode_activated": displayModeActivated,
+            "selected_display_mode_is_native": true,
           ]
           let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
           let path = URL(fileURLWithPath: CommandLine.arguments[1])
           try data.write(to: path, options: .atomic)
           print(String(decoding: data, as: UTF8.self))
-          guard !usableAcceptedModes.isEmpty else { exit(3) }
+          guard displayModeActivated else { exit(3) }
           SWIFT
           swift "$RUNNER_TEMP/mac-display-capability.swift" "$probe_dir/macos-display-capability.json"
 
@@ -882,7 +899,7 @@ jobs:
           [[ "$(xcodebuild -version | sed -n '1p')" == 'Xcode 27.2' ]]
           [[ "$(xcrun --sdk macosx --show-sdk-version)" == '27.2' ]]
 
-      - name: Select supported Xcode for Mac XCTest capture
+      - name: Select supported Xcode for Mac OCR capture
         if: inputs.target == 'macos-listing-capture-only'
         run: |
           set -euo pipefail
@@ -895,7 +912,7 @@ jobs:
         run: python3 scripts/flutter/load_sdk_pin.py --github-env
 
       - name: Install XcodeGen for native Mac UI capture
-        if: inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only'
+        if: inputs.target == 'macos-in-use-capture-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -1025,12 +1042,12 @@ jobs:
             --build-receipt "$APPLE_STORE_BUILD_RECEIPT" \
             --output-dir "$RUNNER_TEMP/apple-store-in-use-captures-macos"
 
-      - name: Capture the Mac Files and Books screen with XCTest
+      - name: Capture Files and Books in the real native Mac window
         if: inputs.target == 'macos-listing-capture-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
         run: |
-          python3 capture-tools/scripts/capture_apple_store_screenshots.py capture-macos-in-use-xctest \
+          python3 capture-tools/scripts/capture_apple_store_screenshots.py capture-macos-listing-window \
             --product-root "$GITHUB_WORKSPACE" \
             --app "$APPLE_STORE_APP_PATH" \
             --build-receipt "$APPLE_STORE_BUILD_RECEIPT" \

@@ -161,202 +161,106 @@ final class PleazyngAppInUseCaptureTests: XCTestCase {
 }
 '''
 
-MACOS_APP_IN_USE_UI_TEST = r'''import AppKit
+
+
+
+MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT = r'''import AppKit
 import CoreGraphics
+import Foundation
+
+_ = NSApplication.shared
+let displayID = CGMainDisplayID()
+let modes = (CGDisplayCopyAllDisplayModes(displayID, nil) as? [CGDisplayMode]) ?? []
+let selected = modes.first(where: {
+  $0.width == 1920 && $0.height == 1080 && $0.pixelWidth == 1920 && $0.pixelHeight == 1080
+    && $0.isUsableForDesktopGUI()
+})
+guard let selected else {
+  fputs("No usable native 1920x1080 display mode is available for a 1440x900 Mac app window.\n", stderr)
+  exit(3)
+}
+let switchResult = CGDisplaySetDisplayMode(displayID, selected, nil)
+guard switchResult == .success,
+      let active = CGDisplayCopyDisplayMode(displayID),
+      active.width == selected.width, active.height == selected.height,
+      active.pixelWidth == selected.pixelWidth, active.pixelHeight == selected.pixelHeight else {
+  fputs("The hosted Mac could not activate and verify native 1920x1080 mode.\n", stderr)
+  exit(4)
+}
+let bounds = CGDisplayBounds(displayID)
+let result: [String: Any] = [
+  "display_id": Int(displayID),
+  "selected_mode_points": [Double(selected.width), Double(selected.height)],
+  "selected_mode_pixels": [selected.pixelWidth, selected.pixelHeight],
+  "active_mode_points": [Double(active.width), Double(active.height)],
+  "active_mode_pixels": [active.pixelWidth, active.pixelHeight],
+  "display_bounds_points": [Double(bounds.width), Double(bounds.height)],
+  "usable_for_desktop_gui": active.isUsableForDesktopGUI(),
+  "target_native_window_points": [1440, 900],
+  "window_center_points": [240, 90],
+  "capture_api": "/usr/sbin/screencapture -x -o -l <app-window-id>",
+  "image_resized_or_padded": false,
+]
+let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
+print(String(decoding: data, as: UTF8.self))
+'''
+
+
+MACOS_WINDOW_BOUNDS_SWIFT = r'''import CoreGraphics
+import Foundation
+
+guard CommandLine.arguments.count == 3,
+      let targetPID = Int32(CommandLine.arguments[1]),
+      let targetWindowID = Int(CommandLine.arguments[2]) else { exit(2) }
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+guard let window = windows.first(where: {
+  ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == targetPID
+    && ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == targetWindowID
+    && (($0[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0.9
+}) else { exit(3) }
+let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+let result: [String: Any] = [
+  "window_id": targetWindowID,
+  "owner_pid": targetPID,
+  "on_screen": window[kCGWindowIsOnscreen as String] as? Bool ?? false,
+  "bounds_points": [
+    Double(bounds["X"] ?? 0), Double(bounds["Y"] ?? 0),
+    Double(bounds["Width"] ?? 0), Double(bounds["Height"] ?? 0),
+  ],
+  "title": window[kCGWindowName as String] as? String ?? "",
+]
+let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
+print(String(decoding: data, as: UTF8.self))
+'''
+
+
+MACOS_LISTING_OCR_SWIFT = r'''import CoreGraphics
 import Foundation
 import ImageIO
 import Vision
-import XCTest
 
-final class PleazyngMacAppInUseCaptureTests: XCTestCase {
-    private struct ScreenText {
-        let text: String
-        let bounds: CGRect
-    }
-
-    func testCaptureFilesAndBooksScreen() throws {
-        _ = NSApplication.shared
-        let displayID = CGMainDisplayID()
-        guard let modes = CGDisplayCopyAllDisplayModes(displayID, nil) as? [CGDisplayMode] else {
-            throw captureError("The hosted Mac did not expose supported display modes")
-        }
-        let acceptedSizes: Set<String> = ["1280x800", "1440x900", "2560x1600", "2880x1800"]
-        guard let selectedMode = modes
-            .filter({ acceptedSizes.contains("\($0.pixelWidth)x\($0.pixelHeight)") && $0.isUsableForDesktopGUI() })
-            .max(by: { $0.pixelWidth * $0.pixelHeight < $1.pixelWidth * $1.pixelHeight }) else {
-            throw captureError("The hosted Mac exposed no usable native mode matching an Apple Mac screenshot size")
-        }
-        let switchResult = CGDisplaySetDisplayMode(displayID, selectedMode, nil)
-        guard switchResult == .success else {
-            throw captureError("Could not select an Apple-approved native Mac display mode: \(switchResult)")
-        }
-        Thread.sleep(forTimeInterval: 2)
-        guard let activeMode = CGDisplayCopyDisplayMode(displayID),
-              activeMode.pixelWidth == selectedMode.pixelWidth,
-              activeMode.pixelHeight == selectedMode.pixelHeight else {
-            throw captureError("The hosted Mac did not retain the selected native screenshot mode")
-        }
-        let modeEvidence: [String: Any] = [
-            "display_id": Int(displayID),
-            "selected_mode_points": "\(selectedMode.width)x\(selectedMode.height)",
-            "selected_mode_pixels": "\(selectedMode.pixelWidth)x\(selectedMode.pixelHeight)",
-            "active_mode_points": "\(activeMode.width)x\(activeMode.height)",
-            "active_mode_pixels": "\(activeMode.pixelWidth)x\(activeMode.pixelHeight)",
-            "usable_for_desktop_gui": activeMode.isUsableForDesktopGUI(),
-            "capture_api": "XCUIScreen.main.screenshot()",
-            "native_fullscreen_shortcut": "Control-Command-F",
-            "image_was_resized_or_cropped": false,
-        ]
-        let modeEvidenceData = try JSONSerialization.data(withJSONObject: modeEvidence, options: [.sortedKeys])
-        try modeEvidenceData.write(
-            to: URL(fileURLWithPath: __PLEAZYNG_CAPTURE_DISPLAY_MODE_EVIDENCE__), options: .atomic)
-
-        let app = XCUIApplication(url: URL(fileURLWithPath: __PLEAZYNG_CAPTURE_APP_PATH__))
-        app.launch()
-        Thread.sleep(forTimeInterval: 2)
-        app.activate()
-        app.typeKey("f", modifierFlags: [.control, .command])
-        let screenshot = try waitForFullscreen(app, expected: selectedMode, timeout: 30)
-        let launchText = try screenText(in: screenshot)
-        attach(screenshot, named: "pleazyng-macos-launch-screen")
-        attach(lines: launchText, named: "pleazyng-macos-launch-vision-ocr")
-
-        if joined(launchText).localizedCaseInsensitiveContains("Start fresh") {
-            try clickVisibleText("Start fresh", in: app, timeout: 60)
-        }
-        try clickVisibleText("Use files and books", in: app, timeout: 90)
-
-        let finalScreenshot = try waitForFilesBooks(app, timeout: 90)
-        let finalText = try screenText(in: finalScreenshot)
-        let joinedFinalText = joined(finalText)
-        guard joinedFinalText.localizedCaseInsensitiveContains("Files and books")
-                || joinedFinalText.localizedCaseInsensitiveContains("Add a source or import a book") else {
-            throw captureError("The actual app did not show its local Files and Books interface; Vision saw: \(joinedFinalText)")
-        }
-        guard joinedFinalText.localizedCaseInsensitiveContains("Add source")
-                || joinedFinalText.localizedCaseInsensitiveContains("Import files") else {
-            throw captureError("The empty local library actions were not visible; Vision saw: \(joinedFinalText)")
-        }
-        attach(finalScreenshot, named: "pleazyng-app-in-use-screen")
-        attach(lines: finalText, named: "pleazyng-macos-files-books-vision-ocr")
-    }
-
-    private func waitForFullscreen(
-        _ app: XCUIApplication, expected mode: CGDisplayMode, timeout: TimeInterval
-    ) throws -> XCUIScreenshot {
-        let accepted = CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
-        let deadline = Date().addingTimeInterval(timeout)
-        var lastSize = CGSize.zero
-        repeat {
-            app.activate()
-            let screenshot = XCUIScreen.main.screenshot()
-            if let image = decode(screenshot), image.width == Int(accepted.width), image.height == Int(accepted.height) {
-                return screenshot
-            }
-            if let image = decode(screenshot) {
-                lastSize = CGSize(width: image.width, height: image.height)
-                attach(screenshot, named: "pleazyng-macos-unexpected-fullscreen-size-\(image.width)x\(image.height)")
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-        } while Date() < deadline
-        throw captureError("Native fullscreen screenshot size \(lastSize) did not match selected display pixels \(accepted)")
-    }
-
-    private func waitForFilesBooks(_ app: XCUIApplication, timeout: TimeInterval) throws -> XCUIScreenshot {
-        let deadline = Date().addingTimeInterval(timeout)
-        var observed = ""
-        repeat {
-            app.activate()
-            let screenshot = XCUIScreen.main.screenshot()
-            let lines = try screenText(in: screenshot)
-            observed = joined(lines)
-            if observed.localizedCaseInsensitiveContains("Add a source or import a book")
-                    && (observed.localizedCaseInsensitiveContains("Add source")
-                        || observed.localizedCaseInsensitiveContains("Import files")) {
-                return screenshot
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-        } while Date() < deadline
-        throw captureError("Timed out waiting for the actual empty local library; Vision saw: \(observed)")
-    }
-
-    private func clickVisibleText(_ expected: String, in app: XCUIApplication, timeout: TimeInterval) throws {
-        let deadline = Date().addingTimeInterval(timeout)
-        var lastLines: [ScreenText] = []
-        repeat {
-            app.activate()
-            let screenshot = XCUIScreen.main.screenshot()
-            let lines = try screenText(in: screenshot)
-            lastLines = lines
-            let matches = lines.filter { $0.text.localizedCaseInsensitiveContains(expected) }
-            if matches.count == 1, let match = matches.first {
-                let offset = CGVector(dx: match.bounds.midX, dy: 1 - match.bounds.midY)
-                guard offset.dx >= 0.02, offset.dx <= 0.98, offset.dy >= 0.02, offset.dy <= 0.98 else {
-                    throw captureError("The visible OCR target is outside safe fullscreen coordinates: \(match.bounds)")
-                }
-                attach(lines: lines, named: "pleazyng-macos-before-\(safeName(expected))-vision-ocr")
-                app.coordinate(withNormalizedOffset: offset).click()
-                Thread.sleep(forTimeInterval: 2)
-                return
-            }
-            Thread.sleep(forTimeInterval: 0.5)
-        } while Date() < deadline
-        throw captureError("Could not find one visible \(expected.debugDescription) target; Vision saw: \(joined(lastLines))")
-    }
-
-    private func screenText(in screenshot: XCUIScreenshot) throws -> [ScreenText] {
-        guard let image = decode(screenshot) else {
-            throw captureError("XCUIScreen.main.screenshot() did not provide a decodable PNG")
-        }
-        let request = VNRecognizeTextRequest()
-        request.usesLanguageCorrection = false
-        request.recognitionLanguages = ["en-US"]
-        request.recognitionLevel = .fast
-        for (stage, devices) in try request.supportedComputeStageDevices {
-            guard let cpu = devices.first(where: { if case .cpu = $0 { return true }; return false }) else {
-                throw captureError("Vision OCR has no CPU for required stage \(stage)")
-            }
-            request.setComputeDevice(cpu, for: stage)
-        }
-        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        return (request.results ?? []).compactMap { observation in
-            guard let text = observation.topCandidates(1).first?.string else { return nil }
-            return ScreenText(text: text, bounds: observation.boundingBox)
-        }
-    }
-
-    private func decode(_ screenshot: XCUIScreenshot) -> CGImage? {
-        guard let source = CGImageSourceCreateWithData(screenshot.pngRepresentation as CFData, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil)
-    }
-
-    private func joined(_ lines: [ScreenText]) -> String { lines.map(\.text).joined(separator: " ") }
-
-    private func attach(_ screenshot: XCUIScreenshot, named name: String) {
-        let attachment = XCTAttachment(screenshot: screenshot)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
-    private func attach(lines: [ScreenText], named name: String) {
-        let records = lines.map { ["text": $0.text, "bounds": NSStringFromRect($0.bounds)] }
-        guard let data = try? JSONSerialization.data(withJSONObject: records, options: [.sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else { return }
-        let attachment = XCTAttachment(string: text)
-        attachment.name = name
-        attachment.lifetime = .keepAlways
-        add(attachment)
-    }
-
-    private func safeName(_ value: String) -> String {
-        value.lowercased().replacingOccurrences(of: " ", with: "-")
-    }
-
-    private func captureError(_ message: String) -> NSError {
-        NSError(domain: "PleazyngMacListingCapture", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-    }
+guard CommandLine.arguments.count == 2,
+      let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: CommandLine.arguments[1]) as CFURL, nil),
+      let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+  fputs("Could not decode screenshot PNG for native Vision OCR.\n", stderr)
+  exit(2)
 }
+let request = VNRecognizeTextRequest()
+request.usesLanguageCorrection = false
+request.recognitionLanguages = ["en-US"]
+request.recognitionLevel = .fast
+for (stage, devices) in try request.supportedComputeStageDevices {
+  guard let cpu = devices.first(where: { if case .cpu = $0 { return true }; return false }) else {
+    fputs("Vision OCR has no CPU for required stage.\n", stderr)
+    exit(4)
+  }
+  request.setComputeDevice(cpu, for: stage)
+}
+try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+let result: [String: Any] = ["image_pixels": [image.width, image.height], "recognized_lines": lines]
+let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
+print(String(decoding: data, as: UTF8.self))
 '''
 
 
@@ -2453,169 +2357,198 @@ def run_app_in_use_ui_test(
         return screenshot, runner_metadata, signing_state
 
 
-def run_macos_app_in_use_ui_test(app: Path, output: Path) -> tuple[Path, dict[str, Any]]:
-    project_spec_data = {
-        "name": "PleazyngMacInUseCapture",
-        "options": {
-            "bundleIdPrefix": "org.snapetech.pleazyng.capture",
-            "xcodeVersion": "26.5",
-            "deploymentTarget": {"macOS": "14.0"},
-        },
-        "targets": {
-            "PleazyngMacAppInUseCaptureTests": {
-                "type": "bundle.ui-testing",
-                "platform": "macOS",
-                "sources": ["CaptureTests.swift"],
-                "settings": {
-                    "base": {
-                        "PRODUCT_BUNDLE_IDENTIFIER": "org.snapetech.pleazyng.capture-macos-ui-tests",
-                        "GENERATE_INFOPLIST_FILE": "YES",
-                        "SWIFT_VERSION": "5.0",
-                        "CODE_SIGN_IDENTITY": "-",
-                    },
-                },
-            },
-        },
-        "schemes": {
-            "PleazyngMacInUseCapture": {
-                "build": {"targets": {"PleazyngMacAppInUseCaptureTests": ["test"]}},
-                "test": {
-                    "targets": ["PleazyngMacAppInUseCaptureTests"],
-                    "captureScreenshotsAutomatically": False,
-                    "deleteScreenshotsWhenEachTestSucceeds": True,
-                },
-            },
-        },
-    }
-    with tempfile.TemporaryDirectory(prefix="pleazyng-macos-in-use-ui-test-") as temporary:
-        project_root = Path(temporary)
-        project_spec = project_root / "project.json"
-        project_spec.write_text(json.dumps(project_spec_data, indent=2) + "\n", encoding="utf-8")
-        test_source = project_root / "CaptureTests.swift"
-        test_source.write_text(
-            MACOS_APP_IN_USE_UI_TEST
-            .replace("__PLEAZYNG_CAPTURE_APP_PATH__", json.dumps(str(app)))
-            .replace(
-                "__PLEAZYNG_CAPTURE_DISPLAY_MODE_EVIDENCE__",
-                json.dumps(str(output / "macos-01-files-and-books.display-mode.json")),
-            ),
-            encoding="utf-8",
+def run_macos_swift_json(source: str, arguments: list[str], *, timeout: int = 180) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="pleazyng-macos-native-capture-") as temporary:
+        swift_file = Path(temporary) / "capture.swift"
+        swift_file.write_text(source, encoding="utf-8")
+        environment = dict(os.environ)
+        for key in ("GH_TOKEN", "GITHUB_TOKEN", "APPLE_API_PRIVATE_KEY"):
+            environment.pop(key, None)
+        result = subprocess.run(
+            ["swift", str(swift_file), *arguments],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=environment,
         )
-        run([
-            "xcodegen", "generate", "--spec", str(project_spec), "--project", str(project_root),
-        ], timeout=180)
-        project = project_root / "PleazyngMacInUseCapture.xcodeproj"
-        project_inventory = json.loads(run([
-            "xcodebuild", "-list", "-json", "-project", str(project),
-        ], capture=True, timeout=180))
-        targets = project_inventory.get("project", {}).get("targets", [])
-        if targets != ["PleazyngMacAppInUseCaptureTests"]:
-            raise RuntimeError(f"The Mac UI capture project contains an unexpected target set: {targets}")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Native Mac capture helper failed with exit code {result.returncode}: "
+            f"{(result.stderr or result.stdout).strip()}"
+        )
+    try:
+        record = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Native Mac capture helper returned invalid JSON: {result.stdout[:1000]}") from error
+    if not isinstance(record, dict):
+        raise RuntimeError("Native Mac capture helper returned a non-object result")
+    return record
 
-        result_bundle = project_root / "capture.xcresult"
-        log_path = output / "macos-01-files-and-books.ui-test.log"
-        command = [
-            "xcodebuild", "test",
-            "-project", str(project),
-            "-scheme", "PleazyngMacInUseCapture",
-            "-destination", "platform=macOS",
-            "-derivedDataPath", str(project_root / "derived-data"),
-            "-resultBundlePath", str(result_bundle),
-            "-parallel-testing-enabled", "NO",
-            "-testLanguage", "en",
-            "-testRegion", "US",
-            "-only-testing:PleazyngMacAppInUseCaptureTests/PleazyngMacAppInUseCaptureTests/testCaptureFilesAndBooksScreen",
-        ]
-        with log_path.open("w", encoding="utf-8") as log_file:
-            result = subprocess.run(
-                command,
-                check=False,
-                text=True,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                timeout=1800,
-            )
-        if result.returncode != 0:
-            failed_result_bundle = output / "macos-01-files-and-books.failed.xcresult"
-            if result_bundle.is_dir():
-                shutil.copytree(result_bundle, failed_result_bundle)
-                failed_attachment_dir = output / "macos-01-files-and-books.failed-attachments"
-                export_result = subprocess.run(
-                    [
-                        "xcrun", "xcresulttool", "export", "attachments",
-                        "--path", str(result_bundle),
-                        "--output-path", str(failed_attachment_dir),
-                    ],
-                    check=False,
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    timeout=180,
-                )
-                if export_result.returncode != 0:
-                    (output / "macos-01-files-and-books.failed-attachment-export.log").write_text(
-                        export_result.stdout, encoding="utf-8"
-                    )
-            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
-            raise RuntimeError(
-                f"The Mac app-in-use UI test failed with exit code {result.returncode}; "
-                f"runner log is retained at {log_path}; failure result bundle is retained at "
-                f"{failed_result_bundle if failed_result_bundle.exists() else 'unavailable'}:\n"
-                + "\n".join(tail)
-            )
 
-        export_dir = project_root / "exported-attachments"
-        run([
-            "xcrun", "xcresulttool", "export", "attachments",
-            "--path", str(result_bundle),
-            "--output-path", str(export_dir),
-        ], timeout=180)
-        manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
-        matches = [
-            attachment
-            for test in manifest
-            for attachment in test.get("attachments", [])
-            if attachment.get("suggestedHumanReadableName", "").startswith("pleazyng-app-in-use-screen")
-        ]
-        if len(matches) != 1:
-            raise RuntimeError(f"Expected one named Mac app screenshot attachment; found {len(matches)}")
-        exported_name = matches[0].get("exportedFileName", "")
-        if not exported_name or Path(exported_name).name != exported_name:
-            raise ValueError("The Mac XCTest screenshot attachment has an invalid exported filename")
-        exported_screenshot = export_dir / exported_name
-        if not exported_screenshot.is_file():
-            raise FileNotFoundError(f"XCTest did not export its named Mac screenshot: {exported_screenshot}")
-        screenshot = output / "macos-01-files-and-books.png"
-        shutil.copyfile(exported_screenshot, screenshot)
-        png_encoding = normalize_opaque_rgb_png(screenshot)
-        if png_color_type(screenshot) != 2:
-            raise ValueError(f"Mac App Store screenshot must be RGB after alpha validation: {screenshot}")
-        width, height = png_dimensions(screenshot)
-        if (width, height) not in ((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)):
-            raise ValueError(
-                f"Mac App Store screenshot must use an accepted native fullscreen size; received {width}x{height}: {screenshot}"
-            )
-        metadata = {
-            "project_target": "PleazyngMacAppInUseCaptureTests",
-            "project_targets": targets,
-            "project_sha256": sha256_file(project_spec),
-            "test_source_sha256": sha256_file(test_source),
-            "test_identifier": matches[0].get("suggestedHumanReadableName"),
-            "test_target_bundle_id": "org.snapetech.pleazyng.capture-macos-ui-tests",
-            "product_app_bundle_id": BUNDLE_ID,
-            "product_app_path": str(app),
-            "xcode_version": run(["xcodebuild", "-version"], capture=True, timeout=60),
-            "screenshot_attachment": exported_name,
-            "screenshot_dimensions": [width, height],
-            "screenshot_png_encoding": png_encoding,
-            "screenshot_capture_sha256": sha256_file(screenshot),
-            "screenshot_was_resized_or_cropped": False,
-            "product_target_compiled": False,
-            "purchase_actions_performed": False,
-        }
-        display_mode_path = output / "macos-01-files-and-books.display-mode.json"
-        metadata["display_mode"] = json.loads(display_mode_path.read_text(encoding="utf-8"))
-        return screenshot, metadata
+def resize_macos_app_window(pid: int, *, width: int, height: int, x: int, y: int) -> dict[str, int]:
+    script = "\n".join((
+        "on run",
+        f"  set targetPid to {pid}",
+        "  tell application \"System Events\"",
+        "    set targetProcess to first application process whose unix id is targetPid",
+        "    set frontmost of targetProcess to true",
+        "    set targetWindow to first window of targetProcess",
+        f"    set size of targetWindow to {{{width}, {height}}}",
+        f"    set position of targetWindow to {{{x}, {y}}}",
+        "    delay 1",
+        "    set actualSize to size of targetWindow",
+        "    set actualPosition to position of targetWindow",
+        "    return ((item 1 of actualSize) as text) & \"|\" & ((item 2 of actualSize) as text) & \"|\" & ((item 1 of actualPosition) as text) & \"|\" & ((item 2 of actualPosition) as text)",
+        "  end tell",
+        "end run",
+    ))
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"System Events could not resize the real Pleazyng window: {(result.stderr or result.stdout).strip()}")
+    fields = result.stdout.strip().split("|")
+    if len(fields) != 4 or any(re.fullmatch(r"-?[0-9]+", value) is None for value in fields):
+        raise RuntimeError(f"System Events returned unexpected Pleazyng window geometry: {result.stdout!r}")
+    actual = dict(zip(("width", "height", "x", "y"), map(int, fields), strict=True))
+    requested = {"width": width, "height": height, "x": x, "y": y}
+    if actual != requested:
+        raise RuntimeError(f"System Events did not apply the requested app window geometry: requested={requested}, actual={actual}")
+    return actual
+
+
+def macos_screen_ocr(path: Path) -> dict[str, Any]:
+    evidence = run_macos_swift_json(MACOS_LISTING_OCR_SWIFT, [str(path)], timeout=120)
+    expected_size = list(png_dimensions(path))
+    if evidence.get("image_pixels") != expected_size:
+        raise RuntimeError(f"Vision OCR decoded a different screenshot size than the PNG header: {evidence}")
+    lines = evidence.get("recognized_lines")
+    if not isinstance(lines, list) or any(not isinstance(line, str) for line in lines):
+        raise RuntimeError("Vision OCR returned malformed text evidence")
+    evidence["screenshot_sha256"] = sha256_file(path)
+    evidence["png_dimensions"] = expected_size
+    evidence["recognized_text"] = " ".join(lines)
+    return evidence
+
+
+def require_macos_listing_markers(evidence: dict[str, Any], *, before_navigation: bool) -> None:
+    text = str(evidence.get("recognized_text", ""))
+    if before_navigation:
+        if "Use files and books" not in text:
+            raise ValueError(f"The fresh app screen did not visibly offer Files and Books; Vision saw: {text}")
+        return
+    has_import = "Import files" in text
+    has_empty_state = "Add a source or import a book" in text or "Add source" in text
+    if not has_import or not has_empty_state:
+        raise ValueError(f"The real empty Files and Books screen was not visible; Vision saw: {text}")
+
+
+def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dict[str, Any]]:
+    display_mode = run_macos_swift_json(MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT, [])
+    display_mode_path = output / "macos-01-files-and-books.display-mode.json"
+    display_mode_path.write_text(json.dumps(display_mode, indent=2) + "\n", encoding="utf-8")
+    mode_points = display_mode.get("active_mode_points")
+    mode_pixels = display_mode.get("active_mode_pixels")
+    if mode_points != [1920.0, 1080.0] or mode_pixels != [1920, 1080]:
+        raise ValueError(f"The app window capture requires the verified 1920x1080 native display mode: {display_mode}")
+
+    environment = dict(os.environ)
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "APPLE_API_PRIVATE_KEY"):
+        environment.pop(key, None)
+    open_result = subprocess.run(
+        ["open", "-n", "-a", str(app)],
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        env=environment,
+    )
+    if open_result.returncode != 0:
+        raise RuntimeError(f"Could not launch the retained product app: {(open_result.stderr or open_result.stdout).strip()}")
+    app_pid, initial_window_id = _launched_app_pid_and_window(app)
+    run(["osascript", "-e", f'tell application id "{BUNDLE_ID}" to activate'], timeout=60)
+    _run_paywall_applescript(app_pid, "wait", "Use files and books")
+
+    with tempfile.TemporaryDirectory(prefix="pleazyng-macos-listing-screen-ocr-") as temporary:
+        before_path = Path(temporary) / "before.png"
+        run(["/usr/sbin/screencapture", "-x", str(before_path)], timeout=60)
+        before_ocr = macos_screen_ocr(before_path)
+        require_macos_listing_markers(before_ocr, before_navigation=True)
+
+        _run_paywall_applescript(app_pid, "click", "Use files and books")
+        _run_paywall_applescript(app_pid, "wait", "Import files")
+        time.sleep(3)
+        after_path = Path(temporary) / "after.png"
+        run(["/usr/sbin/screencapture", "-x", str(after_path)], timeout=60)
+        after_ocr = macos_screen_ocr(after_path)
+        require_macos_listing_markers(after_ocr, before_navigation=False)
+
+    display_width, display_height = map(int, mode_points)
+    target_window = {"width": 1440, "height": 900, "x": (display_width - 1440) // 2, "y": (display_height - 900) // 2}
+    resize = resize_macos_app_window(app_pid, **target_window)
+    final_pid, window_id = _launched_app_pid_and_window(app)
+    if final_pid != app_pid:
+        raise RuntimeError("The Pleazyng process changed while navigating to Files and Books")
+    geometry = run_macos_swift_json(MACOS_WINDOW_BOUNDS_SWIFT, [str(final_pid), str(window_id)])
+    bounds = geometry.get("bounds_points")
+    if (geometry.get("window_id") != int(window_id) or geometry.get("on_screen") is not True
+            or not isinstance(bounds, list) or len(bounds) != 4
+            or bounds[2:] != [1440.0, 900.0]):
+        raise ValueError(f"The actual product window did not retain the requested native 1440x900 geometry: {geometry}")
+
+    screenshot = output / "macos-01-files-and-books.png"
+    run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(window_id), str(screenshot)], timeout=120)
+    width, height = png_dimensions(screenshot)
+    scale_x = mode_pixels[0] / mode_points[0]
+    scale_y = mode_pixels[1] / mode_points[1]
+    expected_size = (round(1440 * scale_x), round(900 * scale_y))
+    if (width, height) != expected_size:
+        raise ValueError(
+            f"The native app-window screenshot is {width}x{height}; expected the real 1440x900-point window "
+            f"at {scale_x:g}x{scale_y:g} display scale ({expected_size[0]}x{expected_size[1]} pixels). "
+            f"The unmodified window capture remains at {screenshot}."
+        )
+    if (width, height) not in ((1440, 900), (2880, 1800)):
+        raise ValueError(f"Mac App Store screenshot size is not accepted: {width}x{height}: {screenshot}")
+    final_ocr = macos_screen_ocr(screenshot)
+    require_macos_listing_markers(final_ocr, before_navigation=False)
+    png_encoding = normalize_opaque_rgb_png(screenshot)
+    if png_color_type(screenshot) != 2:
+        raise ValueError(f"Mac App Store screenshots must be opaque RGB PNGs: {screenshot}")
+
+    for filename, evidence in (
+        ("macos-01-files-and-books.before-ocr.json", before_ocr),
+        ("macos-01-files-and-books.after-navigation-ocr.json", after_ocr),
+        ("macos-01-files-and-books.final-window-ocr.json", final_ocr),
+        ("macos-01-files-and-books.window.json", {"resize_request_and_result": resize, **geometry}),
+    ):
+        (output / filename).write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+    metadata = {
+        "product_app_bundle_id": BUNDLE_ID,
+        "product_app_path": str(app),
+        "launch_process_id": app_pid,
+        "initial_window_id": int(initial_window_id),
+        "captured_window_id": int(window_id),
+        "xcode_version": run(["xcodebuild", "-version"], capture=True, timeout=60),
+        "display_mode": display_mode,
+        "window_resize": resize,
+        "window_geometry": geometry,
+        "pre_navigation_ocr_file": "macos-01-files-and-books.before-ocr.json",
+        "post_navigation_ocr_file": "macos-01-files-and-books.after-navigation-ocr.json",
+        "final_window_ocr_file": "macos-01-files-and-books.final-window-ocr.json",
+        "screenshot_dimensions": [width, height],
+        "screenshot_png_encoding": png_encoding,
+        "screenshot_capture_sha256": sha256_file(screenshot),
+        "screenshot_resized_or_padded": False,
+        "screenshot_crop_scope": "The complete native Pleazyng app window selected by its live CoreGraphics window ID; no crop or resampling was applied.",
+        "purchase_actions_performed": False,
+    }
+    return screenshot, metadata
 
 
 def capture_simulator(
@@ -3270,7 +3203,7 @@ def capture_macos_in_use(args: argparse.Namespace) -> None:
     print(f"Captured authentic Mac Files and Books and lifetime-access screens in {output}")
 
 
-def capture_macos_in_use_xctest(args: argparse.Namespace) -> None:
+def capture_macos_listing_window(args: argparse.Namespace) -> None:
     product_root = args.product_root.resolve(strict=True)
     require_source(product_root)
     tool_source_sha = require_capture_tools_sha()
@@ -3296,27 +3229,17 @@ def capture_macos_in_use_xctest(args: argparse.Namespace) -> None:
         raise ValueError("The restored Mac app has no verifiable build-configuration evidence")
 
     output = args.output_dir.resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    screenshot, ui_test_metadata = run_macos_app_in_use_ui_test(app, output)
-    png_encoding = ui_test_metadata["screenshot_png_encoding"]
+    output.mkdir(parents=True, exist_ok=True)
+    unexpected = [path.name for path in output.iterdir() if path.name != "macos-display-capability.json"]
+    if unexpected:
+        raise FileExistsError(f"Refusing to overwrite unexpected Mac capture output files: {unexpected}")
+    screenshot, native_capture = run_macos_listing_window_capture(app, output)
     width, height = png_dimensions(screenshot)
-    if (width, height) not in ((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)):
-        raise ValueError(
-            f"Mac App Store screenshots must be 16:10 at a supported pixel size; received {width}x{height}. "
-            f"The unmodified XCTest screenshot is retained at {screenshot}."
-        )
+    if (width, height) not in ((1440, 900), (2880, 1800)):
+        raise ValueError(f"Mac App Store screenshot has unsupported dimensions {width}x{height}: {screenshot}")
     color_type = png_color_type(screenshot)
     if color_type != 2:
-        raise ValueError(
-            f"Mac App Store screenshots must be opaque RGB PNGs; received PNG color type {color_type}. "
-            f"The unmodified XCTest screenshot is retained at {screenshot}."
-        )
-    device = {
-        "kind": "GitHub-hosted macOS desktop",
-        "model": run(["sysctl", "-n", "hw.model"], capture=True, timeout=30),
-        "architecture": run(["uname", "-m"], capture=True, timeout=30),
-        "os_version": run(["sw_vers", "-productVersion"], capture=True, timeout=30),
-    }
+        raise ValueError(f"Mac App Store screenshots must be opaque RGB PNGs; received color type {color_type}: {screenshot}")
     capture = {
         "filename": screenshot.name,
         "platform": "macOS",
@@ -3326,8 +3249,9 @@ def capture_macos_in_use_xctest(args: argparse.Namespace) -> None:
             "no media server, account, or media was configured."
         ),
         "capture_method": [
-            "XCTest UI automation; native macOS fullscreen; XCUIScreen.main.screenshot() exported from the test result bundle; "
-            "Vision OCR verified the real interface and drove native coordinate clicks"
+            "System Events clicked the visible Use files and books action; Vision OCR verified the live screen before and after navigation; "
+            "the actual app window was resized to 1440x900 points on a native 1920x1080 display and captured with "
+            "/usr/sbin/screencapture -x -o -l <app-window-id>"
         ],
         "capture_run_id": os.environ.get("GITHUB_RUN_ID", ""),
         "capture_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
@@ -3344,18 +3268,23 @@ def capture_macos_in_use_xctest(args: argparse.Namespace) -> None:
         "dimensions": [width, height],
         "png_color_type": color_type,
         "png_alpha_channel": False,
-        "png_encoding": png_encoding,
+        "png_encoding": native_capture["screenshot_png_encoding"],
         "screen_content_check": require_visible_screen_content(screenshot),
-        "device": device,
+        "device": {
+            "kind": "GitHub-hosted macOS desktop",
+            "model": run(["sysctl", "-n", "hw.model"], capture=True, timeout=30),
+            "architecture": run(["uname", "-m"], capture=True, timeout=30),
+            "os_version": run(["sw_vers", "-productVersion"], capture=True, timeout=30),
+        },
         "build_defines": IOS_MAC_STORE_DEFINES,
-        "ui_test_runner": ui_test_metadata,
+        "native_window_capture": native_capture,
         "qualification": (
-            "Authentic post-onboarding local Files and Books interface from the exact unsigned App Store app bundle. "
+            "Authentic local Files and Books interface from the exact unsigned App Store app bundle, captured from its native app window. "
             "No content, server connection, playback, StoreKit transaction, or purchase is represented."
         ),
     }
     write_capture_manifest(output, "macOS", [capture])
-    print(f"Captured authentic Mac Files and Books screen in {output}")
+    print(f"Captured authentic Mac Files and Books app window in {output}")
 
 
 MACOS_DIAGNOSTIC_WINDOWS_SWIFT = r'''
@@ -4146,12 +4075,12 @@ def parse_args() -> argparse.Namespace:
     macos_in_use.add_argument("--build-receipt", required=True, type=Path)
     macos_in_use.add_argument("--output-dir", required=True, type=Path)
     macos_in_use.set_defaults(handler=capture_macos_in_use)
-    macos_in_use_xctest = subparsers.add_parser("capture-macos-in-use-xctest")
-    macos_in_use_xctest.add_argument("--product-root", required=True, type=Path)
-    macos_in_use_xctest.add_argument("--app", required=True, type=Path)
-    macos_in_use_xctest.add_argument("--build-receipt", required=True, type=Path)
-    macos_in_use_xctest.add_argument("--output-dir", required=True, type=Path)
-    macos_in_use_xctest.set_defaults(handler=capture_macos_in_use_xctest)
+    macos_listing_window = subparsers.add_parser("capture-macos-listing-window")
+    macos_listing_window.add_argument("--product-root", required=True, type=Path)
+    macos_listing_window.add_argument("--app", required=True, type=Path)
+    macos_listing_window.add_argument("--build-receipt", required=True, type=Path)
+    macos_listing_window.add_argument("--output-dir", required=True, type=Path)
+    macos_listing_window.set_defaults(handler=capture_macos_listing_window)
     macos_diagnostic = subparsers.add_parser("diagnose-macos-in-use")
     macos_diagnostic.add_argument("--product-root", required=True, type=Path)
     macos_diagnostic.add_argument("--app", required=True, type=Path)
