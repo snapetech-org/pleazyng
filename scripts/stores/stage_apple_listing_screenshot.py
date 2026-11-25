@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Place the exact release's reviewed Open media screenshot in its tvOS draft."""
+"""Place a verified Open media screenshot in its matching App Store draft."""
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -16,35 +17,96 @@ from build_apple_store_archive import AppleProfileAPI, BUNDLE, _apple_api_token
 from stores.prepare_apple_review_draft import APP_ID, exact_record, prepare
 
 
-SCREENSHOT = 'tvos-01-files-and-books-localtest.png'
 SCREENSHOT_TYPE = 'APP_SCREENSHOT'
 CATEGORY = 'APP_SCREENSHOTS_AND_PREVIEWS'
-SIZE = (1920, 1080)
+MAX_IMAGE_BYTES = 16 * 1024 * 1024
 
 
-def read_capture(directory, version, build, source, run, attempt, workflow_source):
+@dataclass(frozen=True)
+class Listing:
+    name: str
+    device: str
+    filename: str
+    catalog_platform: str
+    group: str
+    sizes: frozenset[tuple[int, int]]
+
+
+LISTINGS = {
+    'IOS': Listing('iPad', 'ipad', 'ipad-01-files-and-books.png', 'IPAD_APP_STORE', 'IPAD_13_PROFILE',
+                   frozenset({(2064, 2752), (2752, 2064), (2048, 2732), (2732, 2048)})),
+    'MAC_OS': Listing('Mac', 'macos', 'macos-01-files-and-books.png', 'MAC_APP_STORE', 'MAC_PROFILE',
+                      frozenset({(1280, 800), (1440, 900), (2560, 1600), (2880, 1800)})),
+    'TV_OS': Listing('Apple TV', 'tvos', 'tvos-01-files-and-books-localtest.png', 'TV_APP_STORE', 'TV_PROFILE',
+                     frozenset({(1920, 1080)})),
+}
+
+
+def read_capture(directory, platform, version, build, source, run, attempt, workflow_source):
+    listing = LISTINGS[platform]
     data = json.loads((directory / 'capture-provenance.json').read_text())
+    if platform == 'TV_OS':
+        size, expected_digest, expected_bytes = read_tv_provenance(
+            data, listing.filename, version, build, source, run, attempt, workflow_source)
+    else:
+        size, expected_digest = read_native_provenance(
+            data, platform, listing.filename, version, build, source, workflow_source)
+        expected_bytes = None
+
+    with (directory / listing.filename).open('rb') as stream:
+        image = stream.read(MAX_IMAGE_BYTES + 1)
+    digest = hashlib.sha256(image).hexdigest()
+    if (not 33 <= len(image) <= MAX_IMAGE_BYTES or (expected_bytes is not None and len(image) != expected_bytes)
+            or digest != expected_digest or size not in listing.sizes
+            or image[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+            or struct.unpack('>IIBB', image[16:26]) != (*size, 8, 2)):
+        raise ValueError(f'Unexpected {listing.name} screenshot digest, PNG format, or dimensions')
+    return image, digest, size
+
+
+def read_tv_provenance(data, filename, version, build, source, run, attempt, workflow_source):
     product = data['product']
     capture = data['capture']
     lineage = product['source_lineage']
-    record = data['screenshots'][SCREENSHOT]
+    record = data['screenshots'][filename]
     if ((product['version'], product['build'], product['bundle_id'], product['source_sha'])
             != (version, build, BUNDLE, source)
             or lineage['workflow_source_sha'] != workflow_source
-            or (capture['run_id'], capture['run_attempt'], capture['platform']) != (run, attempt, 'tvos')
-            or tuple(record['dimensions']) != SIZE or not 0 < record['size_bytes'] <= 4 * 1024 * 1024):
+            or (capture['run_id'], capture['run_attempt'], capture['platform']) != (run, attempt, 'tvos')):
         raise ValueError('Screenshot capture does not match the exact published tvOS release')
-    with (directory / SCREENSHOT).open('rb') as stream:
-        image = stream.read(4 * 1024 * 1024 + 1)
-    digest = hashlib.sha256(image).hexdigest()
-    if (len(image) != record['size_bytes'] or digest != record['sha256']
-            or image[:16] != b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
-            or struct.unpack('>IIBB', image[16:26]) != (*SIZE, 8, 2)):
-        raise ValueError('Unexpected tvOS screenshot digest, PNG format, or dimensions')
-    return image, digest
+    return tuple(record['dimensions']), record['sha256'], record['size_bytes']
 
 
-def screenshot_spec(api, size_bytes):
+def read_native_provenance(data, platform, filename, version, build, source, workflow_source):
+    manifest_platform, capture_platform, configuration = {
+        'IOS': ('iOS and iPadOS', 'iOS', 'Debug Simulator'),
+        'MAC_OS': ('macOS', 'macOS', 'Release Archive'),
+    }[platform]
+    source_tag = data['source_tag']
+    defines = ['SUPPORTER_MODE=iap', 'ENABLE_UPDATE_CHECK=false', f'GIT_COMMIT={source}',
+               'PLEAZYNG_DISCORD_APPLICATION_ID=']
+    if (data['schema_version'] != 1 or data['product'] != 'Pleazyng'
+            or data['platform'] != manifest_platform or data['build_mode'] != 'App Store IAP'
+            or data['build_configuration'] != configuration or data['build_defines'] != defines
+            or source_tag not in {f'v{version}', f'v{version}-candidate.{source}'}
+            or (data['product_version'], data['product_build'], data['source_sha'], data['capture_tools_sha'])
+            != (version, build, source, workflow_source)):
+        raise ValueError(f'Screenshot manifest does not match the published {manifest_platform} release')
+    matches = [capture for capture in data['captures'] if capture['filename'] == filename]
+    if len(matches) != 1:
+        raise ValueError('Expected one Open media screenshot in the verified capture manifest')
+    record = matches[0]
+    if ((record['app_version'], record['app_build'], record['bundle_id'], record['source_sha'], record['source_tag'])
+            != (version, build, BUNDLE, source, source_tag)
+            or record['capture_tools_sha'] != workflow_source or record['platform'] != capture_platform
+            or record['build_configuration'] != configuration or record['build_defines'] != defines
+            or not record['capture_scene'].startswith('Post-onboarding local Files and Books screen.')
+            or not record['qualification'] or not re.fullmatch(r'[0-9a-f]{64}', record['app_bundle_sha256'])):
+        raise ValueError(f'Unexpected {manifest_platform} screenshot provenance')
+    return tuple(record['dimensions']), record['capture_sha256']
+
+
+def screenshot_spec(api, listing, size, size_bytes):
     data = exact_record(api.items('/v1/appAssetLibraryRefData'), 'appAssetLibraryRefData', lambda _: True)
     catalog = data['attributes']
     types = [entry for entry in catalog['placementTypes'] if entry['placementTypeId'] == SCREENSHOT_TYPE]
@@ -56,19 +118,21 @@ def screenshot_spec(api, size_bytes):
         for policy in feature['placementPolicies'] if policy['placementType'] == SCREENSHOT_TYPE
         for limit in policy['groupLimits'] for group in limit['groupIds']
     }
-    tv_groups = {group['placementProfileGroupId'] for group in catalog['placementProfileGroups']
-                 if group['platform'] == 'TV_APP_STORE'}
-    specs = {spec['specId'] for spec in catalog['imageSpecs']
-             if spec['dimensions'] == dict(zip(('minWidth', 'maxWidth', 'minHeight', 'maxHeight'),
-                                               (SIZE[0], SIZE[0], SIZE[1], SIZE[1])))
-             and 'image/png' in spec['mimeTypes'] and size_bytes <= spec['maxFileSize']}
-    matches = [(mapping['placementGroupId'], specs.intersection(mapping['specs']))
-               for mapping in types[0]['specMappings']
-               if mapping['placementGroupId'] in tv_groups & limits.keys() and specs.intersection(mapping['specs'])]
-    if len(matches) != 1:
-        raise ValueError('The approved 1920×1080 PNG does not match one Apple TV placement group')
-    group, accepted_specs = matches[0]
-    return group, accepted_specs, limits[group]
+    groups = {group['placementProfileGroupId'] for group in catalog['placementProfileGroups']
+              if group['platform'] == listing.catalog_platform}
+    width, height = size
+    specs = set()
+    for spec in catalog['imageSpecs']:
+        dimensions = spec.get('dimensions') or {}
+        if (dimensions.get('minWidth', width + 1) <= width <= dimensions.get('maxWidth', width - 1)
+                and dimensions.get('minHeight', height + 1) <= height <= dimensions.get('maxHeight', height - 1)
+                and 'image/png' in spec['mimeTypes'] and size_bytes <= spec['maxFileSize']):
+            specs.add(spec['specId'])
+    accepted_specs = {spec for mapping in types[0]['specMappings'] if mapping['placementGroupId'] == listing.group
+                      for spec in mapping['specs']} & specs
+    if listing.group not in groups or not limits.get(listing.group) or not accepted_specs:
+        raise ValueError(f'Apple does not accept the {size[0]}×{size[1]} PNG for {listing.group}')
+    return accepted_specs, limits[listing.group]
 
 
 def upload_parts(api, operations, image):
@@ -110,10 +174,11 @@ def wait_for_asset(api, path, *, accepted, pending):
     raise TimeoutError('Apple is still processing the exact screenshot')
 
 
-def stage(api, version, build, image, digest):
-    inspection = prepare(api, 'TV_OS', version, build, inspect_only=True)
+def stage(api, platform, version, build, image, digest, size):
+    listing = LISTINGS[platform]
+    inspection = prepare(api, platform, version, build, inspect_only=True)
     if not inspection['exact_build_attached'] or inspection['observed_draft_state'] != 'PREPARE_FOR_SUBMISSION':
-        raise ValueError('The exact attached build must be an editable Apple TV review draft')
+        raise ValueError(f'The exact attached build must be an editable {listing.name} review draft')
     localizations = [locale for locale in inspection['localizations'] if locale['locale'] == 'en-US']
     if len(localizations) != 1:
         raise ValueError('Expected one en-US App Store version localization')
@@ -121,19 +186,20 @@ def stage(api, version, build, image, digest):
     library = api.request(f'/v1/apps/{APP_ID}/assetLibrary')['data']
     if library.get('type') != 'appAssetLibraries':
         raise ValueError('App Store Connect returned an unexpected asset library')
-    group, accepted_specs, limit = screenshot_spec(api, len(image))
+    group = listing.group
+    accepted_specs, limit = screenshot_spec(api, listing, size, len(image))
 
-    reference = f'Pleazyng {version} Apple TV Open media {digest[:16]}'
+    reference = f'Pleazyng {version} {listing.name} Open media {digest[:16]}'
     filter_query = urlencode({'filter[referenceName]': reference})
     assets = api.items(f'/v1/appAssetLibraries/{library["id"]}/images?{filter_query}')
-    expected_name = f'pleazyng-{version}-tvos-open-media.png'
+    expected_name = f'pleazyng-{version}-{listing.device}-open-media.png'
     if assets:
         asset = exact_record(assets, 'appAssetLibraryImages', lambda meta:
                              meta['referenceName'] == reference and meta['fileName'] == expected_name
                              and meta['fileSize'] == len(image) and meta['category'] == CATEGORY)
     else:
         if sum(item['group'] == group for item in localizations[0]['screenshots']) >= limit:
-            raise ValueError('The Apple TV screenshot group has reached its placement limit')
+            raise ValueError(f'The {listing.name} screenshot group has reached its placement limit')
         asset = api.request('/v1/appAssetLibraryImages', {'data': {
             'type': 'appAssetLibraryImages',
             'attributes': {'fileName': expected_name, 'fileSize': len(image), 'category': CATEGORY,
@@ -158,7 +224,7 @@ def stage(api, version, build, image, digest):
                                  attrs['placementGroup'] == group and attrs['placementType'] == SCREENSHOT_TYPE)
     else:
         if sum(item['group'] == group for item in localizations[0]['screenshots']) >= limit:
-            raise ValueError('The Apple TV screenshot group has reached its placement limit')
+            raise ValueError(f'The {listing.name} screenshot group has reached its placement limit')
         placement = api.request('/v1/appAssetLibraryPlacements', {'data': {
             'type': 'appAssetLibraryPlacements',
             'attributes': {'placementType': SCREENSHOT_TYPE, 'placementGroup': group},
@@ -169,25 +235,26 @@ def stage(api, version, build, image, digest):
         }})['data']
     placement = wait_for_asset(api, f'/v1/appAssetLibraryPlacements/{placement["id"]}',
                                accepted={'ACTIVE'}, pending={'ASSET_PROCESSING'})
-    return {'version': version, 'build': build, 'platform': 'TV_OS', 'locale': 'en-US',
+    return {'version': version, 'build': build, 'platform': platform, 'locale': 'en-US',
             'capture_sha256': digest, 'placement_group': group, 'placement_id': placement['id'],
             'image_id': asset['id'], 'placement_state': placement['attributes']['state']}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--platform', choices=LISTINGS, required=True)
     for field in ('version', 'build', 'source', 'capture-run', 'capture-attempt', 'capture-workflow-source'):
         parser.add_argument(f'--{field}', required=True)
     parser.add_argument('--capture-dir', type=Path, required=True)
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
-    image, digest = read_capture(args.capture_dir, args.version, args.build, args.source,
-                                 args.capture_run, args.capture_attempt, args.capture_workflow_source)
+    image, digest, size = read_capture(args.capture_dir, args.platform, args.version, args.build, args.source,
+                                       args.capture_run, args.capture_attempt, args.capture_workflow_source)
     with tempfile.TemporaryDirectory(prefix='pleazyng-apple-screenshots-') as directory:
         api = AppleProfileAPI(_apple_api_token(Path(directory)))
-        receipt = stage(api, args.version, args.build, image, digest)
+        receipt = stage(api, args.platform, args.version, args.build, image, digest, size)
     args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')
-    print(f'Apple TV Open media screenshot is active on the {args.version} draft')
+    print(f'{LISTINGS[args.platform].name} Open media screenshot is active on the {args.version} draft')
 
 
 if __name__ == '__main__':

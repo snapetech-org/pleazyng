@@ -1,6 +1,6 @@
 # ng-runner-policy: hosted-default-v2
 name: Prepare an Apple review draft
-run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || inputs.tvos_capture_run != '' && 'stage-apple-screenshot' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
+run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || (inputs.capture_run != '' || inputs.tvos_capture_run != '') && 'stage-apple-screenshot' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
 
 on:
   workflow_dispatch:
@@ -22,8 +22,12 @@ on:
         description: Read the draft, screenshot placements, and purchase states without editing
         type: boolean
         default: false
+      capture_run:
+        description: Successful platform job run supplying the exact Open media screenshot
+        type: string
+        required: false
       tvos_capture_run:
-        description: Exact successful tvOS capture run for placing the Open media screenshot
+        description: Existing alias for capture_run on tvOS
         type: string
         required: false
 
@@ -82,36 +86,54 @@ jobs:
           [[ "$version_build" == "${RELEASE_TAG#v}"+* ]]
           printf 'version=%s\nbuild_number=%s\nsource=%s\n' "${RELEASE_TAG#v}" "${version_build##*+}" "$source" >> "$GITHUB_OUTPUT"
 
-      - name: Require the exact successful Apple TV capture run
+      - name: Require the exact successful Apple screenshot capture job
         id: capture
-        if: inputs.tvos_capture_run != ''
+        if: inputs.capture_run != '' || inputs.tvos_capture_run != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          CAPTURE_RUN: ${{ inputs.tvos_capture_run }}
+          CAPTURE_RUN: ${{ inputs.capture_run || inputs.tvos_capture_run }}
+          TVOS_CAPTURE_RUN: ${{ inputs.tvos_capture_run }}
           PLATFORM: ${{ inputs.platform }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          [[ "$CAPTURE_RUN" =~ ^[1-9][0-9]*$ && "$PLATFORM" == TV_OS && "$INSPECT_ONLY" != true ]]
+          [[ "$CAPTURE_RUN" =~ ^[1-9][0-9]*$ && "$INSPECT_ONLY" != true ]]
+          [[ -z "$TVOS_CAPTURE_RUN" || ( "$PLATFORM" == TV_OS && "$TVOS_CAPTURE_RUN" == "$CAPTURE_RUN" ) ]]
+          case "$PLATFORM" in
+            IOS) lane=ios ;;
+            MAC_OS) lane=macos ;;
+            TV_OS) lane=tvos ;;
+            *) exit 1 ;;
+          esac
           run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAPTURE_RUN")"
           jq -e --arg repo "$GITHUB_REPOSITORY" --arg title "apple-store-screenshots:$VERSION" '
             .head_branch == "main" and .head_repository.full_name == $repo and
             .repository.full_name == $repo and .path == ".github/workflows/apple-store-screenshots.yml" and
-            .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and
+            .event == "workflow_dispatch" and .status == "completed" and
             .display_title == $title and (.head_sha | test("^[0-9a-f]{40}$")) and .run_attempt > 0' <<< "$run" >/dev/null
-          jq -r '"attempt=\(.run_attempt)\nsource=\(.head_sha)"' <<< "$run" >> "$GITHUB_OUTPUT"
+          attempt="$(jq -r .run_attempt <<< "$run")"
+          job="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAPTURE_RUN/attempts/$attempt/jobs" |
+            jq -e --arg lane "$lane" '[.jobs[] | select(.name == $lane)] |
+              select(length == 1 and .[0].status == "completed" and .[0].conclusion == "success") | .[0]')"
+          artifact_name="apple-store-in-use-captures-$lane-$VERSION"
+          artifact_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CAPTURE_RUN/artifacts?name=$artifact_name" |
+            jq -er --arg name "$artifact_name" --argjson job "$job" '[.artifacts[] |
+              select(.name == $name and .expired == false and (.digest | test("^sha256:[0-9a-f]{64}$")) and
+                     (.created_at >= $job.started_at and .created_at <= $job.completed_at))] |
+              select(length == 1) | .[0].id')"
+          printf 'artifact_id=%s\nattempt=%s\nsource=%s\n' "$artifact_id" "$attempt" "$(jq -r .head_sha <<< "$run")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        if: inputs.tvos_capture_run != ''
+        if: steps.capture.outcome == 'success'
         with:
-          name: apple-store-in-use-captures-tvos-${{ steps.release.outputs.version }}
-          run-id: ${{ inputs.tvos_capture_run }}
+          artifact-ids: ${{ steps.capture.outputs.artifact_id }}
+          run-id: ${{ inputs.capture_run || inputs.tvos_capture_run }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/apple-tvos-capture
+          path: ${{ runner.temp }}/apple-listing-capture
 
       - name: Inspect or attach the processed build to the existing draft
-        if: inputs.tvos_capture_run == ''
+        if: inputs.capture_run == '' && inputs.tvos_capture_run == ''
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -127,23 +149,24 @@ jobs:
           python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \
             --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json" "${args[@]}"
 
-      - name: Place the verified Apple TV screenshot in the existing listing
-        if: inputs.tvos_capture_run != ''
+      - name: Place the verified screenshot in the existing listing
+        if: steps.capture.outcome == 'success'
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          PLATFORM: ${{ inputs.platform }}
           VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build_number }}
           PRODUCT_SOURCE: ${{ steps.release.outputs.source }}
-          CAPTURE_RUN: ${{ inputs.tvos_capture_run }}
+          CAPTURE_RUN: ${{ inputs.capture_run || inputs.tvos_capture_run }}
           CAPTURE_ATTEMPT: ${{ steps.capture.outputs.attempt }}
           CAPTURE_WORKFLOW_SOURCE: ${{ steps.capture.outputs.source }}
           PYTHONPATH: scripts
         run: |
-          python3 scripts/stores/stage_apple_tv_screenshot.py --version "$VERSION" --build "$BUILD_NUMBER" \
+          python3 scripts/stores/stage_apple_listing_screenshot.py --platform "$PLATFORM" --version "$VERSION" --build "$BUILD_NUMBER" \
             --source "$PRODUCT_SOURCE" --capture-run "$CAPTURE_RUN" --capture-attempt "$CAPTURE_ATTEMPT" \
-            --capture-workflow-source "$CAPTURE_WORKFLOW_SOURCE" --capture-dir "$RUNNER_TEMP/apple-tvos-capture" \
+            --capture-workflow-source "$CAPTURE_WORKFLOW_SOURCE" --capture-dir "$RUNNER_TEMP/apple-listing-capture" \
             --receipt "$RUNNER_TEMP/apple-review-draft.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
