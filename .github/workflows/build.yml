@@ -2,7 +2,7 @@
 # Public GitHub-hosted runners are required for all compatible jobs; only
 # requested Apple signing and the verified webOS storage overflow use JIT.
 name: Pleazyng Release
-run-name: ${{ format('{0}{1}{2}', inputs.private_apple_signing_unavailable && 'apple-signing-unavailable:' || '', inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'build' && format('action:{0}:pool:{1}:mode:{2}:version:{3}:runner-retry-of:{4}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}:runner-retry-of:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && startsWith(inputs.reuse_repaired_run_id, 'assembly-tvos:') && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_macos_package_run_id != '' && !inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:macos:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_macos_package_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:macos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:release:pool:{0}:tag:v{1}:assembly:source:{2}:{3}:rebuild-tvos', inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tvos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_repaired_run_id == 'tizen-rebuild' && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tizen', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || (inputs.mode == 'ios-store' || inputs.mode == 'tvos-store') && format('action:release:pool:{0}:mode:{1}:tag:v{2}', inputs.runner_pool, inputs.mode, inputs.build_version) || inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}', inputs.action, inputs.runner_pool, inputs.build_version) || inputs.action == 'build' && inputs.mode == 'release' && inputs.build_version != '' && format('action:{0}:pool:{1}:mode:{2}:version:{3}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version) || format('action:{0}:pool:{1}', inputs.action, inputs.runner_pool), inputs.action == 'build' && (inputs.subtitle_gpu_backend == 'vulkan' || inputs.subtitle_gpu_backend == 'cuda') && format(':whisper:{0}', inputs.subtitle_gpu_backend) || '') }}
+run-name: ${{ format('{0}{1}{2}', inputs.private_apple_signing_unavailable && 'apple-signing-unavailable:' || '', inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'build' && format('action:{0}:pool:{1}:mode:{2}:version:{3}:runner-retry-of:{4}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}:runner-retry-of:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && startsWith(inputs.reuse_repaired_run_id, 'assembly-tvos:') && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_macos_package_run_id != '' && !inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:macos:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_macos_package_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:macos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && contains(inputs.reuse_repaired_run_id, ':assembly:') && !inputs.rebuild_tvos && format('action:release:pool:{0}:tag:v{1}:assembly:source:{2}:{3}', inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:release:pool:{0}:tag:v{1}:assembly:source:{2}:{3}:rebuild-tvos', inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tvos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_repaired_run_id == 'tizen-rebuild' && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tizen', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || (inputs.mode == 'ios-store' || inputs.mode == 'tvos-store') && format('action:release:pool:{0}:mode:{1}:tag:v{2}', inputs.runner_pool, inputs.mode, inputs.build_version) || inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}', inputs.action, inputs.runner_pool, inputs.build_version) || inputs.action == 'build' && inputs.mode == 'release' && inputs.build_version != '' && format('action:{0}:pool:{1}:mode:{2}:version:{3}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version) || format('action:{0}:pool:{1}', inputs.action, inputs.runner_pool), inputs.action == 'build' && (inputs.subtitle_gpu_backend == 'vulkan' || inputs.subtitle_gpu_backend == 'cuda') && format(':whisper:{0}', inputs.subtitle_gpu_backend) || '') }}
 
 on:
   workflow_dispatch:
@@ -92,7 +92,7 @@ on:
         required: false
         type: string
       reuse_repaired_run_id:
-        description: Reuse signed Apple siblings, repaired Linux/Mac output, ios-developer:ID, or qualification:ID for exact candidate recovery
+        description: Reuse signed Apple siblings, repaired Linux/Mac output, ios-developer:ID, qualification:ID, or qualification:ID:assembly:ID for exact candidate recovery
         required: false
         type: string
       reuse_platform_run_id:
@@ -416,18 +416,34 @@ jobs:
           FULL_RELEASE: ${{ inputs.subtitle_gpu_backend == 'cpu' && inputs.include_webos_build && inputs.include_webos_release && !inputs.include_apple_store_build && !inputs.prepare_homebrew_cask && !inputs.rebuild_ios && !inputs.rebuild_macos && !inputs.rebuild_linux && inputs.recovery_source_sha == '' && inputs.recovery_product_sha == '' && inputs.reuse_macos_package_run_id == '' }}
         run: |
           set -euo pipefail
-          if [[ "$FULL_RELEASE" != true || ! "$SOURCE_RUN" =~ ^[1-9][0-9]*$ || ! "$QUALIFICATION" =~ ^qualification:([1-9][0-9]*)$ ]]; then
+          if [[ "$FULL_RELEASE" != true || ! "$SOURCE_RUN" =~ ^[1-9][0-9]*$ ]]; then
             echo "Supplemental qualification requires the complete original unsigned release and exact run identities." >&2
+            exit 1
+          fi
+          qualification_assembly_run=
+          if [[ "$QUALIFICATION" =~ ^qualification:([1-9][0-9]*):assembly:([1-9][0-9]*)$ ]]; then
+            qualification_run=${BASH_REMATCH[1]}
+            qualification_assembly_run=${BASH_REMATCH[2]}
+            if [[ "$REBUILD_TVOS" == true ]]; then
+              echo "Assembly continuation must reuse its prior tvOS package without rebuilding tvOS." >&2
+              exit 1
+            fi
+          elif [[ "$QUALIFICATION" =~ ^qualification:([1-9][0-9]*)$ ]]; then
+            qualification_run=${BASH_REMATCH[1]}
+          else
+            echo "Supplemental qualification requires a typed qualification run identity." >&2
             exit 1
           fi
           if [[ "$ANDROID_RUN" != "$SOURCE_RUN" || "$WEBOS_RUN" != "$SOURCE_RUN" ]]; then
             echo "Supplemental tvOS rebuild must retain Android and webOS from the exact original release run." >&2
             exit 1
           fi
-          qualification_run=${BASH_REMATCH[1]}
           source_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .head_sha)
           options=(--version "$VERSION" --qualification-run "$qualification_run" --freeze-qualified-release \
             --android-run "$ANDROID_RUN" --webos-run "$WEBOS_RUN")
+          if [[ -n "$qualification_assembly_run" ]]; then
+            options+=(--qualification-assembly-run "$qualification_assembly_run")
+          fi
           if [[ "$REBUILD_TVOS" == true ]]; then options+=(--rebuild-tvos); fi
           python3 scripts/recover_release_platforms.py "$SOURCE_RUN" --head-sha "$source_sha" "${options[@]}"
 
@@ -929,7 +945,9 @@ jobs:
           if [[ "$REBUILD_TVOS" == true ]]; then options+=(--rebuild-tvos); fi
           if [[ "$REBUILD_TIZEN" == true ]]; then options+=(--rebuild-tizen); fi
           if [[ "$REBUILD_IOS" == true ]]; then options+=(--rebuild-ios); fi
-          if [[ "$REPAIRED_RUN" =~ ^qualification:([1-9][0-9]*)$ ]]; then
+          if [[ "$REPAIRED_RUN" =~ ^qualification:([1-9][0-9]*):assembly:([1-9][0-9]*)$ ]]; then
+            options+=(--qualification-run "${BASH_REMATCH[1]}" --qualification-assembly-run "${BASH_REMATCH[2]}")
+          elif [[ "$REPAIRED_RUN" =~ ^qualification:([1-9][0-9]*)$ ]]; then
             options+=(--qualification-run "${BASH_REMATCH[1]}")
           elif [[ "$REPAIRED_RUN" =~ ^ios-developer:([1-9][0-9]*)$ ]]; then
             options+=(--ios-developer-run "${BASH_REMATCH[1]}")
@@ -4869,7 +4887,9 @@ jobs:
           if [[ "$REPAIRED_RUN" == tizen-rebuild ]]; then
             : # The typed sentinel selects same-version Tizen-only recovery.
           elif [[ -n "$REPAIRED_RUN" ]]; then
-            if [[ "$REPAIRED_RUN" =~ ^qualification:([1-9][0-9]*)$ ]]; then
+            if [[ "$REPAIRED_RUN" =~ ^qualification:([1-9][0-9]*):assembly:([1-9][0-9]*)$ ]]; then
+              options+=(--qualification-run "${BASH_REMATCH[1]}" --qualification-assembly-run "${BASH_REMATCH[2]}")
+            elif [[ "$REPAIRED_RUN" =~ ^qualification:([1-9][0-9]*)$ ]]; then
               options+=(--qualification-run "${BASH_REMATCH[1]}")
             elif [[ "$REPAIRED_RUN" =~ ^ios-developer:([1-9][0-9]*)$ ]]; then
               options+=(--ios-developer-run "${BASH_REMATCH[1]}")

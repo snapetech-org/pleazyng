@@ -26,6 +26,8 @@
 
 - Requalify an interrupted Apple release on hosted Macs and reuse the original verified packages across every platform. If the original tvOS package is cancelled before hosted runner acquisition, rebuild only that unsigned package from the same source.
 
+- Continue a qualified release from its verified unsigned tvOS and Windows package outputs after artifact validation stops before publication, preserving exact source and provenance checks.
+
 - Keep authenticated artwork requests separate in the disk cache and store opaque identifiers for artwork URLs and explicit cache keys. Existing account-specific posters remain available offline.
 - Share one seek-preview memory budget across the files of a stacked Plex title, prioritize the playing file, and release preview archives independently of cached thumbnail images. Plex and Emby now discard stale loads and invalid thumbnail indexes.
 - Recognize explicit multi-episode filename ranges, ignore chapter labels for other seasons, and preserve overlapping edits to manual episode start times.

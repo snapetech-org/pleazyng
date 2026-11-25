@@ -1002,12 +1002,18 @@ def original_tvos_execution_attempt(repository, run_id, job):
     return original_attempt
 
 
-def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False, qualification_run=None, freeze=False):
+def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False, qualification_run=None, qualification_assembly_run=None, freeze=False):
     if qualification_run is not None and any((
             rebuild_linux, rebuild_macos, rebuild_ios, rebuild_tizen, repaired_run,
             require_homebrew_cask, packaging_source_sha, workflow_source_sha, include_apple_store_build,
             tvos_run, ios_run, ios_developer_run, built_tvos_run, append_apple_only)):
         raise RecoveryError("Supplemental qualification requires assembly of the original unsigned release assets except the guarded tvOS acquisition rebuild")
+    if qualification_assembly_run is not None and (
+            qualification_run is None or rebuild_tvos or rebuild_linux or rebuild_macos or rebuild_ios
+            or rebuild_tizen or repaired_run or require_homebrew_cask or packaging_source_sha
+            or workflow_source_sha or include_apple_store_build or tvos_run or ios_run
+            or ios_developer_run or built_tvos_run or append_apple_only):
+        raise RecoveryError('Prior qualified assembly reuse is limited to an unsigned assembly-only continuation')
     if ios_run and not tvos_run:
         raise RecoveryError('Signed iOS sibling reuse requires a distinct signed TV sibling')
     if built_tvos_run is not None:
@@ -1128,7 +1134,8 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
     required_jobs = tuple(name for name in REQUIRED_JOBS
                           if not ((rebuild_linux or repaired) and name.startswith("Build Linux ("))
                           and not ((rebuild_macos or repaired or append_apple_only) and name == "build-macos")
-                          and not (rebuild_tvos and name == "Build tvOS developer package (arm64)")
+                          and not ((rebuild_tvos or qualification_assembly_run is not None)
+                                   and name == "Build tvOS developer package (arm64)")
                           and not ((rebuild_ios or ios_developer_source) and name == "build-ios")
                           and not (windows_repackaging and name == "package-windows")
                           and not (rebuild_tizen and name == TIZEN_PACKAGE_JOB))
@@ -1138,7 +1145,7 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                 or macos_jobs[0].get('conclusion') not in {'success', 'failure'}):
             raise RecoveryError('Append-only Apple recovery requires a completed original Mac job')
     rebuilt_jobs = set(REBUILT_JOBS) | ({"Build Linux (x64)", "Build Linux (arm64)"} if rebuild_linux else set()) | ({"build-macos"} if rebuild_macos else set()) | ({"Build tvOS developer package (arm64)"} if rebuild_tvos else set()) | ({"build-ios"} if rebuild_ios else set()) | ({TIZEN_PACKAGE_JOB} if rebuild_tizen else set())
-    if qualification_run is not None and rebuild_tvos:
+    if qualification_run is not None and (rebuild_tvos or qualification_assembly_run is not None):
         tvos_jobs = [job for job in jobs if job.get("name") == "Build tvOS developer package (arm64)"]
         if len(tvos_jobs) != 1:
             raise RecoveryError("Supplemental tvOS rebuild requires exactly one original tvOS package job")
@@ -1155,7 +1162,7 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                 or tvos_job.get("run_attempt") != source.get("run_attempt")
                 or tvos_job.get("head_sha") != source_sha):
             raise RecoveryError(
-                "Supplemental tvOS rebuild only accepts the original exact-source package cancelled before macos-26 runner acquisition")
+                "Supplemental tvOS reuse only accepts the original exact-source package cancelled before macos-26 runner acquisition")
     for name in required_jobs:
         matches = [job for job in jobs if job.get("name") == name]
         if len(matches) == 1 and pending and matches[0].get("status") in {"queued", "in_progress", "waiting", "pending", "requested"} and not matches[0].get("conclusion"):
@@ -1186,7 +1193,7 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                         f'Reusable Apple platform lacks a required signed Store qualification step: {name}/{required_step}')
     original_tvos_attempt = None
     original_tvos_has_store = False
-    if not rebuild_tvos:
+    if not rebuild_tvos and qualification_assembly_run is None:
         tvos_job = next(job for job in jobs if job.get('name') == 'Build tvOS developer package (arm64)')
         if 'Build tvOS developer package (arm64)' not in pending_jobs:
             original_tvos_attempt = tvos_job.get('run_attempt')
@@ -1221,6 +1228,8 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                 if job.get("conclusion") in {"failure", "cancelled", "timed_out"}
                 and job.get("name") not in rebuilt_jobs | qualified_apple_jobs | set(repaired["reused_jobs"] if repaired else [])
                 | ({"build-ios"} if ios_developer_source else set())
+                | ({"Build tvOS developer package (arm64)"}
+                   if qualification_assembly_run is not None else set())
                 and not (append_apple_only and job.get("name") == "build-macos"
                          and job.get("status") == "completed" and job.get("conclusion") == "failure")
                 and not (job.get("name") == "create-release" and job.get("conclusion") == "cancelled"
@@ -1241,18 +1250,30 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
            and not (pending and job.get("status") in {"queued", "waiting", "pending"} and not job.get("conclusion"))
            for job in jobs):
         raise RecoveryError("The source run already attempted release creation; inspect its side effects.")
+    qualified_assembly = None
+    if qualification_assembly_run is not None:
+        qualified_assembly = verify_qualification_assembly_reuse(
+            {'source_run_id': int(run_id), 'source_sha': source_sha, 'version': version,
+             'qualification_run_id': qualification_run, 'windows_repackaging': windows_repackaging},
+            qualification_assembly_run, repository)
     macos = next(job for job in jobs if job.get("name") == "build-macos")
     cask_qualified = all(any(step.get("name") == name and step.get("status") == "completed" and step.get("conclusion") == "success" for step in macos.get("steps", []))
                          for name in ("Notarize Application", "Wait for notarization acceptance",
                                       "Verify Gatekeeper acceptance for Homebrew Cask"))
     if require_homebrew_cask and not rebuild_macos and not repaired and macos.get("status") == "completed" and not cask_qualified:
         raise RecoveryError("Reusable Mac build lacks successful notarization and Homebrew Gatekeeper qualification")
-    reused_jobs = [*required_jobs, *( ["build-ios"] if ios_developer_source else [])]
+    reused_jobs = [*required_jobs, *( ["build-ios"] if ios_developer_source else []),
+                   *(qualified_assembly['reused_assembly_jobs'] if qualified_assembly else [])]
     return {"source_run_id": int(run_id), "source_sha": source_sha, "head_sha": head_sha,
             "run_attempt": source.get("run_attempt"),
             "version": version, "reused_jobs": reused_jobs,
-            "repackage_windows": windows_repackaging is not None,
-            **({"windows_repackaging": windows_repackaging} if windows_repackaging else {}),
+            "repackage_windows": windows_repackaging is not None and qualified_assembly is None,
+            **({"windows_repackaging": qualified_assembly['windows_repackaging'] if qualified_assembly
+                else windows_repackaging} if windows_repackaging else {}),
+            **({"qualification_assembly_run_id": qualified_assembly['qualification_assembly_run_id'],
+                "qualification_assembly_source": qualified_assembly['qualification_assembly_source'],
+                "tvos_source": qualified_assembly['tvos_source']}
+               if qualified_assembly else {}),
             "rebuilt_jobs": sorted(rebuilt_jobs), "rebuild_linux": rebuild_linux, "rebuild_macos": rebuild_macos, "rebuild_tvos": rebuild_tvos, "rebuild_ios": rebuild_ios, "rebuild_tizen": rebuild_tizen,
             "macos_cask_qualified": repaired["macos_cask_qualified"] if repaired else cask_qualified,
             "webos_link_compatibility_repaired": any(entry.get("filename") == "webos/CMakeLists.txt" for entry in changed),
@@ -1580,6 +1601,47 @@ def tvos_package_names(source):
     if source.get('include_apple_store_build', True):
         return (*names, 'pleazyng-tvos-appstore.ipa')
     return names
+
+
+def verify_windows_package_attestation(directory, artifact_name, source, repository=REPOSITORY):
+    """Verify prior Windows package subjects against their exact producer run."""
+    subjects = {
+        'windows-x64-portable': ('pleazyng-windows-x64-portable.7z',),
+        'windows-installer': ('pleazyng-windows-installer.exe',),
+        'windows-chocolatey': (f'pleazyng.{source["version"]}.nupkg',),
+    }.get(artifact_name)
+    if (repository != REPOSITORY or not subjects
+            or not re.fullmatch(r'[0-9a-f]{40}', str(source.get('workflow_source_sha', '')))
+            or type(source.get('source_run_id')) is not int
+            or type(source.get('run_attempt')) is not int):
+        raise RecoveryError(f'Prior Windows package lacks a trusted attestation identity: {artifact_name}')
+    digests = {}
+    for name in subjects:
+        path = directory / name
+        if not path.is_file() or path.is_symlink():
+            raise RecoveryError(f'Prior Windows artifact is missing its attested package: {name}')
+        result = subprocess.run(
+            ['gh', 'attestation', 'verify', str(path), '--repo', repository,
+             '--signer-workflow', repository + '/.github/workflows/build.yml',
+             '--source-digest', source['workflow_source_sha'], '--format', 'json'],
+            check=True, capture_output=True, text=True)
+        try:
+            verification = json.loads(result.stdout)
+            certificates = [item.get('verificationResult', {}).get('signature', {}).get('certificate', {})
+                            for item in verification]
+        except (AttributeError, TypeError, ValueError) as error:
+            raise RecoveryError(f'Prior Windows artifact attestation is unreadable: {name}') from error
+        expected_uri = f'https://github.com/{repository}/actions/runs/{source["source_run_id"]}'
+        if not certificates or any(
+                str(cert.get('sourceRepositoryIdentifier')) != '1433487464'
+                or cert.get('sourceRepositoryDigest') != source['workflow_source_sha']
+                or cert.get('runInvocationURI') not in
+                (expected_uri, expected_uri + '/attempts/' + str(source['run_attempt']))
+                for cert in certificates):
+            raise RecoveryError(f'Prior Windows package attestation does not bind its verified assembly run: {name}')
+        with path.open('rb') as package:
+            digests[name] = hashlib.file_digest(package, 'sha256').hexdigest()
+    return digests
 
 
 def verify_tvos_package_attestations(directory, source, repository=REPOSITORY):
@@ -1958,7 +2020,7 @@ def preflight_platform_artifacts(proof, repository=REPOSITORY):
     run_id = proof['source_run_id']
     sources = {run_id: proof}
     for key in ('tvos_source', 'ios_source', 'ios_developer_source', 'android_source',
-                'macos_source', 'repaired_source', 'webos_source'):
+                'macos_source', 'repaired_source', 'webos_source', 'qualification_assembly_source'):
         source = proof.get(key)
         if source:
             sources[source['source_run_id']] = source
@@ -2000,6 +2062,9 @@ def preflight_platform_artifacts(proof, repository=REPOSITORY):
             for name in ('linux-x64', 'linux-arm64', 'linux-x64-appimage', 'macos-dmg'):
                 if name in wanted:
                     wanted[name] = proof['repaired_source']
+        if proof.get('qualification_assembly_source'):
+            for name in WINDOWS_REPACKAGED_ARTIFACTS:
+                wanted[name] = proof['qualification_assembly_source']
     selected = []
     for name, source in wanted.items():
         if source is None:
@@ -2007,6 +2072,10 @@ def preflight_platform_artifacts(proof, repository=REPOSITORY):
         source_run = source['source_run_id']
         expected_sha = source.get('workflow_source_sha') or source['source_sha']
         artifact = verified_run_artifact(inventories[source_run], name, source_run, expected_sha, repository)
+        if source is proof.get('qualification_assembly_source'):
+            expected = (proof.get('windows_repackaging') or {}).get('assembly_artifacts', {}).get(name, {})
+            if artifact.get('id') != expected.get('artifact_id') or artifact.get('digest') != expected.get('digest'):
+                raise RecoveryError(f'Prior Windows package changed after assembly approval: {name}')
         selected.append({'name': name, 'artifact_id': artifact['id'], 'source_run_id': source_run,
                          'source_sha': source.get('source_sha'), 'digest': artifact['digest']})
     if proof.get('repackage_windows'):
@@ -2125,6 +2194,202 @@ def verify_windows_repackaging_assembly(proof, assembly_run_id, repository=REPOS
     }
 
 
+def verify_qualification_assembly_reuse(proof, assembly_run_id, repository=REPOSITORY):
+    """Reuse a failed qualified assembly only when all requested outputs are durable."""
+    if (repository != REPOSITORY or not str(assembly_run_id).isdigit()
+            or int(assembly_run_id) in {int(proof.get('source_run_id', 0)),
+                                        int(proof.get('qualification_run_id', 0))}
+            or not proof.get('qualification_run_id') or not proof.get('windows_repackaging')):
+        raise RecoveryError('Qualified assembly reuse requires distinct source, qualification, and assembly runs')
+    assembly_run_id = int(assembly_run_id)
+    assembly = api(f'repos/{repository}/actions/runs/{assembly_run_id}')
+    source_run_id = int(proof['source_run_id'])
+    title = (f'action:release:pool:public:tag:v{proof["version"]}:assembly:source:'
+             f'{source_run_id}:qualification:{proof["qualification_run_id"]}:rebuild-tvos')
+    if assembly.get('display_title') not in {title, 'apple-signing-unavailable:' + title}:
+        raise RecoveryError('Prior assembly title does not bind the exact source, qualification, and tvOS rebuild')
+    assembly_sha = assembly.get('head_sha', '')
+    attempt = assembly.get('run_attempt')
+    if (assembly.get('id') != assembly_run_id or assembly.get('status') != 'completed'
+            or assembly.get('conclusion') != 'failure' or assembly.get('event') != 'workflow_dispatch'
+            or assembly.get('head_branch') != 'main'
+            or (assembly.get('head_repository') or {}).get('full_name') != repository
+            or assembly.get('path', '').split('@')[0] != '.github/workflows/build.yml'
+            or type(attempt) is not int or not 1 <= attempt <= 100
+            or not re.fullmatch(r'[0-9a-f]{40}', assembly_sha)):
+        raise RecoveryError('Prior qualified assembly must be an exact completed trusted-main workflow failure')
+    current_sha = os.environ.get('GITHUB_SHA', '')
+    if current_sha and os.environ.get('GITHUB_REF') != 'refs/heads/main':
+        raise RecoveryError('Hosted qualified assembly verification must run from canonical main')
+    if not current_sha:
+        main = api(f'repos/{repository}/branches/main')
+        current_sha = (main.get('commit') or {}).get('sha', '')
+    if not re.fullmatch(r'[0-9a-f]{40}', current_sha):
+        raise RecoveryError('Current canonical main revision is missing its immutable SHA')
+    for base_sha, target_sha in ((proof['source_sha'], assembly_sha), (assembly_sha, current_sha)):
+        comparison = api(f'repos/{repository}/compare/{base_sha}...{target_sha}')
+        if (comparison.get('status') not in {'ahead', 'identical'}
+                or comparison.get('merge_base_commit', {}).get('sha') != base_sha):
+            raise RecoveryError('Prior assembly and current workflow are not on the exact trusted main lineage')
+
+    from verify_embedded_release_ci import latest_attempt_jobs
+
+    raw_attempts = [collection(
+        f'repos/{repository}/actions/runs/{assembly_run_id}/attempts/{number}/jobs', 'jobs')
+        for number in range(1, attempt + 1)]
+    proof_job_names = {
+        'Freeze requalified source', 'Validate release request',
+        'Build tvOS developer package (arm64)', 'package-windows',
+        'Package Windows Chocolatey', 'create-release',
+    }
+    unrelated_failures = {
+        job.get('name') for page in raw_attempts for job in page
+        if job.get('conclusion') in {'failure', 'cancelled', 'timed_out'}
+        and job.get('name') != 'create-release'
+    }
+    if unrelated_failures:
+        raise RecoveryError('Prior qualified assembly has failures outside its release validation gate: '
+                            + ', '.join(sorted(unrelated_failures)))
+    attempts = [[job for job in page if job.get('name') in proof_job_names]
+                for page in raw_attempts]
+    try:
+        jobs = latest_attempt_jobs(attempts)
+    except release_ci.GateError as error:
+        raise RecoveryError(f'Prior qualified assembly attempt history is invalid: {error}') from error
+
+    def one_job(name, *, conclusion='success'):
+        matches = [job for job in jobs if job.get('name') == name]
+        if len(matches) != 1:
+            raise RecoveryError(f'Prior qualified assembly job is missing or ambiguous: {name}')
+        job = matches[0]
+        if (job.get('status') != 'completed' or job.get('conclusion') != conclusion
+                or job.get('run_id') != assembly_run_id or job.get('run_attempt') != attempt
+                or job.get('head_sha') != assembly_sha):
+            raise RecoveryError(f'Prior qualified assembly job is not bound to its exact successful attempt: {name}')
+        return job
+
+    def successful_steps(job, names, label):
+        for name in names:
+            matches = [step for step in job.get('steps', []) if step.get('name') == name]
+            if (len(matches) != 1 or matches[0].get('status') != 'completed'
+                    or matches[0].get('conclusion') != 'success'):
+                raise RecoveryError(f'Prior qualified assembly is missing a successful step: {label}/{name}')
+
+    validation = one_job('Validate release request')
+    successful_steps(validation, ('Verify reusable platform source',
+                                  'Validate immutable release tag against trusted main'),
+                     'Validate release request')
+    freeze = one_job('Freeze requalified source')
+    successful_steps(freeze, ('Verify original platform artifacts and supplemental qualification before creating the stable tag',),
+                     'Freeze requalified source')
+
+    tvos_job = one_job('Build tvOS developer package (arm64)')
+    if (tvos_job.get('runner_id') in (None, 0) or not tvos_job.get('runner_name')
+            or tvos_job.get('runner_group_name') != 'GitHub Actions'
+            or not isinstance(tvos_job.get('labels'), list) or 'xcode-27' not in tvos_job['labels']):
+        raise RecoveryError('Prior tvOS package was not produced on the public xcode-27 hosted runner')
+    successful_steps(tvos_job, (
+        'Build tvOS app', 'Package unsigned tvOS developer IPA',
+        'Verify unsigned tvOS runtime dependencies', 'Attest unsigned tvOS checkpoint',
+        'Upload durable unsigned tvOS checkpoint', 'Verify tvOS runtime dependencies',
+        'Attest unsigned tvOS developer package', 'Upload tvOS package'),
+        'Build tvOS developer package (arm64)')
+    if any(step.get('name') == 'Build signed tvOS App Store IPA'
+           and step.get('conclusion') == 'success' for step in tvos_job.get('steps', [])):
+        raise RecoveryError('Prior assembly tvOS output is not the required unsigned developer package')
+
+    windows_job = one_job('package-windows')
+    if (windows_job.get('runner_id') in (None, 0) or not windows_job.get('runner_name')
+            or windows_job.get('runner_group_name') != 'GitHub Actions'
+            or not isinstance(windows_job.get('labels'), list) or 'windows-2025' not in windows_job['labels']):
+        raise RecoveryError('Prior Windows packages were not produced on the public windows-2025 hosted runner')
+    successful_steps(windows_job, (
+        'Verify immutable Windows package source', 'Recover verified immutable Windows x64 checkpoint',
+        'Build installer and portables', 'Attest Windows artifacts',
+        'Upload x64 portable', 'Upload installer'), 'package-windows')
+    chocolatey_job = one_job('Package Windows Chocolatey')
+    if (chocolatey_job.get('runner_id') in (None, 0) or not chocolatey_job.get('runner_name')
+            or chocolatey_job.get('runner_group_name') != 'GitHub Actions'
+            or not isinstance(chocolatey_job.get('labels'), list)
+            or 'windows-2025' not in chocolatey_job['labels']):
+        raise RecoveryError('Prior Chocolatey package was not produced on the public windows-2025 hosted runner')
+    successful_steps(chocolatey_job, ('Package Chocolatey release', 'Attest Chocolatey package',
+                                      'Upload Chocolatey package'), 'Package Windows Chocolatey')
+
+    failed_jobs = [job.get('name') for job in jobs
+                   if job.get('conclusion') in {'failure', 'cancelled', 'timed_out'}]
+    if failed_jobs != ['create-release']:
+        raise RecoveryError('Prior qualified assembly has failures outside its release validation gate')
+    create_release = one_job('create-release', conclusion='failure')
+    steps = create_release.get('steps')
+    if not isinstance(steps, list):
+        raise RecoveryError('Prior failed release job lacks step-level publication evidence')
+    recover_steps = [step for step in steps if step.get('name') == 'Recover verified platform artifacts']
+    publish_steps = [step for step in steps if step.get('name') in {
+        'Append signed Apple assets without replacing existing release assets', 'Create Release'}]
+    if (len(recover_steps) != 1 or recover_steps[0].get('status') != 'completed'
+            or recover_steps[0].get('conclusion') != 'failure'
+            or len(publish_steps) != 2
+            or any(step.get('status') != 'completed' or step.get('conclusion') != 'skipped'
+                   for step in publish_steps)
+            or steps.index(recover_steps[0]) >= min(steps.index(step) for step in publish_steps)):
+        raise RecoveryError('Prior release attempt did not stop at artifact validation before publication')
+
+    inventory = collection(f'repos/{repository}/actions/runs/{assembly_run_id}/artifacts', 'artifacts')
+    output_names = ('tvos-ipa', *sorted(WINDOWS_REPACKAGED_ARTIFACTS))
+    artifacts = {name: verified_run_artifact(inventory, name, assembly_run_id, assembly_sha, repository)
+                 for name in output_names}
+
+    def created_inside_job(artifact, producer, name):
+        try:
+            created = datetime.fromisoformat(artifact['created_at'].replace('Z', '+00:00'))
+            started = datetime.fromisoformat(producer['started_at'].replace('Z', '+00:00'))
+            completed = datetime.fromisoformat(producer['completed_at'].replace('Z', '+00:00'))
+        except (KeyError, TypeError, ValueError) as error:
+            raise RecoveryError(f'Prior artifact lacks exact producer interval evidence: {name}') from error
+        if not started <= created <= completed:
+            raise RecoveryError(f'Prior artifact was not created during its verified producer job: {name}')
+
+    created_inside_job(artifacts['tvos-ipa'], tvos_job, 'tvos-ipa')
+    for name in sorted(WINDOWS_REPACKAGED_ARTIFACTS):
+        producer = chocolatey_job if name == 'windows-chocolatey' else windows_job
+        created_inside_job(artifacts[name], producer, name)
+
+    tvos_source = {
+        'source_run_id': assembly_run_id, 'source_sha': proof['source_sha'],
+        'workflow_source_sha': assembly_sha, 'run_attempt': tvos_job['run_attempt'],
+        'product_source_sha': proof['source_sha'], 'packaging_source_sha': proof['source_sha'],
+        'version': proof['version'], 'include_apple_store_build': False,
+        'runtime_dependency_receipt_required': True, 'original_tvos_has_store': False,
+        'artifact_id': artifacts['tvos-ipa']['id'], 'artifact_digest': artifacts['tvos-ipa']['digest'],
+        'job_id': tvos_job['id'], 'runner_id': tvos_job['runner_id'],
+        'runner_name': tvos_job['runner_name'], 'runner_labels': tvos_job['labels'],
+    }
+    assembly_artifacts = {
+        name: {'artifact_id': artifacts[name]['id'], 'digest': artifacts[name]['digest']}
+        for name in sorted(WINDOWS_REPACKAGED_ARTIFACTS)
+    }
+    assembly_source = {
+        'source_run_id': assembly_run_id, 'source_sha': proof['source_sha'],
+        'workflow_source_sha': assembly_sha, 'run_attempt': attempt,
+        'version': proof['version'],
+        'job_id': windows_job['id'], 'chocolatey_job_id': chocolatey_job['id'],
+        'assembly_artifacts': assembly_artifacts,
+    }
+    windows_repackaging = {
+        **proof['windows_repackaging'], 'assembly_run_id': assembly_run_id,
+        'assembly_head_sha': assembly_sha, 'assembly_run_attempt': attempt,
+        'product_checkout_sha': proof['source_sha'], 'package_job_id': windows_job['id'],
+        'chocolatey_job_id': chocolatey_job['id'], 'assembly_artifacts': assembly_artifacts,
+    }
+    return {'qualification_assembly_run_id': assembly_run_id,
+            'qualification_assembly_source': assembly_source,
+            'tvos_source': tvos_source, 'windows_repackaging': windows_repackaging,
+            'repackage_windows': False,
+            'reused_assembly_jobs': ['Build tvOS developer package (arm64)', 'package-windows',
+                                     'Package Windows Chocolatey']}
+
+
 def download_platforms(proof, destination, repository=REPOSITORY):
     run_id = proof["source_run_id"]
     append_apple_only = proof.get('append_apple_only') is True
@@ -2164,6 +2429,10 @@ def download_platforms(proof, destination, repository=REPOSITORY):
             inventories[ios_developer["source_run_id"]] = collection(
                 f'repos/{repository}/actions/runs/{ios_developer["source_run_id"]}/artifacts', 'artifacts')
             wanted["ios-ipa"] = "ios-ipa"
+        if proof.get('qualification_assembly_source'):
+            assembly_source = proof['qualification_assembly_source']
+            inventories[assembly_source['source_run_id']] = collection(
+                f"repos/{repository}/actions/runs/{assembly_source['source_run_id']}/artifacts", 'artifacts')
         if proof.get("android_source"):
             android = proof["android_source"]
             inventories[android["source_run_id"]] = collection(
@@ -2188,6 +2457,8 @@ def download_platforms(proof, destination, repository=REPOSITORY):
         source = (proof['tvos_source'] if name == 'tvos-ipa' and proof.get('tvos_source') else
                   proof['ios_developer_source'] if name == 'ios-ipa' and proof.get('ios_developer_source') else
                   proof['ios_source'] if name == 'ios-ipa' and proof.get('ios_source') else
+                  proof['qualification_assembly_source'] if name in WINDOWS_REPACKAGED_ARTIFACTS
+                  and proof.get('qualification_assembly_source') else
                   proof["webos_source"] if name == "webos-ipk" and proof.get("webos_source") else
                   proof["android_source"] if name == "android-apk" else
                   proof["repaired_source"] if proof.get("repaired_source") and (name.startswith("linux-") or name == "macos-dmg") else
@@ -2210,6 +2481,10 @@ def download_platforms(proof, destination, repository=REPOSITORY):
         if name == 'ios-ipa' and proof.get('ios_developer_source') and (
                 item.get('id') != source['artifact_id'] or digest != source['artifact_digest']):
             raise RecoveryError('Unsigned iOS artifact ID/digest changed after source approval')
+        if source is proof.get('qualification_assembly_source'):
+            expected = (proof.get('windows_repackaging') or {}).get('assembly_artifacts', {}).get(name, {})
+            if item.get('id') != expected.get('artifact_id') or digest != expected.get('digest'):
+                raise RecoveryError(f'Prior Windows package artifact changed after source approval: {name}')
         with tempfile.TemporaryDirectory(prefix="pleazyng-release-artifact-") as scratch:
             archive = Path(scratch) / "artifact.zip"
             with archive.open("wb") as output:
@@ -2239,6 +2514,9 @@ def download_platforms(proof, destination, repository=REPOSITORY):
                 if proof.get('tvos_source'):
                     source['package_sha256'] = package_hashes
                 verify_tvos_runtime_dependency_receipt(destination / folder, tvos_source, repository)
+            if source is proof.get('qualification_assembly_source'):
+                source.setdefault('package_sha256', {}).update(
+                    verify_windows_package_attestation(destination / folder, name, source, repository))
             if name == 'ios-ipa' and proof.get('ios_source'):
                 source['package_sha256'] = verify_ios_package_attestations(destination / folder, source, repository)
             if name == 'ios-ipa' and proof.get('ios_developer_source'):
@@ -2289,6 +2567,14 @@ def download_platforms(proof, destination, repository=REPOSITORY):
             raise RecoveryError('Windows package proof must be created by the exact trusted assembler checkout')
         proof = {**proof, 'windows_repackaging': verify_windows_repackaging_assembly(proof, assembly, repository)}
         proof['repackaged_jobs'] = ['package-windows', 'Package Windows Chocolatey']
+    if proof.get('qualification_assembly_run_id'):
+        assembly = os.environ.get('GITHUB_RUN_ID', '')
+        workflow = os.environ.get('GITHUB_SHA', '')
+        actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        if not assembly.isdigit() or not re.fullmatch(r'[0-9a-f]{40}', workflow) or actual != workflow:
+            raise RecoveryError('Qualified continuation proof must use the exact trusted assembler workflow checkout')
+        proof.update(assembly_run_id=int(assembly), actual_checkout_sha=actual,
+                     assembly_scope='qualified-assembly-continuation')
     (destination / "platform-reuse-provenance.json").write_text(json.dumps(proof, indent=2) + "\n")
     return proof
 
@@ -2312,6 +2598,8 @@ def main():
     parser.add_argument("--rebuild-macos", action="store_true", help="Build and qualify a fresh Mac package instead of reusing a failed Mac job")
     parser.add_argument("--repaired-run", help="Reuse verified Linux and fully qualified Mac jobs from a prior repair run")
     parser.add_argument('--qualification-run', type=int, help='Supplemental Apple qualification for the exact captured source')
+    parser.add_argument('--qualification-assembly-run', type=int,
+                        help='Reuse verified tvOS and Windows package outputs from a prior qualified assembly')
     parser.add_argument('--freeze-qualified-release', action='store_true', help='Preflight all original artifacts, then create the verified stable tag')
     parser.add_argument('--tvos-run', help='Reuse signed TV bytes from an independently approved sibling Apple repair')
     parser.add_argument('--ios-run', help='Reuse signed iOS bytes from an independently approved sibling Apple repair')
@@ -2327,6 +2615,9 @@ def main():
     args = parser.parse_args()
     if args.qualification_run is not None and (args.qualification_run < 1 or args.macos_run):
         parser.error('Supplemental qualification requires one valid Apple qualification run and no signing-only recovery')
+    if args.qualification_assembly_run is not None and (
+            args.qualification_assembly_run < 1 or args.qualification_run is None or args.rebuild_tvos):
+        parser.error('Prior qualified assembly reuse requires a supplemental qualification and cannot rebuild tvOS')
     if args.freeze_qualified_release and (
             args.qualification_run is None or args.download or args.wait_for_source
             or os.environ.get('GITHUB_REPOSITORY') != REPOSITORY
@@ -2342,7 +2633,8 @@ def main():
         parser.error("--allow-building is only a preflight; downloads require completed successful platform jobs")
     if args.download_windows_build and (
             args.download or args.allow_building or args.wait_for_source or args.freeze_qualified_release
-            or args.qualification_run is None or str(args.android_run) != args.source_run
+            or args.qualification_run is None or args.qualification_assembly_run is not None
+            or str(args.android_run) != args.source_run
             or str(args.webos_run) != args.source_run or args.skip_webos_build):
         parser.error("Windows checkpoint downloads require a completed supplemental qualification assembly")
     if not 0 <= args.wait_for_source <= 10800:
@@ -2370,6 +2662,8 @@ def main():
     frozen_options = {'include_apple_store_build': args.include_apple_store_build}
     if args.qualification_run is not None:
         frozen_options.update(qualification_run=args.qualification_run, freeze=args.freeze_qualified_release)
+    if args.qualification_assembly_run is not None:
+        frozen_options['qualification_assembly_run'] = args.qualification_assembly_run
     if args.packaging_source_sha:
         frozen_options.update(packaging_source_sha=args.packaging_source_sha,
                               workflow_source_sha=args.workflow_source_sha)

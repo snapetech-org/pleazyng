@@ -308,6 +308,309 @@ class WindowsPackageRecoveryTests(unittest.TestCase):
             recovery.verify_windows_repackaging_assembly(proof, assembly_id)
 
 
+class QualifiedAssemblyReuseTests(unittest.TestCase):
+    def setUp(self):
+        self.source_run = 55
+        self.qualification_run = 88
+        self.assembly_run = 77
+        self.product_sha = 'c' * 40
+        self.assembly_sha = 'd' * 40
+        self.current_sha = 'e' * 40
+        self.run = {
+            'id': self.assembly_run,
+            'display_title': ('action:release:pool:public:tag:v3.0.52:assembly:source:55:'
+                              'qualification:88:rebuild-tvos'),
+            'status': 'completed', 'conclusion': 'failure', 'event': 'workflow_dispatch',
+            'head_branch': 'main', 'head_repository': {'full_name': recovery.REPOSITORY},
+            'path': '.github/workflows/build.yml@refs/heads/main',
+            'head_sha': self.assembly_sha, 'run_attempt': 1,
+        }
+
+        def job(name, conclusion='success', steps=(), labels=('ubuntu-24.04',)):
+            return {
+                'id': len(name) + 100, 'name': name, 'status': 'completed',
+                'conclusion': conclusion, 'run_id': self.assembly_run, 'run_attempt': 1,
+                'head_sha': self.assembly_sha, 'runner_id': 123,
+                'runner_name': 'GitHub Actions 123', 'runner_group_name': 'GitHub Actions',
+                'labels': list(labels), 'started_at': '2026-11-25T00:00:00Z',
+                'completed_at': '2026-11-25T01:00:00Z',
+                'steps': [{'name': step, 'status': 'completed', 'conclusion': result}
+                          for step, result in steps],
+            }
+
+        self.jobs = [
+            job('Freeze requalified source', steps=[(
+                'Verify original platform artifacts and supplemental qualification before creating the stable tag',
+                'success')]),
+            job('Validate release request', steps=[
+                ('Verify reusable platform source', 'success'),
+                ('Validate immutable release tag against trusted main', 'success')]),
+            job('Build tvOS developer package (arm64)', labels=('xcode-27',), steps=[
+                (name, 'success') for name in (
+                    'Build tvOS app', 'Package unsigned tvOS developer IPA',
+                    'Verify unsigned tvOS runtime dependencies', 'Attest unsigned tvOS checkpoint',
+                    'Upload durable unsigned tvOS checkpoint', 'Verify tvOS runtime dependencies',
+                    'Attest unsigned tvOS developer package', 'Upload tvOS package')]),
+            job('package-windows', labels=('windows-2025',), steps=[
+                (name, 'success') for name in (
+                    'Verify immutable Windows package source',
+                    'Recover verified immutable Windows x64 checkpoint',
+                    'Build installer and portables', 'Attest Windows artifacts',
+                    'Upload x64 portable', 'Upload installer')]),
+            job('Package Windows Chocolatey', labels=('windows-2025',), steps=[
+                (name, 'success') for name in (
+                    'Package Chocolatey release', 'Attest Chocolatey package',
+                    'Upload Chocolatey package')]),
+            job('create-release', conclusion='failure', steps=[
+                ('Recover verified platform artifacts', 'failure'),
+                ('Append signed Apple assets without replacing existing release assets', 'skipped'),
+                ('Create Release', 'skipped')]),
+        ]
+        self.jobs.extend([
+            job('Build Linux (x64)', conclusion='skipped'),
+            job('Build Linux (x64)', conclusion='skipped'),
+        ])
+        names = ('tvos-ipa', *sorted(recovery.WINDOWS_REPACKAGED_ARTIFACTS))
+        self.artifacts = [
+            {'id': index, 'name': name, 'expired': False,
+             'digest': 'sha256:' + format(index, '064x'),
+             'created_at': '2026-11-25T00:30:00Z',
+             'workflow_run': {'id': self.assembly_run, 'head_sha': self.assembly_sha}}
+            for index, name in enumerate(names, start=201)
+        ]
+        self.proof = {
+            'source_run_id': self.source_run, 'source_sha': self.product_sha,
+            'qualification_run_id': self.qualification_run, 'version': '3.0.52',
+            'windows_repackaging': {'artifact_id': 900, 'artifact_digest': 'sha256:' + '9' * 64},
+        }
+
+    def verify(self, *, local=False):
+        def api(path):
+            if path.endswith(f'/actions/runs/{self.assembly_run}'):
+                return self.run
+            if path.endswith('/branches/main'):
+                return {'commit': {'sha': self.current_sha}}
+            if '/compare/' in path:
+                pair = path.rsplit('/', 1)[-1]
+                base, target = pair.split('...')
+                return {'status': 'ahead', 'merge_base_commit': {'sha': base}, 'files': []}
+            artifact_id = int(path.rsplit('/', 1)[-1])
+            item = next(item for item in self.artifacts if item['id'] == artifact_id)
+            return {**item, 'workflow_run': dict(item['workflow_run'])}
+
+        def collection(path, key):
+            if path.endswith('/artifacts'):
+                return self.artifacts
+            return self.jobs
+
+        environment = {'GITHUB_REF': 'refs/heads/main'}
+        if not local:
+            environment['GITHUB_SHA'] = self.current_sha
+        with patch.dict('os.environ', environment, clear=local), \
+                patch.object(recovery, 'api', side_effect=api), \
+                patch.object(recovery, 'collection', side_effect=collection), \
+                patch('verify_embedded_release_ci.latest_attempt_jobs', side_effect=lambda attempts: attempts[0]):
+            return recovery.verify_qualification_assembly_reuse(self.proof, self.assembly_run)
+
+    def test_reuses_exact_failed_assembly_outputs_after_prepublication_gate(self):
+        proof = self.verify()
+        self.assertEqual(proof['qualification_assembly_run_id'], self.assembly_run)
+        self.assertFalse(proof['repackage_windows'])
+        self.assertEqual(proof['tvos_source']['source_run_id'], self.assembly_run)
+        self.assertEqual(proof['tvos_source']['product_source_sha'], self.product_sha)
+        self.assertEqual(proof['tvos_source']['packaging_source_sha'], self.product_sha)
+        self.assertEqual(proof['tvos_source']['workflow_source_sha'], self.assembly_sha)
+        self.assertFalse(proof['tvos_source']['include_apple_store_build'])
+        self.assertEqual(set(proof['windows_repackaging']['assembly_artifacts']),
+                         recovery.WINDOWS_REPACKAGED_ARTIFACTS)
+
+    def test_local_controller_uses_canonical_main_sha_when_github_sha_is_unavailable(self):
+        proof = self.verify(local=True)
+        self.assertEqual(proof['qualification_assembly_run_id'], self.assembly_run)
+
+    def test_publication_side_effects_wrong_runner_or_artifact_identity_reject(self):
+        mutations = (
+            lambda: next(job for job in self.jobs if job['name'] == 'create-release')
+                ['steps'][-1].update(conclusion='success'),
+            lambda: self.jobs[2].update(labels=['macos-26']),
+            lambda: self.artifacts[0].update(digest='sha256:bad'),
+            lambda: self.jobs[-2].update(conclusion='failure'),
+        )
+        for mutate in mutations:
+            self.setUp()
+            mutate()
+            with self.subTest(mutation=mutate), self.assertRaises(recovery.RecoveryError):
+                self.verify()
+
+    def test_preflight_routes_tv_and_windows_packages_to_the_prior_assembly(self):
+        prior_id = self.assembly_run
+        prior = [dict(item) for item in self.artifacts]
+        source = [
+            {'id': index + 1, 'name': name, 'expired': False,
+             'digest': 'sha256:' + format(index + 1, '064x'),
+             'workflow_run': {'id': self.source_run, 'head_sha': self.product_sha}}
+            for index, name in enumerate(recovery.ARTIFACTS)
+            if name not in {'tvos-ipa', *recovery.WINDOWS_REPACKAGED_ARTIFACTS}
+        ]
+        evidence = {item['name']: {'artifact_id': item['id'], 'digest': item['digest']}
+                    for item in prior if item['name'] in recovery.WINDOWS_REPACKAGED_ARTIFACTS}
+        tvos_artifact = next(item for item in prior if item['name'] == 'tvos-ipa')
+        proof = {
+            'source_run_id': self.source_run, 'source_sha': self.product_sha,
+            'qualification_assembly_source': {
+                'source_run_id': prior_id, 'source_sha': self.product_sha,
+                'workflow_source_sha': self.assembly_sha, 'run_attempt': 1,
+                'version': '3.0.52', 'assembly_artifacts': evidence,
+            },
+            'tvos_source': {
+                'source_run_id': prior_id, 'source_sha': self.product_sha,
+                'workflow_source_sha': self.assembly_sha, 'run_attempt': 1,
+                'artifact_id': tvos_artifact['id'], 'artifact_digest': tvos_artifact['digest'],
+            },
+            'windows_repackaging': {'assembly_artifacts': evidence},
+            'repackage_windows': False,
+        }
+
+        def collection(path, _key):
+            return prior if f'/runs/{prior_id}/' in path else source
+
+        def api(path):
+            artifact_id = int(path.rsplit('/', 1)[-1])
+            item = next(item for item in (*source, *prior) if item['id'] == artifact_id)
+            return {**item, 'workflow_run': dict(item['workflow_run'])}
+
+        with patch.object(recovery, 'collection', side_effect=collection), \
+                patch.object(recovery, 'api', side_effect=api):
+            selected = recovery.preflight_platform_artifacts(proof)
+        by_name = {item['name']: item for item in selected}
+        for name in ('tvos-ipa', *recovery.WINDOWS_REPACKAGED_ARTIFACTS):
+            self.assertEqual(by_name[name]['source_run_id'], prior_id)
+        self.assertEqual({name: by_name[name]['artifact_id'] for name in recovery.WINDOWS_REPACKAGED_ARTIFACTS},
+                         {name: item['artifact_id'] for name, item in evidence.items()})
+
+    def test_download_uses_prior_tvos_and_windows_bytes_after_zip_digest_check(self):
+        filenames = {
+            'tvos-ipa': 'pleazyng-tvos-unsigned.ipa',
+            'windows-x64-portable': 'pleazyng-windows-x64-portable.7z',
+            'windows-installer': 'pleazyng-windows-installer.exe',
+            'windows-chocolatey': 'pleazyng.3.0.52.nupkg',
+        }
+        payloads = {}
+        artifacts = []
+        source_id = self.assembly_run
+        for index, (name, filename) in enumerate(filenames.items(), start=301):
+            archive_bytes = io.BytesIO()
+            with zipfile.ZipFile(archive_bytes, 'w') as archive:
+                archive.writestr(filename, f'fixture for {name}'.encode())
+                if name == 'tvos-ipa':
+                    archive.writestr(recovery.TVOS_RUNTIME_RECEIPT, b'fixture receipt')
+            payload = archive_bytes.getvalue()
+            payloads[index] = payload
+            artifacts.append({
+                'id': index, 'name': name, 'expired': False,
+                'digest': 'sha256:' + hashlib.sha256(payload).hexdigest(),
+                'workflow_run': {'id': source_id, 'head_sha': self.assembly_sha},
+            })
+        package_evidence = {
+            item['name']: {'artifact_id': item['id'], 'digest': item['digest']}
+            for item in artifacts if item['name'] in recovery.WINDOWS_REPACKAGED_ARTIFACTS
+        }
+        by_name = {item['name']: item for item in artifacts}
+        proof = {
+            'source_run_id': self.source_run, 'source_sha': self.product_sha,
+            'qualification_assembly_run_id': source_id,
+            'repackage_windows': False,
+            'qualification_assembly_source': {
+                'source_run_id': source_id, 'source_sha': self.product_sha,
+                'workflow_source_sha': self.assembly_sha, 'run_attempt': 1,
+                'version': '3.0.52', 'assembly_artifacts': package_evidence,
+            },
+            'tvos_source': {
+                'source_run_id': source_id, 'source_sha': self.product_sha,
+                'workflow_source_sha': self.assembly_sha, 'run_attempt': 1,
+                'runtime_dependency_receipt_required': True,
+                'product_source_sha': self.product_sha, 'packaging_source_sha': self.product_sha,
+                'include_apple_store_build': False,
+                'artifact_id': by_name['tvos-ipa']['id'],
+                'artifact_digest': by_name['tvos-ipa']['digest'],
+            },
+            'windows_repackaging': {'assembly_artifacts': package_evidence},
+        }
+
+        def api(path):
+            item_id = int(path.rsplit('/', 1)[-1])
+            item = next(item for item in artifacts if item['id'] == item_id)
+            return {**item, 'workflow_run': dict(item['workflow_run'])}
+
+        def collection(_path, _key):
+            return artifacts
+
+        def download(command, **kwargs):
+            item_id = int(command[-1].rsplit('/', 2)[-2])
+            kwargs['stdout'].write(payloads[item_id])
+            return SimpleNamespace(returncode=0, stderr='')
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict('os.environ', {'GITHUB_RUN_ID': '999', 'GITHUB_SHA': self.current_sha}), \
+                patch.object(recovery, 'ARTIFACTS', {name: name for name in filenames}), \
+                patch.object(recovery, 'collection', side_effect=collection), \
+                patch.object(recovery, 'api', side_effect=api), \
+                patch.object(recovery.subprocess, 'run', side_effect=download), \
+                patch.object(recovery, 'verify_tvos_package_attestations', return_value={'ipa': 'verified'}), \
+                patch.object(recovery, 'verify_tvos_runtime_dependency_receipt', return_value='verified'), \
+                patch.object(recovery, 'verify_windows_package_attestation',
+                             side_effect=lambda _directory, name, _source, _repository: {filenames[name]: 'attested'}), \
+                patch.object(recovery.subprocess, 'check_output', return_value=self.current_sha + '\n'):
+            recovered = recovery.download_platforms(proof, Path(directory))
+            recovered_by_name = {item['name']: item for item in recovered['artifacts']}
+            for name, filename in filenames.items():
+                self.assertEqual(recovered_by_name[name]['source_run_id'], source_id)
+                self.assertEqual(recovered_by_name[name]['artifact_id'], by_name[name]['id'])
+                self.assertEqual((Path(directory) / name / filename).read_bytes(),
+                                 f'fixture for {name}'.encode())
+            self.assertEqual(recovered['assembly_run_id'], 999)
+            self.assertEqual(recovered['actual_checkout_sha'], self.current_sha)
+            self.assertEqual(recovered['assembly_scope'], 'qualified-assembly-continuation')
+
+    def test_prior_windows_payload_attestation_binds_workflow_and_exact_run(self):
+        source = {'source_run_id': self.assembly_run, 'run_attempt': 1,
+                  'workflow_source_sha': self.assembly_sha, 'version': '3.0.52'}
+        certificate = {
+            'sourceRepositoryIdentifier': '1433487464',
+            'sourceRepositoryDigest': self.assembly_sha,
+            'runInvocationURI': f'https://github.com/{recovery.REPOSITORY}/actions/runs/{self.assembly_run}',
+        }
+        response = SimpleNamespace(stdout=json.dumps([{
+            'verificationResult': {'signature': {'certificate': certificate}},
+        }]))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                'windows-x64-portable': 'pleazyng-windows-x64-portable.7z',
+                'windows-installer': 'pleazyng-windows-installer.exe',
+                'windows-chocolatey': 'pleazyng.3.0.52.nupkg',
+            }
+            hashes = {}
+            with patch.object(recovery.subprocess, 'run', return_value=response):
+                for artifact_name, filename in files.items():
+                    folder = root / artifact_name
+                    folder.mkdir()
+                    (folder / filename).write_bytes(filename.encode())
+                    hashes.update(recovery.verify_windows_package_attestation(
+                        folder, artifact_name, source))
+            self.assertEqual(set(hashes), set(files.values()))
+            self.assertTrue(all(len(value) == 64 for value in hashes.values()))
+            invalid = copy.deepcopy(certificate)
+            invalid['runInvocationURI'] = 'https://github.com/example/repo/actions/runs/1'
+            bad_response = SimpleNamespace(stdout=json.dumps([{
+                'verificationResult': {'signature': {'certificate': invalid}},
+            }]))
+            with patch.object(recovery.subprocess, 'run', return_value=bad_response), \
+                    self.assertRaisesRegex(recovery.RecoveryError, 'does not bind its verified assembly run'):
+                recovery.verify_windows_package_attestation(
+                    root / 'windows-x64-portable', 'windows-x64-portable', source)
+
+
 class SourceProofTests(unittest.TestCase):
     def setUp(self):
         self.source = {
@@ -428,6 +731,64 @@ class SourceProofTests(unittest.TestCase):
         self.assertEqual(proof['windows_repackaging']['artifact_id'], raw['id'])
         self.assertNotIn('package-windows', proof['reused_jobs'])
         self.assertIn('Build Windows (x64)', proof['reused_jobs'])
+
+    def test_qualified_assembly_continuation_uses_prior_tvos_and_windows_outputs_without_rebuild(self):
+        sha = self.source['head_sha']
+        source_run = 42
+        prior_assembly = 77
+        self.source.update(id=source_run, status='completed', conclusion='failure', run_attempt=1,
+                           display_title='action:release:pool:public:tag:v3.0.0')
+        self.compare.update(status='identical', files=[])
+        tvos = next(job for job in self.jobs if job['name'] == 'Build tvOS developer package (arm64)')
+        tvos.update(id=100, status='completed', conclusion='cancelled', labels=['macos-26'],
+                    runner_id=0, runner_name='', steps=[], run_id=source_run,
+                    run_attempt=1, head_sha=sha)
+        package = next(job for job in self.jobs if job['name'] == 'package-windows')
+        package.update(id=101, status='completed', conclusion='skipped', runner_id=0,
+                       runner_name='', steps=[], run_id=source_run, run_attempt=1, head_sha=sha)
+        chocolatey = {'name': 'Package Windows Chocolatey', 'id': 102, 'status': 'completed',
+                      'conclusion': 'skipped', 'runner_id': 0, 'runner_name': '', 'steps': [],
+                      'run_id': source_run, 'run_attempt': 1, 'head_sha': sha}
+        x64 = next(job for job in self.jobs if job['name'] == 'Build Windows (x64)')
+        x64.update(id=103, run_id=source_run, run_attempt=1, head_sha=sha, steps=[
+            {'name': name, 'status': 'completed', 'conclusion': 'success'}
+            for name in ('Build Windows x64', 'Verify Windows bundle contents', 'Upload x64 build')
+        ])
+        next(job for job in self.jobs if job['name'] == 'build-android').update(
+            conclusion='success', id=104)
+        self.jobs.extend([
+            chocolatey,
+            {'name': 'Build WebOS TV package (ARMv7)', 'id': 105,
+             'status': 'completed', 'conclusion': 'success'},
+        ])
+        raw = {'id': 900, 'name': recovery.WINDOWS_RAW_X64_ARTIFACT, 'expired': False,
+               'digest': 'sha256:' + '9' * 64,
+               'workflow_run': {'id': source_run, 'head_sha': sha}}
+        retained = {
+            'qualification_assembly_run_id': prior_assembly,
+            'qualification_assembly_source': {'source_run_id': prior_assembly},
+            'tvos_source': {'source_run_id': prior_assembly},
+            'windows_repackaging': {'assembly_run_id': prior_assembly, 'assembly_artifacts': {}},
+            'repackage_windows': False,
+            'reused_assembly_jobs': ['Build tvOS developer package (arm64)', 'package-windows',
+                                     'Package Windows Chocolatey'],
+        }
+        with patch.object(recovery, 'api', side_effect=[self.source, self.compare, raw]), \
+                patch.object(recovery, 'collection', side_effect=[self.jobs, [raw]]), \
+                patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 84}), \
+                patch.object(recovery, 'verify_qualification_assembly_reuse', return_value=retained) as verify:
+            proof = recovery.verify_source_run(
+                source_run, sha, '3.0.0', qualification_run=84,
+                qualification_assembly_run=prior_assembly)
+        verify.assert_called_once()
+        self.assertEqual(verify.call_args.args[0]['source_run_id'], source_run)
+        self.assertTrue(verify.call_args.args[0]['windows_repackaging'])
+        self.assertEqual(verify.call_args.args[1], prior_assembly)
+        self.assertFalse(proof['rebuild_tvos'])
+        self.assertFalse(proof['repackage_windows'])
+        self.assertEqual(proof['qualification_assembly_run_id'], prior_assembly)
+        self.assertEqual(proof['tvos_source']['source_run_id'], prior_assembly)
+        self.assertIn('Build tvOS developer package (arm64)', proof['reused_jobs'])
 
     def test_supplemental_qualification_does_not_allow_an_unrelated_ci_failure(self):
         sha = self.source['head_sha']
