@@ -3139,6 +3139,10 @@ def write_capture_manifest(output: Path, platform: str, captures: list[dict[str,
         or capture["capture_scene"].startswith("Real lifetime-access sheet")
         for capture in captures
     )
+    localtest_trial = any(
+        capture.get("storekit_localtest", {}).get("environment") == "LOCALTEST"
+        for capture in captures
+    )
     capture_scope = {"macOS": "Mac", "tvOS": "tvOS"}.get(platform, platform)
     if platform == "iOS and iPadOS":
         device_names = {
@@ -3152,6 +3156,10 @@ def write_capture_manifest(output: Path, platform: str, captures: list[dict[str,
             scopes.append("iPad")
         capture_scope = " and ".join(scopes) if scopes else "iOS and iPadOS"
     qualification = (
+        f"Authentic app-in-use screenshots from the actual v{VERSION} product app bundle(s) on {capture_scope}. "
+        "The iPad Files and Books screen follows the app's real trial action through an isolated Xcode StoreKitTest "
+        "LOCALTEST transaction; this does not qualify App Store Sandbox, playback, or physical-device behavior."
+        if in_use and localtest_trial else
         f"Authentic app-in-use screenshots from the actual v{VERSION} product app bundle(s) on {capture_scope}. "
         "They show the local Files and Books library after real onboarding and do not claim server connection, media "
         "playback, StoreKit transactions, or physical-device qualification."
@@ -3235,6 +3243,7 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
         raise ValueError("Unexpected iOS Simulator application identity")
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    selected_category = getattr(args, "device_category", "both")
     app_digest = sha256_tree(app)
     build_receipt_path = args.build_receipt.resolve(strict=True)
     build_receipt = json.loads(build_receipt_path.read_text(encoding="utf-8"))
@@ -3250,6 +3259,27 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
     )
     if build_receipt.get("app_bundle_sha256") != app_digest:
         raise ValueError("The iOS app bundle differs from its restored build receipt")
+    receipt_digest = sha256_file(build_receipt_path)
+    shutil.copyfile(build_receipt_path, output / "producer-build-provenance.json")
+    if getattr(args, "localtest_trial", False):
+        if selected_category != "ipad":
+            raise ValueError("The LOCALTEST trial gate is supported only for the focused iPad capture")
+        capture = capture_ios_in_use_with_localtest_trial(
+            product_root=product_root,
+            app=app,
+            app_digest=app_digest,
+            output=output,
+            filename="ipad-01-files-and-books.png",
+            build_receipt=build_receipt,
+            build_receipt_path=build_receipt_path,
+            build_receipt_digest=receipt_digest,
+            tool_source_sha=tool_source_sha,
+            run_id=args.run_id,
+            run_attempt=args.run_attempt,
+        )
+        write_capture_manifest(output, "iOS and iPadOS", [capture])
+        print(f"Captured the iPad Files and Books screen after a real LOCALTEST trial flow in {output}")
+        return
     simulator_entitlements = args.simulator_entitlements.resolve(strict=True)
     if simulator_entitlements.is_symlink() or not simulator_entitlements.is_file():
         raise ValueError("The approved iOS simulator entitlement source must be a regular file")
@@ -3260,11 +3290,8 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
         extension_entitlements_source_path.relative_to(product_root)
     except ValueError as error:
         raise ValueError("The product extension entitlement source must remain under the exact source checkout") from error
-    receipt_digest = sha256_file(build_receipt_path)
-    shutil.copyfile(build_receipt_path, output / "producer-build-provenance.json")
     captures = []
     signing_state = None
-    selected_category = getattr(args, "device_category", "both")
     categories = (
         ("iphone", "iphone-01-files-and-books.png"),
         ("ipad", "ipad-01-files-and-books.png"),
@@ -3287,6 +3314,185 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
     write_capture_manifest(output, "iOS and iPadOS", captures)
     selected_scope = {"both": "iPhone and iPad", "iphone": "iPhone", "ipad": "iPad"}[selected_category]
     print(f"Captured post-onboarding {selected_scope} Files and Books screen(s) in {output}")
+
+
+def adapt_apple_store_receipt_for_trial_capture(
+    build_receipt: dict[str, Any],
+    *,
+    product_app_identity: dict[str, Any],
+    receipt_digest: str,
+    product_root: Path,
+) -> dict[str, Any]:
+    """Add the trial helper's field names while preserving the producer receipt verbatim."""
+    adapted = dict(build_receipt)
+    adapted.update({
+        "product_source_sha": build_receipt.get("source_sha"),
+        "product_source_tag": build_receipt.get("source_tag"),
+        "product_app_bundle_sha256": build_receipt.get("app_bundle_sha256"),
+        "product_app": product_app_identity,
+        "product_build_receipt_sha256": receipt_digest,
+        "product_source_checkout_path": str(product_root),
+        "capture_receipt_adapter": {
+            "schema": "apple-store-build-provenance-to-storekit-trial-v1",
+            "original_receipt_sha256": receipt_digest,
+            "original_receipt_preserved": True,
+            "qualification": "Field-name adapter only; the retained app and producer receipt are unchanged.",
+        },
+    })
+    return adapted
+
+
+def capture_ios_in_use_with_localtest_trial(
+    *,
+    product_root: Path,
+    app: Path,
+    app_digest: str,
+    output: Path,
+    filename: str,
+    build_receipt: dict[str, Any],
+    build_receipt_path: Path,
+    build_receipt_digest: str,
+    tool_source_sha: str,
+    run_id: str,
+    run_attempt: str,
+) -> dict[str, Any]:
+    """Use the proven isolated LOCALTEST flow without mutating the retained product signature."""
+    from stores import capture_apple_trial_storekit as trial_capture
+
+    if sha256_tree(app) != app_digest or build_receipt.get("app_bundle_sha256") != app_digest:
+        raise ValueError("The retained iPad app differs from its exact producer receipt before LOCALTEST capture")
+    consumer_path = build_receipt_path.parent / "consumer-provenance.json"
+    if not consumer_path.is_file():
+        consumer_path = None
+
+    localtest_output = output / "localtest"
+    localtest_output.mkdir(parents=True, exist_ok=False)
+    adapted_receipt = adapt_apple_store_receipt_for_trial_capture(
+        build_receipt,
+        product_app_identity=trial_capture.bundle_info(app),
+        receipt_digest=build_receipt_digest,
+        product_root=product_root,
+    )
+    adapted_receipt_path = localtest_output / "adapted-product-build-provenance.json"
+    trial_capture.write_json(adapted_receipt_path, adapted_receipt)
+    trial_capture.capture(argparse.Namespace(
+        product_root=product_root,
+        product_source_sha=SOURCE_SHA,
+        capture_tools_root=Path(__file__).resolve().parents[1],
+        capture_tools_sha=tool_source_sha,
+        app=app,
+        build_receipt=adapted_receipt_path,
+        consumer_provenance=consumer_path,
+        output_dir=localtest_output,
+        run_id=run_id,
+        run_attempt=run_attempt,
+        display_target="ipad-13",
+    ))
+    if sha256_tree(app) != app_digest:
+        raise ValueError("LOCALTEST capture changed the retained product app bundle")
+
+    localtest_provenance_path = localtest_output / "capture-provenance.json"
+    localtest_provenance = json.loads(localtest_provenance_path.read_text(encoding="utf-8"))
+    localtest_record = localtest_provenance.get("localtest_transaction_record")
+    transactions = localtest_record.get("allLocalTestTransactions") if isinstance(localtest_record, dict) else None
+    if (not isinstance(transactions, list) or len(transactions) != 1
+            or transactions[0].get("productID") != "pleazyng_7_day_trial"
+            or transactions[0].get("state") != "purchased"
+            or localtest_record.get("appBehavior", {}).get("lifetimeTransactionCreated") is not False):
+        raise ValueError("The retained iPad app did not produce exactly one verified LOCALTEST trial transaction")
+
+    screenshot = output / filename
+    shutil.copyfile(localtest_output / "trial-active-files-books-localtest.png", screenshot)
+    png_encoding = normalize_opaque_rgb_png(screenshot)
+    if png_color_type(screenshot) != 2:
+        raise ValueError("The LOCALTEST iPad listing screenshot is not an opaque RGB PNG")
+    dimensions = png_dimensions(screenshot)
+    if dimensions != (2064, 2752):
+        raise ValueError(f"The LOCALTEST iPad listing screenshot is {dimensions}; expected the 13-inch size (2064, 2752)")
+    screen_content_check = require_visible_screen_content(screenshot)
+
+    attachments_manifest = json.loads(
+        (localtest_output / "xcresult-attachments" / "manifest.json").read_text(encoding="utf-8")
+    )
+    all_attachments = [item for test in attachments_manifest for item in test.get("attachments", [])]
+    listing_attachments = [
+        item for item in all_attachments
+        if "pleazyng-trial-active-files-books-localtest" in item.get("suggestedHumanReadableName", "")
+    ]
+    if len(listing_attachments) != 1:
+        raise ValueError("The StoreKitTest result does not contain exactly one active Files and Books screenshot")
+
+    simulator = json.loads((localtest_output / "simulator.json").read_text(encoding="utf-8"))
+    trial_runner_root = localtest_output / "storekit-ui-runner"
+    trial_test_source = trial_runner_root / "PleazyngTrialReviewUITests.swift"
+    project_spec = trial_runner_root / "project.json"
+    test_source_sha = sha256_file(trial_test_source)
+    if test_source_sha != localtest_provenance.get("ui_test_source_sha256"):
+        raise ValueError("The LOCALTEST XCTest source hash differs from its capture provenance")
+
+    return {
+        "filename": filename,
+        "platform": "iOS",
+        "build_configuration": BUILD_CONFIGURATION["ios"],
+        "simulator_appearance": "platform default",
+        "capture_scene": (
+            "Post-onboarding local Files and Books screen after the real trial CTA completed one isolated "
+            "Xcode StoreKitTest LOCALTEST purchase. No real account, server, or media was configured."
+        ),
+        "capture_method": [
+            "XCTest UI automation; XCUIScreen.main.screenshot() exported from the test result bundle",
+            "The app's real 7-day trial CTA completed one isolated Xcode StoreKitTest LOCALTEST transaction",
+        ],
+        "source_tag": SOURCE_TAG,
+        "source_sha": SOURCE_SHA,
+        "capture_tools_sha": tool_source_sha,
+        "bundle_id": BUNDLE_ID,
+        "app_version": VERSION,
+        "app_build": BUILD_NUMBER,
+        "app_bundle_sha256": app_digest,
+        "capture_sha256": sha256_file(screenshot),
+        "dimensions": list(dimensions),
+        "png_color_type": png_color_type(screenshot),
+        "png_alpha_channel": False,
+        "png_encoding": png_encoding,
+        "device": simulator,
+        "build_defines": IOS_MAC_STORE_DEFINES,
+        "qualification": (
+            "Authentic local Files and Books interface from the exact retained App Store IAP app bundle after its real "
+            "trial action completed in isolated Xcode StoreKitTest LOCALTEST. This does not qualify App Store Sandbox, "
+            "playback, or physical-device behavior."
+        ),
+        "screen_content_check": screen_content_check,
+        "ui_test_runner": {
+            "project_target": "PleazyngTrialReviewUITests",
+            "project_targets": ["PleazyngTrialReviewUITests"],
+            "project_target_inventory_method": (
+                "Known single-target XcodeGen project spec; xcodebuild build-for-testing validates the scheme"
+            ),
+            "project_sha256": sha256_file(project_spec),
+            "test_source_sha256": test_source_sha,
+            "test_identifier": listing_attachments[0].get("suggestedHumanReadableName"),
+            "test_target_bundle_id": "org.snapetech.pleazyng.localtest.trial-review-tests",
+            "product_app_bundle_id": BUNDLE_ID,
+            "simulator_udid": simulator.get("udid"),
+            "xcode_version": localtest_provenance.get("xcode_version"),
+            "screenshot_attachment": listing_attachments[0].get("exportedFileName"),
+            "product_target_compiled": False,
+            "ios_keychain_roundtrip_verified": False,
+            "test_only_localtest_resource": "scripts/stores/apple/pleazyng-trial-review.storekit",
+        },
+        "storekit_localtest": {
+            "environment": "LOCALTEST",
+            "capture_provenance_file": "localtest/capture-provenance.json",
+            "transaction_record": localtest_record,
+            "storekit_configuration_sha256": localtest_provenance.get("storekit_configuration_sha256"),
+            "ui_test_source_sha256": test_source_sha,
+            "lifetime_purchase_button_activated": False,
+            "lifetime_transaction_created": False,
+        },
+        "build_receipt": build_receipt,
+        "build_configuration_evidence": build_configuration_evidence(build_receipt, "ios"),
+    }
 
 
 def capture_tvos_in_use(args: argparse.Namespace) -> None:
@@ -4392,11 +4598,28 @@ def package_app_in_use_captures(args: argparse.Namespace) -> None:
                 )
             if platform in ("iOS and iPadOS", "tvOS"):
                 ui_runner = capture.get("ui_test_runner")
+                is_localtest_trial = (
+                    capture.get("storekit_localtest", {}).get("environment") == "LOCALTEST"
+                )
+                expected_targets = (
+                    ["PleazyngTrialReviewUITests"] if is_localtest_trial
+                    else ["PleazyngInUseCaptureTests"]
+                )
                 if (not isinstance(ui_runner, dict)
-                        or ui_runner.get("project_targets") != ["PleazyngInUseCaptureTests"]
+                        or ui_runner.get("project_targets") != expected_targets
                         or ui_runner.get("product_target_compiled") is not False
                         or re.fullmatch(r"[0-9a-f]{64}", str(ui_runner.get("test_source_sha256", ""))) is None):
                     raise ValueError(f"Screenshot lacks the isolated UI-test-only runner receipt: {image}")
+                if is_localtest_trial:
+                    localtest = capture["storekit_localtest"]
+                    record = localtest.get("transaction_record", {})
+                    transactions = record.get("allLocalTestTransactions") if isinstance(record, dict) else None
+                    if (not isinstance(transactions, list) or len(transactions) != 1
+                            or transactions[0].get("productID") != "pleazyng_7_day_trial"
+                            or transactions[0].get("state") != "purchased"
+                            or record.get("appBehavior", {}).get("lifetimeTransactionCreated") is not False
+                            or localtest.get("lifetime_purchase_button_activated") is not False):
+                        raise ValueError(f"LOCALTEST screenshot lacks verified trial-only transaction evidence: {image}")
         images.extend(captures)
 
     names = {capture["filename"] for _, capture in images}
@@ -4508,6 +4731,7 @@ def parse_args() -> argparse.Namespace:
             command.add_argument("--simulator-entitlements", required=True, type=Path)
             command.add_argument("--extension-entitlements", required=True, type=Path)
             command.add_argument("--device-category", choices=("both", "iphone", "ipad"), default="both")
+            command.add_argument("--localtest-trial", action="store_true")
         command.set_defaults(handler=handler)
     paywall = subparsers.add_parser("capture-macos-paywall")
     paywall.add_argument("--product-root", required=True, type=Path)

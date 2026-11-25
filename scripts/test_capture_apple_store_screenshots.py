@@ -765,12 +765,55 @@ class ListingCaptureMetadataTests(unittest.TestCase):
             "--product-root", "product", "--app", "Pleazyng.app",
             "--build-receipt", "receipt.json", "--simulator-entitlements", "sim.entitlements",
             "--extension-entitlements", "extension.entitlements",
-            "--device-category", "ipad", "--output-dir", "output",
+            "--device-category", "ipad", "--localtest-trial", "--output-dir", "output",
         ]
         with patch("sys.argv", argv):
             parsed = capture.parse_args()
 
         self.assertEqual("ipad", parsed.device_category)
+        self.assertTrue(parsed.localtest_trial)
+
+    def test_trial_receipt_adapter_preserves_original_producer_fields(self) -> None:
+        original = {
+            "source_sha": "a" * 40,
+            "source_tag": f"v3.0.51-candidate.{'a' * 40}",
+            "product_version": "3.0.51",
+            "product_build": 210,
+            "app_bundle_sha256": "b" * 64,
+            "producer_run_id": "45569185714",
+        }
+        app_identity = {"bundle_id": "org.snapetech.pleazyng", "version": "3.0.51"}
+        receipt_digest = "c" * 64
+        adapted = capture.adapt_apple_store_receipt_for_trial_capture(
+            original,
+            product_app_identity=app_identity,
+            receipt_digest=receipt_digest,
+            product_root=Path("/product-source"),
+        )
+
+        self.assertEqual(original["source_sha"], adapted["product_source_sha"])
+        self.assertEqual(original["source_tag"], adapted["product_source_tag"])
+        self.assertEqual(original["app_bundle_sha256"], adapted["product_app_bundle_sha256"])
+        self.assertEqual(app_identity, adapted["product_app"])
+        self.assertEqual(original["producer_run_id"], adapted["producer_run_id"])
+        self.assertEqual(receipt_digest, adapted["capture_receipt_adapter"]["original_receipt_sha256"])
+
+    def test_capture_manifest_qualifies_localtest_trial_without_overstating_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            capture.write_capture_manifest(output, "iOS and iPadOS", [{
+                "filename": "ipad-01-files-and-books.png",
+                "build_defines": capture.IOS_MAC_STORE_DEFINES,
+                "build_configuration": "Debug Simulator",
+                "capture_scene": "Post-onboarding local Files and Books screen after LOCALTEST.",
+                "capture_tools_sha": "a" * 40,
+                "device": {"device_name": "iPad Pro 13-inch (M5)"},
+                "storekit_localtest": {"environment": "LOCALTEST"},
+            }])
+            manifest = json.loads((output / "capture-provenance.json").read_text(encoding="utf-8"))
+
+        self.assertIn("isolated Xcode StoreKitTest LOCALTEST transaction", manifest["qualification"])
+        self.assertIn("does not qualify App Store Sandbox", manifest["qualification"])
 
 
 class MacListingCaptureTests(unittest.TestCase):

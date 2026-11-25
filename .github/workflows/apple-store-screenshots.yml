@@ -339,7 +339,13 @@ jobs:
         if: inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
+          PLEAZYNG_CAPTURE_IPAD_LOCALTEST_TRIAL: ${{ inputs.target == 'ipad-in-use-capture-only' && 'true' || 'false' }}
         run: |
+          set -eo pipefail
+          localtest_args=()
+          if [[ "$PLEAZYNG_CAPTURE_IPAD_LOCALTEST_TRIAL" == 'true' ]]; then
+            localtest_args+=(--localtest-trial)
+          fi
           python3 capture-tools/scripts/capture_apple_store_screenshots.py capture-ios-in-use \
             --product-root "$GITHUB_WORKSPACE" \
             --app "$APPLE_STORE_APP_PATH" \
@@ -347,6 +353,7 @@ jobs:
             --simulator-entitlements "$GITHUB_WORKSPACE/capture-tools/ios/Runner/DebugProfile.entitlements" \
             --extension-entitlements "$GITHUB_WORKSPACE/native/games/romm/apple/extension/RommWorker.entitlements" \
             --device-category "${{ (inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only') && 'ipad' || 'both' }}" \
+            "${localtest_args[@]}" \
             --output-dir "$RUNNER_TEMP/apple-store-in-use-captures-ios"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

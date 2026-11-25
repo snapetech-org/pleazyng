@@ -121,6 +121,9 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         capture_step = named_step_text(ios, "Capture post-onboarding iPhone and iPad Files and Books screens")
         self.assertIn(target, named_step_condition(ios, "Capture post-onboarding iPhone and iPad Files and Books screens"))
         self.assertIn("'ipad' || 'both'", capture_step)
+        self.assertIn("PLEAZYNG_CAPTURE_IPAD_LOCALTEST_TRIAL", capture_step)
+        self.assertIn("inputs.target == 'ipad-in-use-capture-only' && 'true' || 'false'", capture_step)
+        self.assertIn("localtest_args+=(--localtest-trial)", capture_step)
         self.assertIn("apple-store-in-use-captures-ios-${{ inputs.product_version || '3.0.37' }}", ios)
         self.assertIn(
             "if: always() && (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only')",
