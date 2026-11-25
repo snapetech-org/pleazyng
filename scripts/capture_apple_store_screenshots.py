@@ -2871,15 +2871,33 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
 
     first_path = output / "macos-01-files-and-books.initial-desktop.png"
     first_ocr_path = output / "macos-01-files-and-books.initial-ocr.json"
-    first_ocr = capture_macos_display_stage(
-        first_path,
-        first_ocr_path,
-        live_display_state,
-        accepted_text=("Start fresh", "Use files and books"),
-    )
-    require_macos_listing_markers(first_ocr, before_navigation=True)
     click_records: list[dict[str, Any]] = []
     click_records_path = output / "macos-01-files-and-books.native-clicks.json"
+
+    def capture_onboarding_stage(
+        screenshot: Path, evidence_path: Path, markers: tuple[str, ...]
+    ) -> dict[str, Any]:
+        decline = "Don't Allow"
+        evidence = capture_macos_display_stage(
+            screenshot, evidence_path, live_display_state,
+            accepted_text=(*markers, decline),
+        )
+        recognized = evidence["recognized_text"].casefold()
+        if decline.casefold() not in recognized:
+            return evidence
+        if "pleazyng" not in recognized or "find devices" not in recognized:
+            raise ValueError("An unexpected macOS permission dialog covered the capture")
+        shutil.copyfile(screenshot, screenshot.with_suffix(".network-prompt.png"))
+        click_records.append(click_macos_visible_text(
+            app, app_pid, evidence, decline, display_state=live_display_state
+        ))
+        click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
+        return capture_macos_display_stage(
+            screenshot, evidence_path, live_display_state, accepted_text=markers
+        )
+
+    first_ocr = capture_onboarding_stage(first_path, first_ocr_path, ("Start fresh", "Use files and books"))
+    require_macos_listing_markers(first_ocr, before_navigation=True)
     first_text = " ".join(str(first_ocr.get("recognized_text", "")).casefold().split())
     if "start fresh" in first_text:
         click_records.append(click_macos_visible_text(
@@ -2888,11 +2906,10 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
         choice_path = output / "macos-02-files-and-books-choice.png"
         choice_ocr_path = output / "macos-02-files-and-books-choice-ocr.json"
-        choice_ocr = capture_macos_display_stage(
+        choice_ocr = capture_onboarding_stage(
             choice_path,
             choice_ocr_path,
-            live_display_state,
-            accepted_text=("Use files and books",),
+            ("Use files and books",),
         )
     else:
         choice_path = first_path
