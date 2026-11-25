@@ -378,6 +378,14 @@ class HostedRecoveryWatchTests(unittest.TestCase):
             self.assertEqual(await_hosted_retry(self.repo, 7, self.failed), self.queued)
         self.recover.assert_called_once_with(self.repo, 7, 2, retry=True)
 
+    def test_watcher_returns_when_an_exact_supplemental_qualification_owns_recovery(self):
+        with patch("release_all_platforms.hosted_capacity.has_supplemental_apple_recovery",
+                   return_value=True) as supplemental:
+            self.assertIsNone(await_hosted_retry(self.repo, 7, self.failed))
+        supplemental.assert_called_once_with(self.repo, self.failed)
+        self.recover.assert_not_called()
+        self.sleep.assert_not_called()
+
     def test_lost_response_does_not_issue_a_second_local_request(self):
         self.failed["updated_at"] = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=2)).isoformat()
         self.recover.side_effect = subprocess.CalledProcessError(1, "gh")

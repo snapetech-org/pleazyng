@@ -476,6 +476,9 @@ def await_hosted_retry(repo: str, run_id: int, overview: dict) -> dict | None:
                 jobs, _ = hosted_capacity.classify_attempt(repo, run_id, attempt)
                 if not jobs:
                     return None
+                if hosted_capacity.has_supplemental_apple_recovery(repo, overview):
+                    print(hosted_capacity.SUPPLEMENTAL_APPLE_RECOVERY, flush=True)
+                    return None
                 print(f"Waiting for automatic hosted retry of run {run_id}, attempt {attempt}: "
                       + ", ".join(jobs), flush=True)
             latest = gh_json("api", f"repos/{repo}/actions/runs/{run_id}")
@@ -489,7 +492,10 @@ def await_hosted_retry(repo: str, run_id: int, overview: dict) -> dict | None:
                 # A successful request or a lost response can precede the REST status update.
                 # Let the recovery workflow and subsequent polls observe this single request.
                 local_request_attempted = True
-                print(hosted_capacity.recover(repo, run_id, attempt, retry=True), flush=True)
+                result = hosted_capacity.recover(repo, run_id, attempt, retry=True)
+                print(result, flush=True)
+                if result == hosted_capacity.SUPPLEMENTAL_APPLE_RECOVERY:
+                    return None
         except (ReleaseError, subprocess.CalledProcessError, ValueError) as error:
             print(f"Could not verify hosted recovery for run {run_id}: {error}", flush=True)
             remaining = deadline - time.monotonic()

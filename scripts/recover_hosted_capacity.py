@@ -17,6 +17,7 @@ APPLE_QUALIFICATION_TITLE = re.compile(
     r"(?::resume:([1-9][0-9]*):(all|ios|macos|tvos))?"
 )
 WORKFLOWS = (APPLE_QUALIFICATION_WORKFLOW, "build.yml", "ci.yml", "macos-app-store-signed.yml")
+SUPPLEMENTAL_APPLE_RECOVERY = "Supplemental Apple qualification is already available or running"
 APPLE_SUITE_GATE_NAMES = ("Apple native reliability", "Release CI / Apple native reliability")
 APPLE_SUITE_PLATFORMS = ("iOS", "macOS", "tvOS")
 IOS_NATIVE_PRODUCER = "Build and test candidate iOS app"
@@ -95,6 +96,31 @@ def retained_siblings_verified(repository, run, retry_platform):
     return True
 
 
+def supplemental_apple_candidate(repository, run):
+    if not trusted_workflow(repository, run) or run["path"] != f".github/workflows/{APPLE_QUALIFICATION_WORKFLOW}":
+        return None
+    return APPLE_QUALIFICATION_TITLE.fullmatch(run["display_title"])
+
+
+def supplemental_apple_preserves_source(repository, run, candidate):
+    return (run["conclusion"] == "success" or run["status"] != "completed"
+            or candidate[3] is not None and retained_siblings_verified(repository, run, candidate[4]))
+
+
+def has_supplemental_apple_recovery(repository, source):
+    if source.get("path") != ".github/workflows/build.yml" or not source.get("head_sha") or not source.get("created_at"):
+        return False
+    path = (f"repos/{repository}/actions/workflows/{APPLE_QUALIFICATION_WORKFLOW}/runs"
+            f"?branch=main&event=workflow_dispatch&created=%3E%3D{source['created_at']}&per_page=100")
+    for page in api(path, pages=True):
+        for run in page["workflow_runs"]:
+            candidate = supplemental_apple_candidate(repository, run)
+            if (candidate is not None and (int(candidate[1]), candidate[2]) == (source["id"], source["head_sha"])
+                    and supplemental_apple_preserves_source(repository, run, candidate)):
+                return True
+    return False
+
+
 def classify_attempt(repository, run_id, attempt):
     """Return failed job names only when each root failure is infrastructure."""
     base = f"repos/{repository}"
@@ -158,6 +184,8 @@ def recover(repository, run_id, attempt, retry):
         raise SystemExit(f"Hosted capacity still unavailable after {attempt} attempts: {names}")
     if not retry:
         return f"Confirmed hosted runner failure: {names}"
+    if has_supplemental_apple_recovery(repository, run):
+        return SUPPLEMENTAL_APPLE_RECOVERY
     if not current_failure():
         return "Run has already advanced"
     try:
@@ -188,17 +216,12 @@ def recover_recent(repository, retry):
                     latest[title] = run
         for run in latest.values():
             candidate = None
-            if workflow == APPLE_QUALIFICATION_WORKFLOW and trusted_workflow(repository, run):
-                candidate = APPLE_QUALIFICATION_TITLE.fullmatch(run["display_title"])
-                resumed = candidate is not None and candidate[3] is not None
-                if candidate is not None and (run["conclusion"] == "success"
-                                              or run["status"] != "completed"
-                                              or resumed and retained_siblings_verified(
-                                                  repository, run, candidate[4]
-                                              )):
+            if workflow == APPLE_QUALIFICATION_WORKFLOW:
+                candidate = supplemental_apple_candidate(repository, run)
+                if candidate is not None and supplemental_apple_preserves_source(repository, run, candidate):
                     supplemental_candidates.add((int(candidate[1]), candidate[2]))
             if workflow == "build.yml" and (run["id"], run.get("head_sha")) in supplemental_candidates:
-                print(f'{run["id"]}: Supplemental Apple qualification is already available or running')
+                print(f'{run["id"]}: {SUPPLEMENTAL_APPLE_RECOVERY}')
                 continue
             recoverable = (run["conclusion"] == "failure"
                            or candidate is not None and run["conclusion"] == "cancelled")

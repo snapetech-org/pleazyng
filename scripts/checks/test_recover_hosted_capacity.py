@@ -229,6 +229,28 @@ class HostedCapacityTests(unittest.TestCase):
             capacity.recover_recent(self.repository, retry=True)
             recover.assert_called_once_with(self.repository, 43, self.attempt, True)
 
+    def test_direct_retry_preserves_source_with_matching_supplemental_qualification(self):
+        sha = "a" * 40
+        self.workflow.update(head_sha=sha, created_at="2026-11-25T14:18:00Z")
+        supplement = {
+            **self.workflow, "id": 43, "status": "queued", "conclusion": None,
+            "display_title": f"apple-candidate-qualification:42:{sha}",
+            "path": f".github/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}",
+        }
+
+        def list_runs(path, *, pages=False):
+            if f"/workflows/{capacity.APPLE_QUALIFICATION_WORKFLOW}/" in path:
+                self.assertTrue(pages)
+                return [{"workflow_runs": [supplement]}]
+            return self.api(path, pages=pages)
+
+        with patch.object(capacity, "api", side_effect=list_runs):
+            self.assertEqual(self.recover(), capacity.SUPPLEMENTAL_APPLE_RECOVERY)
+            self.mutate.assert_not_called()
+            supplement["display_title"] = f"apple-candidate-qualification:41:{sha}"
+            self.assertIn("Requested retry", self.recover())
+            self.mutate.assert_called_once()
+
     def test_failed_resumed_qualification_suppresses_source_retry_after_retained_preflight(self):
         sha = 'b' * 40
         original = {
