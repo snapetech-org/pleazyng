@@ -19,6 +19,7 @@ from capture_apple_store_screenshots import (
     BUNDLE_ID,
     BUILD_NUMBER,
     MACOS_LISTING_OCR_SWIFT,
+    MACOS_LIVE_DISPLAY_STATE_SWIFT,
     MACOS_POST_NATIVE_CLICK_SWIFT,
     MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT,
     MACOS_WINDOW_BOUNDS_SWIFT,
@@ -771,22 +772,33 @@ class MacListingCaptureTests(unittest.TestCase):
     def test_mac_listing_capture_uses_native_display_window_and_visible_ocr(self) -> None:
         self.assertIn("CGDisplaySetDisplayMode", MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
         self.assertIn("1920x1080", MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
-        self.assertIn('"target_native_window_points": [1440, 900]', MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
+        self.assertIn('"target_native_window_points": [1280, 800]', MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
         self.assertIn("CGWindowListCopyWindowInfo", MACOS_WINDOW_BOUNDS_SWIFT)
         self.assertIn("VNRecognizeTextRequest()", MACOS_LISTING_OCR_SWIFT)
         self.assertIn("normalized_bounds", MACOS_LISTING_OCR_SWIFT)
         self.assertIn('"recognized_lines": lines', MACOS_LISTING_OCR_SWIFT)
         self.assertIn("CGEvent(mouseEventSource", MACOS_POST_NATIVE_CLICK_SWIFT)
         self.assertNotIn("System Events", MACOS_POST_NATIVE_CLICK_SWIFT)
+        self.assertIn("CGDisplayBounds", MACOS_LIVE_DISPLAY_STATE_SWIFT)
+        self.assertIn("NSWindow Frame ", capture.write_macos_main_window_frame_preference.__code__.co_consts)
         self.assertIn("Use files and books", capture.require_macos_listing_markers.__code__.co_consts)
         self.assertIn("Import files", capture.require_macos_listing_markers.__code__.co_consts)
         self.assertIn("/usr/sbin/screencapture", capture.run_macos_listing_window_capture.__code__.co_consts)
         self.assertNotIn("StoreKit", MACOS_LISTING_OCR_SWIFT)
         self.assertNotIn("XCUITest", capture.run_macos_listing_window_capture.__code__.co_consts)
 
+    def test_appkit_saved_frame_request_is_written_and_read_back_before_launch(self) -> None:
+        with patch.object(capture, "run", side_effect=[None, "{{0, 0}, {1280, 800}}"]):
+            evidence = capture.write_macos_main_window_frame_preference(
+                width=1280, height=800, x=0, y=0
+            )
+
+        self.assertEqual("{{0, 0}, {1280, 800}}", evidence["saved_frame_string"])
+        self.assertTrue(evidence["applied_before_app_launch"])
+
     def test_mac_native_click_point_comes_from_visible_ocr_inside_product_window(self) -> None:
         evidence = {
-            "image_pixels": [1920, 1080],
+            "image_pixels": [1024, 768],
             "recognized_regions": [{
                 "text": "Use files and books",
                 "confidence": 0.98,
@@ -796,23 +808,26 @@ class MacListingCaptureTests(unittest.TestCase):
         point = capture.locate_macos_screen_text(
             evidence,
             "Use files and books",
-            window_bounds=[300, 300, 1320, 500],
-            display_points=[1920, 1080],
+            window_bounds=[112, 52, 800, 632],
+            display_points=[1024, 768],
         )
-        self.assertEqual([960.0, 540.0], point["screen_point"])
+        self.assertEqual([512.0, 384.0], point["screen_point"])
 
         with self.assertRaisesRegex(ValueError, "inside the live Pleazyng window"):
             capture.locate_macos_screen_text(
                 evidence,
                 "Use files and books",
-                window_bounds=[1000, 700, 300, 200],
-                display_points=[1920, 1080],
+                window_bounds=[700, 500, 300, 200],
+                display_points=[1024, 768],
             )
 
     def test_mac_listing_export_keeps_accepted_dimensions_and_rgb_provenance(self) -> None:
         self.assertIn("normalize_opaque_rgb_png", capture.run_macos_listing_window_capture.__code__.co_names)
         self.assertIn("screenshot_resized_or_padded", capture.run_macos_listing_window_capture.__code__.co_consts)
-        self.assertIn(((1440, 900), (2880, 1800)), capture.capture_macos_listing_window.__code__.co_consts)
+        self.assertIn(
+            ((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)),
+            capture.capture_macos_listing_window.__code__.co_consts,
+        )
 
 
 if __name__ == "__main__":

@@ -169,7 +169,7 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         self.assertIn("inputs.target == 'macos-listing-capture-only'", probe)
         self.assertIn('"enumerated_modes": modes.map(record)', probe)
         self.assertIn('"display_mode_activated": displayModeActivated', probe)
-        self.assertIn('"target_window_points": [1440, 900]', probe)
+        self.assertIn('"target_window_points": [1280, 800]', probe)
         self.assertIn("swift \"$RUNNER_TEMP/mac-display-capability.swift\"", probe)
         self.assertLess(
             macos.index("Probe and select native Mac display mode before downloading the app"),

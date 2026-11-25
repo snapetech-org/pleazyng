@@ -176,7 +176,7 @@ let selected = modes.first(where: {
     && $0.isUsableForDesktopGUI()
 })
 guard let selected else {
-  fputs("No usable native 1920x1080 display mode is available for a 1440x900 Mac app window.\n", stderr)
+  fputs("No usable native 1920x1080 display mode is available for a 1280x800 Mac app window.\n", stderr)
   exit(3)
 }
 let switchResult = CGDisplaySetDisplayMode(displayID, selected, nil)
@@ -196,10 +196,29 @@ let result: [String: Any] = [
   "active_mode_pixels": [active.pixelWidth, active.pixelHeight],
   "display_bounds_points": [Double(bounds.width), Double(bounds.height)],
   "usable_for_desktop_gui": active.isUsableForDesktopGUI(),
-  "target_native_window_points": [1440, 900],
-  "window_center_points": [240, 90],
+  "target_native_window_points": [1280, 800],
+  "window_center_points": [320, 140],
   "capture_api": "/usr/sbin/screencapture -x -o -l <app-window-id>",
   "image_resized_or_padded": false,
+]
+let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
+print(String(decoding: data, as: UTF8.self))
+'''
+
+
+MACOS_LIVE_DISPLAY_STATE_SWIFT = r'''import CoreGraphics
+import Foundation
+
+let displayID = CGMainDisplayID()
+let bounds = CGDisplayBounds(displayID)
+let mode = CGDisplayCopyDisplayMode(displayID)
+let result: [String: Any] = [
+  "display_id": Int(displayID),
+  "display_bounds_points": [Double(bounds.width), Double(bounds.height)],
+  "current_mode_points": mode.map { [Double($0.width), Double($0.height)] } ?? [],
+  "current_mode_pixels": mode.map { [$0.pixelWidth, $0.pixelHeight] } ?? [],
+  "reported_pixel_width": CGDisplayPixelsWide(displayID),
+  "reported_pixel_height": CGDisplayPixelsHigh(displayID),
 ]
 let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
 print(String(decoding: data, as: UTF8.self))
@@ -298,6 +317,8 @@ let result: [String: Any] = ["posted": true, "screen_point": [x, y], "input_meth
 let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
 print(String(decoding: data, as: UTF8.self))
 '''
+
+MACOS_MAIN_WINDOW_AUTOSAVE_NAME = "org.snapetech.pleazyng.MainWindow"
 
 
 def run(command: list[str], *, capture: bool = False, timeout: int = 300) -> str:
@@ -2527,13 +2548,100 @@ def macos_screen_ocr(path: Path) -> dict[str, Any]:
 def require_macos_listing_markers(evidence: dict[str, Any], *, before_navigation: bool) -> None:
     text = str(evidence.get("recognized_text", ""))
     if before_navigation:
-        if "Use files and books" not in text:
-            raise ValueError(f"The fresh app screen did not visibly offer Files and Books; Vision saw: {text}")
+        if "Start fresh" not in text and "Use files and books" not in text:
+            raise ValueError(f"The fresh app screen did not visibly offer a local setup path; Vision saw: {text}")
         return
     has_import = "Import files" in text
     has_empty_state = "Add a source or import a book" in text or "Add source" in text
     if not has_import or not has_empty_state:
         raise ValueError(f"The real empty Files and Books screen was not visible; Vision saw: {text}")
+
+
+def write_macos_main_window_frame_preference(*, width: int, height: int, x: int, y: int) -> dict[str, Any]:
+    key = f"NSWindow Frame {MACOS_MAIN_WINDOW_AUTOSAVE_NAME}"
+    frame = f"{{{{{x}, {y}}}, {{{width}, {height}}}}}"
+    run(["/usr/bin/defaults", "write", BUNDLE_ID, key, "-string", frame], timeout=30)
+    observed = run(["/usr/bin/defaults", "read", BUNDLE_ID, key], capture=True, timeout=30)
+    if observed != frame:
+        raise RuntimeError(f"AppKit window frame preference did not retain its requested value: {observed!r}")
+    return {
+        "preference_domain": BUNDLE_ID,
+        "preference_key": key,
+        "saved_frame_string": observed,
+        "requested_window_bounds_points": [x, y, width, height],
+        "applied_before_app_launch": True,
+    }
+
+
+def require_live_desktop_capture(path: Path, display_state: dict[str, Any]) -> tuple[int, int]:
+    dimensions = png_dimensions(path)
+    bounds = display_state.get("display_bounds_points")
+    if (not isinstance(bounds, list) or len(bounds) != 2
+            or any(not isinstance(value, (int, float)) or value <= 0 for value in bounds)):
+        raise ValueError(f"WindowServer did not report usable live desktop bounds: {display_state}")
+    scale_x = dimensions[0] / float(bounds[0])
+    scale_y = dimensions[1] / float(bounds[1])
+    if abs(scale_x - scale_y) > 0.02:
+        raise ValueError(
+            f"The genuine desktop screenshot {dimensions} does not match live WindowServer bounds {bounds} "
+            f"at one consistent pixel scale ({scale_x:g}x, {scale_y:g})"
+        )
+    return dimensions
+
+
+def capture_macos_display_stage(
+    screenshot: Path,
+    evidence_path: Path,
+    display_state: dict[str, Any],
+    *,
+    accepted_text: tuple[str, ...],
+    timeout: int = 60,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while True:
+        run(["/usr/sbin/screencapture", "-x", str(screenshot)], timeout=60)
+        require_live_desktop_capture(screenshot, display_state)
+        evidence = macos_screen_ocr(screenshot)
+        evidence["live_display_state"] = display_state
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        text = str(evidence.get("recognized_text", ""))
+        if any(marker in text for marker in accepted_text):
+            return evidence
+        if time.monotonic() >= deadline:
+            raise ValueError(
+                f"Timed out waiting for visible screen text {accepted_text}; Vision saw: {text}. "
+                f"The genuine screen capture remains at {screenshot}."
+            )
+        time.sleep(2)
+
+
+def click_macos_visible_text(
+    app: Path,
+    pid: int,
+    evidence: dict[str, Any],
+    target_text: str,
+    *,
+    display_state: dict[str, Any],
+) -> dict[str, Any]:
+    current_pid, window_id = _launched_app_pid_and_window(app)
+    if current_pid != pid:
+        raise RuntimeError("The Pleazyng process changed while navigating the Mac listing screen")
+    geometry = run_macos_swift_json(MACOS_WINDOW_BOUNDS_SWIFT, [str(pid), str(window_id)])
+    bounds = geometry.get("bounds_points")
+    if geometry.get("on_screen") is not True or not isinstance(bounds, list) or len(bounds) != 4:
+        raise ValueError(f"The live Pleazyng window is unavailable for native input: {geometry}")
+    target = locate_macos_screen_text(
+        evidence,
+        target_text,
+        window_bounds=bounds,
+        display_points=display_state["display_bounds_points"],
+    )
+    native_event = post_macos_native_click(target["screen_point"])
+    return {
+        "target_region": target,
+        "window_geometry": geometry,
+        "native_event": native_event,
+    }
 
 
 def locate_macos_screen_text(
@@ -2605,7 +2713,14 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     mode_points = display_mode.get("active_mode_points")
     mode_pixels = display_mode.get("active_mode_pixels")
     if mode_points != [1920.0, 1080.0] or mode_pixels != [1920, 1080]:
-        raise ValueError(f"The app window capture requires the verified 1920x1080 native display mode: {display_mode}")
+        raise ValueError(f"The hosted ARM Mac no longer exposes the probed 1920x1080 mode: {display_mode}")
+
+    window_preference = write_macos_main_window_frame_preference(
+        width=1280, height=800, x=0, y=0
+    )
+    (output / "macos-01-files-and-books.window-frame-preference.json").write_text(
+        json.dumps(window_preference, indent=2) + "\n", encoding="utf-8"
+    )
 
     environment = dict(os.environ)
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "APPLE_API_PRIVATE_KEY"):
@@ -2622,83 +2737,110 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         raise RuntimeError(f"Could not launch the retained product app: {(open_result.stderr or open_result.stdout).strip()}")
     app_pid, initial_window_id = _launched_app_pid_and_window(app)
     run(["osascript", "-e", f'tell application id "{BUNDLE_ID}" to activate'], timeout=60)
-    display_width, display_height = map(int, mode_points)
-    before_path = output / "macos-01-files-and-books.onboarding-display.png"
-    before_deadline = time.monotonic() + 60
-    while True:
-        run(["/usr/sbin/screencapture", "-x", str(before_path)], timeout=60)
-        before_dimensions = png_dimensions(before_path)
-        if before_dimensions != tuple(map(int, mode_pixels)):
-            raise ValueError(f"The genuine onboarding desktop capture is {before_dimensions}, not native mode {mode_pixels}")
-        before_ocr = macos_screen_ocr(before_path)
-        (output / "macos-01-files-and-books.before-ocr.json").write_text(
-            json.dumps(before_ocr, indent=2) + "\n", encoding="utf-8"
-        )
-        if "Use files and books" in str(before_ocr.get("recognized_text", "")):
-            break
-        if time.monotonic() >= before_deadline:
-            require_macos_listing_markers(before_ocr, before_navigation=True)
-        time.sleep(2)
-    require_macos_listing_markers(before_ocr, before_navigation=True)
+    live_display_state = run_macos_swift_json(MACOS_LIVE_DISPLAY_STATE_SWIFT, [])
+    (output / "macos-01-files-and-books.live-display-state.json").write_text(
+        json.dumps(live_display_state, indent=2) + "\n", encoding="utf-8"
+    )
 
-    initial_geometry = run_macos_swift_json(
-        MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)]
+    first_path = output / "macos-01-files-and-books.initial-desktop.png"
+    first_ocr_path = output / "macos-01-files-and-books.initial-ocr.json"
+    first_ocr = capture_macos_display_stage(
+        first_path,
+        first_ocr_path,
+        live_display_state,
+        accepted_text=("Start fresh", "Use files and books"),
     )
-    initial_bounds = initial_geometry.get("bounds_points")
-    if (initial_geometry.get("on_screen") is not True or not isinstance(initial_bounds, list)
-            or len(initial_bounds) != 4):
-        raise ValueError(f"The launched Pleazyng window is not available for verified native input: {initial_geometry}")
-    click_target = locate_macos_screen_text(
-        before_ocr, "Use files and books", window_bounds=initial_bounds, display_points=mode_points
-    )
-    click_evidence = post_macos_native_click(click_target["screen_point"])
-    click_record = {"target_region": click_target, "native_event": click_evidence}
-    (output / "macos-01-files-and-books.native-click.json").write_text(
-        json.dumps(click_record, indent=2) + "\n", encoding="utf-8"
-    )
-    after_path = output / "macos-01-files-and-books.after-navigation-display.png"
-    after_deadline = time.monotonic() + 40
-    while True:
-        run(["/usr/sbin/screencapture", "-x", str(after_path)], timeout=60)
-        if png_dimensions(after_path) != tuple(map(int, mode_pixels)):
-            raise ValueError("The genuine post-navigation desktop capture no longer matches the selected native display mode")
-        after_ocr = macos_screen_ocr(after_path)
-        (output / "macos-01-files-and-books.after-navigation-ocr.json").write_text(
-            json.dumps(after_ocr, indent=2) + "\n", encoding="utf-8"
+    require_macos_listing_markers(first_ocr, before_navigation=True)
+    click_records: list[dict[str, Any]] = []
+    first_text = str(first_ocr.get("recognized_text", ""))
+    if "Start fresh" in first_text:
+        click_records.append(click_macos_visible_text(
+            app, app_pid, first_ocr, "Start fresh", display_state=live_display_state
+        ))
+        choice_path = output / "macos-02-files-and-books-choice.png"
+        choice_ocr_path = output / "macos-02-files-and-books-choice-ocr.json"
+        choice_ocr = capture_macos_display_stage(
+            choice_path,
+            choice_ocr_path,
+            live_display_state,
+            accepted_text=("Use files and books",),
         )
-        after_text = str(after_ocr.get("recognized_text", ""))
-        if "Import files" in after_text and ("Add a source or import a book" in after_text or "Add source" in after_text):
-            break
-        if time.monotonic() >= after_deadline:
-            require_macos_listing_markers(after_ocr, before_navigation=False)
-        time.sleep(2)
+    else:
+        choice_path = first_path
+        choice_ocr_path = first_ocr_path
+        choice_ocr = first_ocr
+
+    click_records.append(click_macos_visible_text(
+        app, app_pid, choice_ocr, "Use files and books", display_state=live_display_state
+    ))
+    (output / "macos-01-files-and-books.native-clicks.json").write_text(
+        json.dumps(click_records, indent=2) + "\n", encoding="utf-8"
+    )
+    after_path = output / "macos-03-files-and-books-empty-library.png"
+    after_ocr = capture_macos_display_stage(
+        after_path,
+        output / "macos-03-files-and-books-empty-library-ocr.json",
+        live_display_state,
+        accepted_text=("Add a source or import a book", "Add source"),
+        timeout=45,
+    )
     require_macos_listing_markers(after_ocr, before_navigation=False)
 
-    target_window = {"width": 1440, "height": 900, "x": (display_width - 1440) // 2, "y": (display_height - 900) // 2}
-    resize = resize_macos_app_window(app_pid, **target_window)
     final_pid, window_id = _launched_app_pid_and_window(app)
     if final_pid != app_pid:
         raise RuntimeError("The Pleazyng process changed while navigating to Files and Books")
+    geometry_before_capture = run_macos_swift_json(
+        MACOS_WINDOW_BOUNDS_SWIFT, [str(final_pid), str(window_id)]
+    )
+    before_bounds = geometry_before_capture.get("bounds_points")
+    if (geometry_before_capture.get("on_screen") is not True or not isinstance(before_bounds, list)
+            or len(before_bounds) != 4):
+        raise ValueError(f"The real Pleazyng window is unavailable before store capture: {geometry_before_capture}")
+    resize: dict[str, Any] = {
+        "frame_preference": window_preference,
+        "window_geometry_before_capture": geometry_before_capture,
+        "accessibility_resize_used": False,
+    }
+    if before_bounds[2:] != [1280.0, 800.0]:
+        fallback_resize = resize_macos_app_window(
+            app_pid,
+            width=1280,
+            height=800,
+            x=int(round(before_bounds[0])),
+            y=int(round(before_bounds[1])),
+        )
+        resize["window_level_resize_fallback"] = fallback_resize
+        resize["accessibility_resize_used"] = True
+    resize["requested_bounds_points"] = [0, 0, 1280, 800]
+    resize["window_server_clamping"] = "verified against live CoreGraphics bounds after AppKit restored the saved window frame"
+
     geometry = run_macos_swift_json(MACOS_WINDOW_BOUNDS_SWIFT, [str(final_pid), str(window_id)])
     bounds = geometry.get("bounds_points")
     if (geometry.get("window_id") != int(window_id) or geometry.get("on_screen") is not True
             or not isinstance(bounds, list) or len(bounds) != 4
-            or bounds[2:] != [1440.0, 900.0]):
-        raise ValueError(f"The actual product window did not retain the requested native 1440x900 geometry: {geometry}")
+            or bounds[2:] != [1280.0, 800.0]):
+        raise ValueError(f"The actual product window did not retain the requested native 1280x800 geometry: {geometry}")
+    desktop_points = live_display_state.get("display_bounds_points")
+    fully_visible_on_desktop = (
+        isinstance(desktop_points, list) and len(desktop_points) == 2
+        and bounds[0] >= 0 and bounds[1] >= 0
+        and bounds[0] + bounds[2] <= desktop_points[0]
+        and bounds[1] + bounds[3] <= desktop_points[1]
+    )
 
     screenshot = output / "macos-01-files-and-books.png"
     run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(window_id), str(screenshot)], timeout=120)
     width, height = png_dimensions(screenshot)
-    scale_x = mode_pixels[0] / mode_points[0]
-    scale_y = mode_pixels[1] / mode_points[1]
-    expected_size = (round(1440 * scale_x), round(900 * scale_y))
-    if (width, height) != expected_size:
+    scale_x = width / bounds[2]
+    scale_y = height / bounds[3]
+    expected_size = (round(1280 * scale_x), round(800 * scale_y))
+    if (width, height) != expected_size or abs(scale_x - scale_y) > 0.02:
         raise ValueError(
-            f"The native app-window screenshot is {width}x{height}; expected the real 1440x900-point window "
+            f"The native app-window screenshot is {width}x{height}; expected the real 1280x800-point window "
             f"at {scale_x:g}x{scale_y:g} display scale ({expected_size[0]}x{expected_size[1]} pixels). "
             f"The unmodified window capture remains at {screenshot}."
         )
-    if (width, height) not in ((1440, 900), (2880, 1800)):
+    if (width, height) not in ((1280, 800), (2560, 1600)):
         raise ValueError(f"Mac App Store screenshot size is not accepted: {width}x{height}: {screenshot}")
     final_ocr = macos_screen_ocr(screenshot)
     require_macos_listing_markers(final_ocr, before_navigation=False)
@@ -2719,13 +2861,19 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         "captured_window_id": int(window_id),
         "xcode_version": run(["xcodebuild", "-version"], capture=True, timeout=60),
         "display_mode": display_mode,
+        "live_display_state": live_display_state,
         "window_resize": resize,
         "window_geometry": geometry,
-        "pre_navigation_ocr_file": "macos-01-files-and-books.before-ocr.json",
-        "post_navigation_ocr_file": "macos-01-files-and-books.after-navigation-ocr.json",
-        "native_click_file": "macos-01-files-and-books.native-click.json",
-        "initial_window_geometry": initial_geometry,
-        "navigation_input_method": "CoreGraphics CGEvent click centered on the Vision OCR bounds of visible Use files and books text",
+        "window_fully_visible_on_host_desktop": fully_visible_on_desktop,
+        "window_frame_preference_file": "macos-01-files-and-books.window-frame-preference.json",
+        "initial_screen_file": first_path.name,
+        "initial_screen_ocr_file": first_ocr_path.name,
+        "files_books_choice_screen_file": choice_path.name,
+        "files_books_choice_ocr_file": choice_ocr_path.name,
+        "post_navigation_screen_file": after_path.name,
+        "post_navigation_ocr_file": "macos-03-files-and-books-empty-library-ocr.json",
+        "native_click_file": "macos-01-files-and-books.native-clicks.json",
+        "navigation_input_method": "CoreGraphics CGEvent clicks centered on Vision OCR bounds of visible Start fresh and Use files and books text",
         "final_window_ocr_file": "macos-01-files-and-books.final-window-ocr.json",
         "screenshot_dimensions": [width, height],
         "screenshot_png_encoding": png_encoding,
@@ -3428,7 +3576,7 @@ def capture_macos_listing_window(args: argparse.Namespace) -> None:
         raise FileExistsError(f"Refusing to overwrite unexpected Mac capture output files: {unexpected}")
     screenshot, native_capture = run_macos_listing_window_capture(app, output)
     width, height = png_dimensions(screenshot)
-    if (width, height) not in ((1440, 900), (2880, 1800)):
+    if (width, height) not in ((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)):
         raise ValueError(f"Mac App Store screenshot has unsupported dimensions {width}x{height}: {screenshot}")
     color_type = png_color_type(screenshot)
     if color_type != 2:
@@ -3442,9 +3590,9 @@ def capture_macos_listing_window(args: argparse.Namespace) -> None:
             "no media server, account, or media was configured."
         ),
         "capture_method": [
-            "Vision OCR located the visible Use files and books text inside the live product window; a CoreGraphics CGEvent mouse click navigated the real app; "
-            "Vision OCR verified the screen before and after navigation; "
-            "the actual app window was resized to 1440x900 points on a native 1920x1080 display and captured with "
+            "Vision OCR located the visible Start fresh and Use files and books actions; CoreGraphics CGEvent clicks navigated the real app; "
+            "the AppKit saved-frame preference requested a real 1280x800-point window before launch and CoreGraphics verified its actual bounds; "
+            "the complete native app window was captured by window ID with "
             "/usr/sbin/screencapture -x -o -l <app-window-id>"
         ],
         "capture_run_id": os.environ.get("GITHUB_RUN_ID", ""),

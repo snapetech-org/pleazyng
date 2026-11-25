@@ -819,7 +819,7 @@ jobs:
             "current_mode": currentMode,
             "enumerated_mode_count": modes.count,
             "enumerated_modes": modes.map(record),
-            "target_window_points": [1440, 900],
+            "target_window_points": [1280, 800],
             "window_capture_display_mode": selectedModeEvidence,
             "active_mode_after_selection": activeMode,
             "display_mode_activated": displayModeActivated,
