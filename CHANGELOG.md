@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Parse valid payment histories from Paymentwall's legacy endpoint so LG billing can verify purchases when the provider labels a JSON response as HTML.
+
 - Update release packaging to version 3.0.52 on all supported platforms.
 
 - Keep Windows installer and Chocolatey packaging running after optional release-gate skips, and recover those packages from the verified source x64 checkpoint without recompiling the app.

@@ -121,19 +121,42 @@ func TestPaymentwallStatusAPIUsesSignedExactQueryAndFixture(t *testing.T) {
 	}
 }
 
-func TestPaymentwallStatusAPIRejectsNonJSONContentType(t *testing.T) {
-	status := &lgPaymentwallStatusAPI{
-		projectKey: "test_project_key",
-		secretKey:  testLGSecret,
-		endpoint:   lgPaymentwallDefaultStatusURL,
-		client: &http.Client{Transport: lgRoundTripper(func(*http.Request) (*http.Response, error) {
-			response := lgJSONResponse(http.StatusOK, paymentwallApprovedFixture)
-			response.Header.Set("Content-Type", "text/html")
-			return response, nil
-		})},
+func TestPaymentwallStatusAPIValidatesLegacyMediaType(t *testing.T) {
+	tests := []struct {
+		name      string
+		mediaType string
+		body      string
+		want      int
+	}{
+		{"legacy payment history", "text/html", paymentwallApprovedFixture, 1},
+		{"legacy empty history", "text/html; charset=UTF-8", "[]", 0},
+		{"HTML error page", "text/html", "<html><body>Unavailable</body></html>", -1},
+		{"legacy provider error", "text/html", `{"type":"Error","error":"User is invalid","code":4012}`, -1},
+		{"unexpected media type", "text/plain", paymentwallApprovedFixture, -1},
 	}
-	if _, err := status.queryByUID(context.Background(), testLGUID); err == nil {
-		t.Fatal("Paymentwall HTML response was treated as authoritative JSON")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &lgPaymentwallStatusAPI{
+				projectKey: "test_project_key",
+				secretKey:  testLGSecret,
+				endpoint:   lgPaymentwallDefaultStatusURL,
+				client: &http.Client{Transport: lgRoundTripper(func(*http.Request) (*http.Response, error) {
+					response := lgJSONResponse(http.StatusOK, tt.body)
+					response.Header.Set("Content-Type", tt.mediaType)
+					return response, nil
+				})},
+			}
+			payments, err := status.queryByUID(context.Background(), testLGUID)
+			if tt.want < 0 {
+				if !errors.Is(err, errLGPaymentwallStatusUnavailable) {
+					t.Fatalf("expected unavailable status, got %v", err)
+				}
+				return
+			}
+			if err != nil || len(payments) != tt.want {
+				t.Fatalf("expected %d payments, got %d and error %v", tt.want, len(payments), err)
+			}
+		})
 	}
 }
 

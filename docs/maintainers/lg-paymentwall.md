@@ -42,7 +42,10 @@ reference or `uid` plus `ag_external_id`. Its JSON response is an array of
 payment objects with `object`, `id`, `amount`, `currency`, `refunded`, `risk`,
 `uid`, and `product_id`; no payments are represented by an empty array. The
 production handler rejects malformed responses, duplicate reference IDs,
-redirects, and non-JSON responses. The schema fixture in
+redirects, and non-JSON bodies. The legacy Status API can label a valid JSON
+array as `text/html`. The server parses it as JSON and applies the full
+payment schema checks. HTML pages and upstream error objects are rejected.
+The schema fixture in
 `server/lg_paymentwall_test.go` is an adapted USD 2.99 example, not a live
 transaction or qualification claim.
 

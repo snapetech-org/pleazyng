@@ -932,7 +932,9 @@ func (c *lgPaymentwallStatusAPI) query(ctx context.Context, params url.Values) (
 		return nil, errLGPaymentwallStatusUnavailable
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || mediaType != "application/json" {
+	// The legacy Status API labels JSON payment histories as text/html.
+	// The endpoint is pinned above and the body must still be a valid payment list.
+	if err != nil || (mediaType != "application/json" && mediaType != "text/html") {
 		return nil, errLGPaymentwallStatusUnavailable
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 256*1024+1))
