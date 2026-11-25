@@ -1,17 +1,44 @@
 """Verify paired-runtime integrity boundaries and complete helper installation."""
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('webkit_helpers', ROOT/'linux/packaging/install-webkit-helpers.py')
 helpers = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helpers)
+fetch_spec = importlib.util.spec_from_file_location('webkit_fetch', ROOT/'linux/packaging/fetch-webkit-runtime.py')
+fetcher = importlib.util.module_from_spec(fetch_spec)
+fetch_spec.loader.exec_module(fetcher)
+
+
+class WebkitFetchTests(unittest.TestCase):
+    def test_ubuntu_snapshot_recovers_transport_failure_but_rejects_bad_bytes(self):
+        primary = 'https://ports.ubuntu.com/fixture.deb'
+        snapshot = 'https://snapshot.ubuntu.com/fixture.deb'
+        data = b'verified fixture package'
+        source = {'url': primary, 'snapshot_url': snapshot, 'sha256': hashlib.sha256(data).hexdigest()}
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary) / 'webkit-arm64.deb'
+            error = HTTPError(primary, 403, 'Forbidden', {}, None)
+            with patch.object(fetcher.urllib.request, 'urlopen', side_effect=[error, io.BytesIO(data)]) as download:
+                fetcher.fetch_helper(package, 'arm64', source)
+                self.assertEqual([call.args[0] for call in download.call_args_list], [primary, snapshot])
+            self.assertEqual(package.read_bytes(), data)
+            package.unlink()
+            with patch.object(fetcher.urllib.request, 'urlopen', return_value=io.BytesIO(b'wrong bytes')) as download:
+                with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                    fetcher.fetch_helper(package, 'arm64', source)
+                download.assert_called_once_with(primary, timeout=60)
+            self.assertEqual(list(Path(temporary).iterdir()), [])
 
 
 @unittest.skipUnless(all(shutil.which(x) for x in ('ar', 'tar', 'zstd')), 'archive tools required')
