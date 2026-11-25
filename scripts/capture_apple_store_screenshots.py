@@ -1532,10 +1532,9 @@ def runner_signing_identity(
 ) -> tuple[Path, dict[str, Any], str, str, dict[str, Any], Path | None]:
     """Derive the simulator prefix from Xcode's observed simulated test entitlements.
 
-    Xcode 26 emits the test target's simulated entitlement file with the derived
-    Keychain group but without an ``application-identifier``. Read the actual
-    signed UI-test runner too and cross-check its application identifier when
-    one is present instead of inventing a missing value in Xcode's plist.
+    Xcode may emit the test target's simulated entitlement file with either
+    the test bundle or ``.xctrunner`` suffix. Read the actual signed UI-test
+    runner too and cross-check its application identifier when present.
     """
     runner_apps = [path for path in derived_data.rglob("*-Runner.app") if path.is_dir()]
     if len(runner_apps) != 1:
@@ -1553,7 +1552,7 @@ def runner_signing_identity(
 
     signed_entitlements = codesign_entitlements(runner_app)
     candidates: list[tuple[Path, dict[str, Any], str]] = []
-    expected_group_suffix = f".{target_bundle_id}"
+    group_suffixes = (f"{target_bundle_id}.xctrunner", target_bundle_id)
     for path in derived_data.rglob("*.xcent"):
         if not path.name.endswith("-Simulated.xcent"):
             continue
@@ -1565,10 +1564,15 @@ def runner_signing_identity(
         if not isinstance(entitlements, dict):
             continue
         groups = entitlements.get("keychain-access-groups")
-        if (not isinstance(groups, list) or len(groups) != 1
-                or not isinstance(groups[0], str) or not groups[0].endswith(expected_group_suffix)):
+        if not isinstance(groups, list) or len(groups) != 1 or not isinstance(groups[0], str):
             continue
-        prefix = groups[0][:-len(target_bundle_id)]
+        matched_suffix = next((suffix for suffix in group_suffixes
+                               if groups[0].endswith(suffix)
+                               and len(groups[0]) > len(suffix)
+                               and groups[0][-len(suffix) - 1] == "."), None)
+        if matched_suffix is None:
+            continue
+        prefix = groups[0][:-len(matched_suffix)]
         if not prefix.endswith(".") or re.fullmatch(r"[A-Za-z0-9]{10}\.", prefix) is None:
             continue
         application_identifier = entitlements.get("application-identifier")
@@ -1623,9 +1627,16 @@ def derive_ios_simulator_entitlements(
     runner_groups = runner_entitlements.get("keychain-access-groups")
     group_bundle_id = runner_bundle_id.removesuffix(".xctrunner")
     if (not isinstance(runner_groups, list) or len(runner_groups) != 1
-            or not isinstance(runner_groups[0], str) or not runner_groups[0].endswith(f".{group_bundle_id}")):
+            or not isinstance(runner_groups[0], str)):
         raise ValueError("The Xcode-simulated UI-test Keychain group does not match its owned test bundle")
-    prefix = runner_groups[0][:-len(group_bundle_id)]
+    group_suffixes = (runner_bundle_id, group_bundle_id)
+    matched_suffix = next((suffix for suffix in group_suffixes
+                           if runner_groups[0].endswith(suffix)
+                           and len(runner_groups[0]) > len(suffix)
+                           and runner_groups[0][-len(suffix) - 1] == "."), None)
+    if matched_suffix is None:
+        raise ValueError("The Xcode-simulated UI-test Keychain group does not match its owned test bundle")
+    prefix = runner_groups[0][:-len(matched_suffix)]
     if re.fullmatch(r"[A-Za-z0-9]{10}\.", prefix) is None:
         raise ValueError("The Xcode-simulated UI-test Keychain group has an invalid derived prefix")
     if runner_identifier is not None:

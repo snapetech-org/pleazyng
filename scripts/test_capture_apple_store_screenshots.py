@@ -44,6 +44,7 @@ TEST_BUNDLE_ID = "org.snapetech.pleazyng.capture-ui-tests"
 RUNNER_BUNDLE_ID = f"{TEST_BUNDLE_ID}.xctrunner"
 TEAM_PREFIX = "FAKETEAMID."
 TEST_GROUP = f"{TEAM_PREFIX}{TEST_BUNDLE_ID}"
+TEST_RUNNER_GROUP = f"{TEAM_PREFIX}{RUNNER_BUNDLE_ID}"
 
 
 class SimulatorSigningTests(unittest.TestCase):
@@ -103,6 +104,26 @@ class SimulatorSigningTests(unittest.TestCase):
 
         self.assertEqual(prefix, TEAM_PREFIX)
         self.assertEqual(runner_bundle_id, RUNNER_BUNDLE_ID)
+        self.assertEqual(actual_signed, signed)
+
+    def test_accepts_xcode_simulated_keychain_group_with_runner_suffix(self) -> None:
+        signed = {
+            "application-identifier": TEST_RUNNER_GROUP,
+            "keychain-access-groups": [TEST_RUNNER_GROUP],
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            derived_data, _ = self.make_derived_data(
+                temporary,
+                {"application-identifier": TEST_RUNNER_GROUP, "keychain-access-groups": [TEST_RUNNER_GROUP]},
+                {},
+            )
+            _, entitlements, prefix, runner_bundle_id, actual_signed, _ = self.run_identity(
+                derived_data, signed
+            )
+
+        self.assertEqual(prefix, TEAM_PREFIX)
+        self.assertEqual(runner_bundle_id, RUNNER_BUNDLE_ID)
+        self.assertEqual(entitlements["keychain-access-groups"], [TEST_RUNNER_GROUP])
         self.assertEqual(actual_signed, signed)
 
     def test_rejects_signed_application_identifier_with_a_different_prefix(self) -> None:
@@ -166,6 +187,22 @@ class SimulatorSigningTests(unittest.TestCase):
             "application-identifier": f"{TEAM_PREFIX}org.snapetech.pleazyng",
             "keychain-access-groups": [f"{TEAM_PREFIX}org.snapetech.pleazyng"],
         })
+
+    def test_derives_product_group_from_xcode_runner_suffix_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "DebugProfile.entitlements"
+            source.write_bytes(plistlib.dumps({"keychain-access-groups": []}))
+            entitlements, prefix, product_identifier = derive_ios_simulator_entitlements(
+                source,
+                {"application-identifier": TEST_RUNNER_GROUP,
+                 "keychain-access-groups": [TEST_RUNNER_GROUP]},
+                RUNNER_BUNDLE_ID,
+                "org.snapetech.pleazyng",
+            )
+
+        self.assertEqual(prefix, TEAM_PREFIX)
+        self.assertEqual(product_identifier, f"{TEAM_PREFIX}org.snapetech.pleazyng")
+        self.assertEqual(entitlements["keychain-access-groups"], [product_identifier])
 
     def test_rejects_nonempty_product_group_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
