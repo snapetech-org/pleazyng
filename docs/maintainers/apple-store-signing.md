@@ -157,8 +157,21 @@ After Apple processes a build, run **Prepare an Apple review draft** on `main`
 with its published tag, platform (`IOS`, `MAC_OS`, or `TV_OS`), and successful
 processing run ID. The workflow resolves the build number from the tag and
 attaches the exact valid build to its existing App Store version. It rechecks
-the attachment and retains a receipt. Submit any first in-app purchases with
-the intended version in the [App Store Connect review screen](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase).
+the attachment and retains a receipt. Set `inspect_only=true` to read the
+attachment, screenshot placement, purchase and review states. The review
+receipt records whether contact details and notes are present.
+
+To place the Open media listing screenshot, run the same workflow with
+`capture_run` set to the Apple Store Screenshots run for that release and
+platform. The workflow checks the successful platform job and its artifact,
+then verifies the screenshot's product source, version, build, PNG dimensions
+and digest. It places the image in the existing en-US listing and checks for
+an `ACTIVE` placement. The `IOS` lane places the 13-inch iPad image alongside
+the separately managed iPhone screenshots. Check the receipt before continuing.
+
+Add the first in-app purchases and the intended app version to the same draft,
+then submit it in the App Store Connect review screen.
+[Apple's first-purchase review steps](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase)
 
 The iOS archive uses an isolated, time-bounded signing keychain. Flutter's
 native-asset signing call receives that same keychain and the iOS timestamp
