@@ -69,7 +69,10 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
             [{'id': 'en-id', 'attributes': {'locale': 'en-US', 'description': 'Media player'}}],
             [{'attributes': {'placementGroup': 'TV', 'placementType': 'APP_SCREENSHOT', 'state': 'APPROVED'}}],
             [{'attributes': {'productId': 'pleazyng_lifetime_unlock', 'state': 'READY_TO_SUBMIT'}}],
-            [{'attributes': {'platform': 'TV_OS', 'state': 'READY_FOR_REVIEW', 'submittedDate': None}}],
+            [{'type': 'reviewSubmissions', 'id': 'review-id',
+              'attributes': {'platform': 'TV_OS', 'state': 'READY_FOR_REVIEW', 'submittedDate': None}}],
+            [{'type': 'reviewSubmissionItems', 'attributes': {'state': 'READY_FOR_REVIEW'},
+              'relationships': {'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': 'draft'}}}}],
         ]
         receipt = review.prepare(self.api, 'TV_OS', '3.0.51', '210', inspect_only=True)
         self.assertFalse(receipt['exact_build_attached'])
@@ -77,6 +80,7 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
         self.assertEqual(receipt['localizations'][0]['screenshots'], [{'group': 'TV', 'state': 'APPROVED'}])
         self.assertEqual(receipt['purchases'][0]['state'], 'READY_TO_SUBMIT')
         self.assertEqual(receipt['review_submissions'][0]['state'], 'READY_FOR_REVIEW')
+        self.assertTrue(receipt['review_submissions'][0]['items'][0]['exact_app_version'])
         self.assertEqual(receipt['app_review_detail'], {
             'contact_complete': True, 'demo_account_required': False, 'notes_present': True,
         })

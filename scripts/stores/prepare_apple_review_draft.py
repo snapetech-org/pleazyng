@@ -105,12 +105,27 @@ def inspect_review(api, draft_id, platform):
         for product in purchases
         if product['attributes'].get('productId') in {'pleazyng_7_day_trial', 'pleazyng_lifetime_unlock'}
     ]
-    submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions')
+    submissions = []
+    for submission in api.items(f'/v1/apps/{APP_ID}/reviewSubmissions'):
+        attributes = submission['attributes']
+        if attributes.get('platform') not in {None, platform}:
+            continue
+        summary = {key: attributes.get(key) for key in ('platform', 'state', 'submittedDate')}
+        if summary['state'] == 'READY_FOR_REVIEW':
+            validated = exact_record([submission], 'reviewSubmissions', lambda _: True)
+            items = api.items(f'/v1/reviewSubmissions/{validated["id"]}/items?include=appStoreVersion')
+            summary['items'] = [review_item_summary(item, draft_id) for item in items]
+        submissions.append(summary)
     return {'localizations': localizations, 'app_review_detail': review_detail,
-            'purchases': purchase_states, 'review_submissions': [
-        {key: submission['attributes'].get(key) for key in ('platform', 'state', 'submittedDate')}
-        for submission in submissions if submission['attributes'].get('platform') in {None, platform}
-    ]}
+            'purchases': purchase_states, 'review_submissions': submissions}
+
+
+def review_item_summary(item, draft_id):
+    links = {key: value.get('data') for key, value in item.get('relationships', {}).items() if isinstance(value, dict)}
+    return {'type': item.get('type'), 'state': item.get('attributes', {}).get('state'),
+            'relations': sorted(links),
+            'related_resources': {key: link.get('type') for key, link in links.items() if isinstance(link, dict)},
+            'exact_app_version': links.get('appStoreVersion') == {'type': 'appStoreVersions', 'id': draft_id}}
 
 
 def add_version_for_review(api, platform, version, build_number):
