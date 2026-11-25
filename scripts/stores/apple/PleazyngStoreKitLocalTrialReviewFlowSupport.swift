@@ -82,6 +82,7 @@ extension PleazyngStoreKitLocalTrialReviewUITests {
   private func launchProductApp(_ app: XCUIApplication) throws {
     app.launch()
 #if os(macOS)
+    try resizeMacWindowForStoreScreenshot(app)
     let initialCapture = try captureMacWindowScreenshot(of: app)
     try assertMacListingWindowGeometry(initialCapture)
     attachMacScreenshot(initialCapture, named: "pleazyng-diagnostic-after-launch-macos")

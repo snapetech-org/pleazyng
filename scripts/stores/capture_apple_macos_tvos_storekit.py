@@ -41,6 +41,7 @@ STOREKIT_CONFIG = Path("scripts/stores/apple/pleazyng-trial-review.storekit")
 UI_TEST_SOURCE = Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewUITests.swift")
 UI_TEST_SUPPORT_SOURCES = (
     Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewFlowSupport.swift"),
+    Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewMacWindowSupport.swift"),
     Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewTVSupport.swift"),
     Path("scripts/stores/apple/PleazyngStoreKitLocalTrialReviewMacSupport.swift"),
 )
@@ -909,14 +910,17 @@ def verify_build_identity(platform: str, app: Path, receipt_path: Path, producer
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     if not isinstance(receipt, dict):
         raise ValueError("Producer build receipt must be a JSON object")
-    capture_tools.validate_build_receipt(
-        receipt,
-        platform=platform,
-        producer_repository=os.environ.get("GITHUB_REPOSITORY", ""),
-        producer_run_id=producer_run_id,
-        producer_run_attempt=producer_run_attempt,
-        capture_tools_sha=str(receipt.get("capture_tools_sha", "")),
-    )
+    if receipt.get("capture_input_kind") == "verified-macos-app-store-package":
+        validate_appstore_package_capture_receipt(receipt, platform, producer_run_id, producer_run_attempt)
+    else:
+        capture_tools.validate_build_receipt(
+            receipt,
+            platform=platform,
+            producer_repository=os.environ.get("GITHUB_REPOSITORY", ""),
+            producer_run_id=producer_run_id,
+            producer_run_attempt=producer_run_attempt,
+            capture_tools_sha=str(receipt.get("capture_tools_sha", "")),
+        )
     app_hash = capture_tools.sha256_tree(app)
     if receipt.get("app_bundle_sha256") != app_hash:
         raise ValueError("Retained app bundle hash differs from the exact producer receipt")
@@ -925,6 +929,127 @@ def verify_build_identity(platform: str, app: Path, receipt_path: Path, producer
     ):
         raise ValueError("Retained app identity differs from its producer receipt")
     return receipt, identity
+
+
+def validate_appstore_package_capture_receipt(
+    receipt: dict[str, Any], platform: str, producer_run_id: str, producer_run_attempt: str,
+) -> None:
+    if platform != "macos":
+        raise ValueError("A signed Mac App Store package receipt is valid only for macOS capture")
+    producer_artifact = receipt.get("producer_artifact")
+    app_store_receipt = receipt.get("app_store_receipt")
+    expected = {
+        "schema_version": 1,
+        "product": "Pleazyng",
+        "capture_input_kind": "verified-macos-app-store-package",
+        "source_tag": SOURCE_TAG,
+        "source_sha": SOURCE_SHA,
+        "product_version": VERSION,
+        "product_build": BUILD_NUMBER,
+        "platform": "macOS",
+        "build_mode": "App Store IAP",
+        "build_configuration": "Release Archive",
+        "app_bundle_name": "Pleazyng.app",
+        "bundle_id": BUNDLE_ID,
+        "build_defines": capture_tools.IOS_MAC_STORE_DEFINES,
+        "distribution_signing": "Mac App Store Distribution",
+        "producer_repository": "snapetech-org/pleazyng",
+        "producer_workflow_path": ".github/workflows/macos-app-store-signed.yml",
+        "producer_workflow_ref": (
+            "snapetech-org/pleazyng/.github/workflows/macos-app-store-signed.yml@refs/heads/main"
+        ),
+        "producer_run_id": producer_run_id,
+        "producer_run_attempt": producer_run_attempt,
+    }
+    mismatches = {key: (receipt.get(key), value) for key, value in expected.items()
+                  if receipt.get(key) != value}
+    if re.fullmatch(r"[0-9a-f]{40}", str(receipt.get("producer_workflow_sha", ""))) is None:
+        mismatches["producer_workflow_sha"] = (receipt.get("producer_workflow_sha"), "40-character Git SHA")
+    if not isinstance(producer_artifact, dict):
+        mismatches["producer_artifact"] = (producer_artifact, "verified artifact identity")
+    else:
+        expected_artifact_name = f"pleazyng-macos-appstore-v{VERSION}-{producer_run_id}"
+        if (producer_artifact.get("producer_run_id") != producer_run_id
+                or producer_artifact.get("producer_run_attempt") != producer_run_attempt
+                or producer_artifact.get("producer_workflow_sha") != receipt.get("producer_workflow_sha")
+                or producer_artifact.get("artifact_name") != expected_artifact_name
+                or re.fullmatch(r"[1-9][0-9]*", str(producer_artifact.get("artifact_id", ""))) is None
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", str(producer_artifact.get("artifact_digest", ""))) is None):
+            mismatches["producer_artifact"] = (producer_artifact, "verified artifact identity for the exact producer attempt")
+    if not isinstance(app_store_receipt, dict):
+        mismatches["app_store_receipt"] = (app_store_receipt, "processed signed package receipt")
+    else:
+        application = app_store_receipt.get("application", {})
+        expected_package_receipt = {
+            "product": "Pleazyng",
+            "channel": "Mac App Store",
+            "candidate_state": "app-store-connect-processed",
+            "release_tag": f"v{VERSION}",
+            "source_commit": SOURCE_SHA,
+            "marketing_version": VERSION,
+            "build_number": BUILD_NUMBER,
+            "bundle_id": BUNDLE_ID,
+            "platform": "MAC_OS",
+            "processing_state": "VALID",
+            "github_run_id": int(producer_run_id),
+            "github_run_attempt": int(producer_run_attempt),
+            "workflow_commit": receipt.get("producer_workflow_sha"),
+            "asset_filename": "pleazyng-macos-appstore.pkg",
+            "asset_sha256": receipt.get("package_sha256"),
+        }
+        mismatches.update({f"app_store_receipt.{key}": (app_store_receipt.get(key), value)
+                           for key, value in expected_package_receipt.items()
+                           if app_store_receipt.get(key) != value})
+        expected_application = {
+            "bundle_identifier": BUNDLE_ID,
+            "version": VERSION,
+            "build_number": BUILD_NUMBER,
+            "executable": "Pleazyng",
+            "architectures": ["arm64", "x86_64"],
+        }
+        mismatches.update({f"app_store_receipt.application.{key}": (application.get(key), value)
+                           for key, value in expected_application.items()
+                           if application.get(key) != value})
+        qualifications = app_store_receipt.get("qualification", {})
+        if (qualifications.get("app_signed_for_distribution") is not True
+                or qualifications.get("installer_signed_for_app_store") is not True
+                or qualifications.get("app_store_connect_processed") is not True
+                or qualifications.get("upload_to_app_store_connect") is not True):
+            mismatches["app_store_receipt.qualification"] = (qualifications, "processed signed Mac App Store package")
+        package = app_store_receipt.get("package", {})
+        if (package.get("filename") != "pleazyng-macos-appstore.pkg"
+                or package.get("sha256") != receipt.get("package_sha256")
+                or package.get("signed") is not True
+                or not isinstance(package.get("size_bytes"), int)
+                or package["size_bytes"] <= 0):
+            mismatches["app_store_receipt.package"] = (package, "verified signed installer package")
+        installer_signature = app_store_receipt.get("installer_signature", {})
+        if (installer_signature.get("certificate_type") != "MAC_INSTALLER_DISTRIBUTION"
+                or installer_signature.get("certificate_sha1") != "1A0DABC17F7F2ED2E517B2CCA49A14A88156510F"):
+            mismatches["app_store_receipt.installer_signature"] = (installer_signature, "verified Mac Installer Distribution signer")
+        original_app_signature = app_store_receipt.get("app_signature", {})
+        if (original_app_signature.get("team_identifier") != "DM9A59DC85"
+                or original_app_signature.get("app_certificate_sha1") != "B7D31D8572209681D4C9E655F448708269BAE53B"):
+            mismatches["app_store_receipt.app_signature"] = (original_app_signature, "verified Mac App Distribution signer")
+    signature = receipt.get("app_signature")
+    profile = receipt.get("profile")
+    if (receipt.get("app_bundle_name") != PLATFORM["macos"]["app_bundle"]
+            or receipt.get("executable") != "Pleazyng"
+            or receipt.get("architectures") != ["arm64", "x86_64"]
+            or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("app_bundle_sha256", ""))) is None
+            or not isinstance(signature, dict)
+            or signature.get("team_identifier") != "DM9A59DC85"
+            or signature.get("app_certificate_sha1") != "B7D31D8572209681D4C9E655F448708269BAE53B"
+            or signature.get("sandbox_enabled") is not True
+            or signature.get("jit_enabled") is not True
+            or not isinstance(profile, dict)
+            or profile.get("type") != "MAC_APP_STORE"
+            or profile.get("uuid") != app_store_receipt.get("profile", {}).get("uuid")
+            or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("producer_package_receipt_sha256", ""))) is None
+            or re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("package_sha256", ""))) is None):
+        mismatches["app_bundle_or_signature"] = ("package capture receipt fields", "exact signed Mac App Store app")
+    if mismatches:
+        raise ValueError(f"Signed Mac App Store capture receipt does not match the selected producer: {mismatches}")
 
 
 def stage_app_for_xctestrun(app: Path, products: Path, platform: str, receipt: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
@@ -1255,13 +1380,14 @@ def capture(args: argparse.Namespace) -> None:
     receipt, identity = verify_build_identity(
         platform, args.app, args.build_receipt, args.producer_run_id, args.producer_run_attempt
     )
-    receipt_lineage = receipt.get("source_lineage")
-    producer_lineage = dict(lineage)
-    if "workflow_source_sha" in producer_lineage:
-        producer_lineage["workflow_source_sha"] = receipt["capture_tools_sha"]
-    if (receipt_lineage != producer_lineage
-            and (receipt_lineage is not None or SOURCE_SHA != capture_tools.DEFAULT_SOURCE_SHA)):
-        raise ValueError("Retained app build receipt does not match its approved frozen-product source lineage")
+    if receipt.get("capture_input_kind") != "verified-macos-app-store-package":
+        receipt_lineage = receipt.get("source_lineage")
+        producer_lineage = dict(lineage)
+        if "workflow_source_sha" in producer_lineage:
+            producer_lineage["workflow_source_sha"] = receipt["capture_tools_sha"]
+        if (receipt_lineage != producer_lineage
+                and (receipt_lineage is not None or SOURCE_SHA != capture_tools.DEFAULT_SOURCE_SHA)):
+            raise ValueError("Retained app build receipt does not match its approved frozen-product source lineage")
     static_dependency_receipt: dict[str, Any] | None = None
     static_dependency_receipt_sha: str | None = None
     if args.dependency_receipt is not None:
@@ -1482,9 +1608,15 @@ def capture(args: argparse.Namespace) -> None:
                 "app_identity": identity,
             },
             "producer": {
+                "repository": receipt.get("producer_repository"),
+                "workflow_path": receipt.get("producer_workflow_path"),
+                "workflow_ref": receipt.get("producer_workflow_ref"),
+                "workflow_sha": receipt.get("producer_workflow_sha"),
                 "run_id": args.producer_run_id,
                 "run_attempt": args.producer_run_attempt,
                 "capture_tools_sha": receipt.get("capture_tools_sha"),
+                "artifact": receipt.get("producer_artifact"),
+                "package_sha256": receipt.get("package_sha256"),
             },
             "capture": {
                 "run_id": args.run_id,

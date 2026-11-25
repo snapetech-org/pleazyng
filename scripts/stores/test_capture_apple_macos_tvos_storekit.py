@@ -888,6 +888,26 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             "inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26-intel'",
             WORKFLOW,
         )
+        self.assertIn("inputs.target == 'macos-appstore-in-use-capture-only'", WORKFLOW)
+        self.assertIn("name: pleazyng-macos-appstore-v${{ inputs.product_version }}-${{ inputs.macos_artifact_run_id }}", WORKFLOW)
+        self.assertIn("restore-package", WORKFLOW)
+        self.assertIn("verify_macos_appstore_capture_input.py select-producer", WORKFLOW)
+        self.assertNotIn(
+            "inputs.target == 'macos-appstore-in-use-capture-only' && 'macos-26-intel'",
+            WORKFLOW,
+        )
+
+    def test_macos_localtest_capture_resizes_the_real_window_before_geometry_assertion(self) -> None:
+        flow_support = ROOT / capture.UI_TEST_SUPPORT_SOURCES[0]
+        source = flow_support.read_text(encoding="utf-8")
+        window_support = ROOT / capture.UI_TEST_SUPPORT_SOURCES[1]
+        window_source = window_support.read_text(encoding="utf-8")
+        self.assertIn("try resizeMacWindowForStoreScreenshot(app)", source)
+        self.assertIn("set size of targetWindow to {912, 570}", window_source)
+        self.assertLess(
+            source.index("try resizeMacWindowForStoreScreenshot(app)"),
+            source.index("assertMacListingWindowGeometry(initialCapture)"),
+        )
 
     def test_retained_capture_jobs_select_the_supported_xcode_and_matching_sdk(self) -> None:
         for platform, capture_label, sdk in (
@@ -897,10 +917,11 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             with self.subTest(platform=platform):
                 step = f"Select supported Xcode and {platform} SDK for retained-app capture"
                 self.assertIn(f"- name: {step}", WORKFLOW)
-                self.assertIn(
-                    f"if: inputs.target == '{platform.lower()}-in-use-capture-only'",
-                    WORKFLOW,
+                expected_if = (
+                    "if: inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-appstore-in-use-capture-only'"
+                    if platform == "macOS" else f"if: inputs.target == '{platform.lower()}-in-use-capture-only'"
                 )
+                self.assertIn(expected_if, WORKFLOW)
                 self.assertIn("sudo xcode-select --switch /Applications/Xcode_27.2.app/Contents/Developer", WORKFLOW)
                 self.assertIn("[[ \"$(xcodebuild -version | sed -n '1p')\" == 'Xcode 27.2' ]]", WORKFLOW)
                 self.assertIn(f'[[ "$(xcrun --sdk {sdk} --show-sdk-version)" == \'27.2\' ]]', WORKFLOW)
