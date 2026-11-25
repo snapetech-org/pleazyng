@@ -35,8 +35,8 @@ private enum MacWindowResizeSupport {
       )
     }
 
-    guard abs(initialFrame.width - targetSize.width) <= 0.5,
-          abs(initialFrame.height - targetSize.height) <= 0.5 else {
+    if abs(initialFrame.width - targetSize.width) > 0.5
+      || abs(initialFrame.height - targetSize.height) > 0.5 {
       let lowerRight = window.coordinate(withNormalizedOffset: CGVector(dx: 0.995, dy: 0.995))
       let target = lowerRight.withOffset(CGVector(
         dx: targetSize.width - initialFrame.width,
