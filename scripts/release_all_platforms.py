@@ -3477,8 +3477,9 @@ def main() -> int:
         raise ReleaseError("Repaired Linux/Mac reuse requires original platform recovery without rebuilding those platforms")
     if args.rebuild_ios and (not args.reuse_platform_run or args.reuse_macos_run or args.reuse_repaired_run):
         raise ReleaseError("iOS rebuilding requires ordinary verified platform recovery")
-    if args.rebuild_tvos and (not args.reuse_platform_run or args.reuse_macos_run or args.reuse_repaired_run):
-        raise ReleaseError("tvOS rebuilding requires ordinary verified platform recovery")
+    if args.rebuild_tvos and (not args.reuse_platform_run or args.reuse_macos_run
+                             or (args.reuse_repaired_run and qualification_run is None)):
+        raise ReleaseError("tvOS rebuilding requires ordinary or supplemental verified platform recovery")
     if args.rebuild_tizen and (not args.reuse_platform_run or args.reuse_macos_run or args.reuse_repaired_run
                                or packaging_repair or args.rebuild_linux or args.rebuild_macos
                                or args.rebuild_tvos or args.rebuild_ios or args.rebuild_webos

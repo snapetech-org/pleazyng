@@ -45,6 +45,17 @@ class SigningOptionsTests(unittest.TestCase):
                 self.assertEqual(args.macos_runner_pool, "auto")
                 self.assertFalse(args.publish)
 
+    def test_cli_allows_supplemental_qualification_with_tvos_rebuild(self):
+        argv = ["release", "--version", "3.0.52", "--source-commit", "a" * 40,
+                "--reuse-platform-run", "42", "--reuse-repaired-run", "qualification:84",
+                "--rebuild-tvos", "--include-webos-release", "--publish"]
+        with patch.object(sys, "argv", argv), patch.object(
+            release, "command", side_effect=SystemExit
+        ) as command, self.assertRaises(SystemExit):
+            release.main()
+        command.assert_called_once_with(["gh", "auth", "status", "--hostname", "github.com"],
+                                        capture=True, quiet=True)
+
     def test_dispatch_and_reuse_require_every_requested_step(self):
         mac = [("build-macos", "Notarize Application"),
                ("build-macos", "Wait for notarization acceptance"),
