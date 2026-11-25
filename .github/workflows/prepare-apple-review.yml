@@ -19,7 +19,7 @@ on:
         type: string
         required: true
       previous_draft_tag:
-        description: Earlier Prepare for Submission draft to update if the target version does not exist
+        description: Earlier editable draft to update if the target version does not exist (including an unsent Ready for Review draft)
         type: string
         required: false
       inspect_only:

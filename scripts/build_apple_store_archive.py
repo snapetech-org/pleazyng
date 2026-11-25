@@ -378,7 +378,7 @@ class AppleProfileAPI:
             method=method)
         try:
             with self.opener.open(request, timeout=60) as response:
-                if method == 'PATCH' and response.status == 204:
+                if method in {'PATCH', 'DELETE'} and response.status == 204:
                     return {}
                 data = response.read(4 * 1024 * 1024 + 1)
         except urllib.error.HTTPError as error:

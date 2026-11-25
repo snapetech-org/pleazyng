@@ -50,6 +50,56 @@ def version_state(draft):
     return draft['attributes'].get('appVersionState') or draft['attributes'].get('appStoreState')
 
 
+def rollover_ready_review_draft(api, platform, draft):
+    """Remove exactly one unsent review item so Apple can edit this version again."""
+    version_link = {'type': 'appStoreVersions', 'id': draft['id']}
+    submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions')
+    matching = []
+    blocked = []
+    for submission in submissions:
+        if submission.get('type') != 'reviewSubmissions':
+            continue
+        attributes = submission.get('attributes')
+        if not isinstance(attributes, dict) or attributes.get('platform') != platform:
+            continue
+        submission_id = submission.get('id', '')
+        if not re.fullmatch(r'[A-Za-z0-9-]{1,100}', submission_id):
+            raise ValueError('Apple returned an invalid review submission resource')
+        items = draft_review_items(api, submission_id)
+        exact_items = [item for item in items
+                       if item.get('relationships', {}).get('appStoreVersion', {}).get('data') == version_link]
+        if not exact_items:
+            continue
+        if len(exact_items) != 1:
+            raise ValueError('Apple returned multiple review items for the previous app version')
+        item = exact_record(exact_items, 'reviewSubmissionItems', lambda attrs: True)
+        eligible = (attributes.get('state') == 'READY_FOR_REVIEW'
+                    and attributes.get('submittedDate') is None
+                    and item['attributes'].get('state') == 'READY_FOR_REVIEW')
+        if eligible:
+            matching.append((submission, item))
+        else:
+            blocked.append((submission, item))
+    if blocked:
+        raise ValueError('The previous app version belongs to a submitted or non-ready Apple review submission')
+    if len(matching) != 1:
+        raise ValueError('Expected exactly one unsent platform review submission for the previous app version')
+
+    submission, item = matching[0]
+    item_path = f'/v1/reviewSubmissionItems/{item["id"]}'
+    api.request(item_path, method='DELETE')
+    remaining = draft_review_items(api, submission['id'])
+    if any(entry.get('relationships', {}).get('appStoreVersion', {}).get('data') == version_link
+           for entry in remaining):
+        raise ValueError('Apple did not remove the exact previous review item')
+
+    refreshed = api.request(f'/v1/appStoreVersions/{draft["id"]}')['data']
+    refreshed = exact_version([refreshed], platform, draft['attributes']['versionString'])
+    if version_state(refreshed) not in EDITABLE:
+        raise ValueError('Apple did not return the previous app version to an editable review draft')
+    return refreshed
+
+
 def platform_versions(api, platform):
     filters = urlencode({'filter[platform]': platform})
     return [entry for entry in api.items(f'/v1/apps/{APP_ID}/appStoreVersions?{filters}')
@@ -94,8 +144,8 @@ def prepare(api, platform, version, build_number, *, inspect_only=False, previou
         draft = None
     elif replace_draft:
         draft = exact_version(version_records(api, platform, previous_draft), platform, previous_draft)
-        if version_state(draft) != 'PREPARE_FOR_SUBMISSION':
-            raise ValueError('Only a previous draft in Prepare for Submission can be updated')
+        if version_state(draft) not in {'PREPARE_FOR_SUBMISSION', 'READY_FOR_REVIEW'}:
+            raise ValueError('Only an editable previous draft can be updated')
     else:
         draft = exact_version(drafts, platform, version)
     build_filters = urlencode({'filter[app]': APP_ID, 'filter[version]': build_number,
@@ -126,6 +176,8 @@ def prepare(api, platform, version, build_number, *, inspect_only=False, previou
     draft_path = f'/v1/appStoreVersions/{draft["id"]}'
     relationship = f'{draft_path}/relationships/build'
     if replace_draft:
+        if version_state(draft) == 'READY_FOR_REVIEW':
+            draft = rollover_ready_review_draft(api, platform, draft)
         api.request(draft_path, {'data': {
             'type': 'appStoreVersions', 'id': draft['id'], 'attributes': {'versionString': version},
             'relationships': {'build': {'data': expected}},

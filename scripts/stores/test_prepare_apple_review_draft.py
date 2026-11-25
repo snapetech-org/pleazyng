@@ -77,7 +77,7 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
 
     def test_previous_draft_in_review_is_preserved(self):
         self.previous_draft(state='WAITING_FOR_REVIEW')
-        with self.assertRaisesRegex(ValueError, 'Prepare for Submission'):
+        with self.assertRaisesRegex(ValueError, 'editable previous draft'):
             review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
         self.assert_no_patch()
 
@@ -87,6 +87,105 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'VALID and unexpired'):
             review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
         self.assert_no_patch()
+
+    def test_ready_previous_draft_rollover_removes_only_its_exact_review_item(self):
+        record = {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.50', 'appVersionState': 'READY_FOR_REVIEW',
+        }}
+        submission = {'type': 'reviewSubmissions', 'id': 'review-id', 'attributes': {
+            'platform': 'TV_OS', 'state': 'READY_FOR_REVIEW', 'submittedDate': None,
+        }}
+        item = {'type': 'reviewSubmissionItems', 'id': 'review-item',
+                'attributes': {'state': 'READY_FOR_REVIEW'},
+                'relationships': {'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': 'draft'}}}}
+        self.api.items.side_effect = [[], [record], [{**self.exact, 'attributes': self.build}],
+                                      [submission], [item], []]
+        draft_path = '/v1/appStoreVersions/draft'
+        updated = False
+
+        def request(path, body=None, *, method=None):
+            nonlocal updated
+            if path == '/v1/reviewSubmissionItems/review-item':
+                self.assertEqual(method, 'DELETE')
+                return {}
+            if path == draft_path and method == 'PATCH':
+                self.assertEqual(body, {'data': {
+                    'type': 'appStoreVersions', 'id': 'draft', 'attributes': {'versionString': '3.0.51'},
+                    'relationships': {'build': {'data': self.exact}},
+                }})
+                updated = True
+                self.relationships = {'data': self.exact}
+                return {'data': {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+                    'platform': 'TV_OS', 'versionString': '3.0.51', 'appVersionState': 'PREPARE_FOR_SUBMISSION',
+                }}}
+            if path == draft_path and method is None:
+                version = '3.0.51' if updated else '3.0.50'
+                return {'data': {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+                    'platform': 'TV_OS', 'versionString': version, 'appVersionState': 'PREPARE_FOR_SUBMISSION',
+                }}}
+            return self.request(path, body, method=method)
+
+        self.api.request.side_effect = request
+        receipt = review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertEqual(receipt['previous_draft_version'], '3.0.50')
+        calls = self.api.request.call_args_list
+        deletes = [call for call in calls if call.kwargs.get('method') == 'DELETE']
+        self.assertEqual([call.args[0] for call in deletes], ['/v1/reviewSubmissionItems/review-item'])
+        patches = [call for call in calls if call.kwargs.get('method') == 'PATCH']
+        self.assertEqual([call.args[0] for call in patches], [draft_path])
+        self.assertLess(calls.index(deletes[0]), calls.index(patches[0]))
+        self.assertFalse(any(call.args[0] == draft_path and call.kwargs.get('method') == 'DELETE'
+                             for call in calls))
+
+    def test_ready_previous_draft_invalid_build_never_deletes_review_item(self):
+        record = {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.50', 'appVersionState': 'READY_FOR_REVIEW',
+        }}
+        self.api.items.side_effect = [[], [record], [{**self.exact, 'attributes': {
+            **self.build, 'processingState': 'PROCESSING'}}]]
+        with self.assertRaisesRegex(ValueError, 'VALID and unexpired'):
+            review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertFalse(any(call.kwargs.get('method') == 'DELETE' for call in self.api.request.call_args_list))
+
+    def test_ready_previous_draft_wrong_platform_build_never_deletes_review_item(self):
+        record = {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.50', 'appVersionState': 'READY_FOR_REVIEW',
+        }}
+        wrong = {'id': 'phone-build', 'type': 'builds', 'attributes': self.build}
+        self.api.items.side_effect = [[], [record], [wrong]]
+        with self.assertRaisesRegex(ValueError, 'exactly one matching Apple builds resource'):
+            review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertFalse(any(call.kwargs.get('method') == 'DELETE' for call in self.api.request.call_args_list))
+
+    def test_ready_previous_draft_nonmatching_item_never_deletes(self):
+        record = {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.50', 'appVersionState': 'READY_FOR_REVIEW',
+        }}
+        submission = {'type': 'reviewSubmissions', 'id': 'review-id', 'attributes': {
+            'platform': 'TV_OS', 'state': 'READY_FOR_REVIEW', 'submittedDate': None,
+        }}
+        item = {'type': 'reviewSubmissionItems', 'id': 'foreign-item',
+                'attributes': {'state': 'READY_FOR_REVIEW'},
+                'relationships': {'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': 'other'}}}}
+        self.api.items.side_effect = [[], [record], [{**self.exact, 'attributes': self.build}], [submission], [item]]
+        with self.assertRaisesRegex(ValueError, 'exactly one unsent platform review submission'):
+            review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertFalse(any(call.kwargs.get('method') == 'DELETE' for call in self.api.request.call_args_list))
+
+    def test_ready_previous_draft_in_review_never_deletes(self):
+        record = {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.50', 'appVersionState': 'READY_FOR_REVIEW',
+        }}
+        submission = {'type': 'reviewSubmissions', 'id': 'review-id', 'attributes': {
+            'platform': 'TV_OS', 'state': 'IN_REVIEW', 'submittedDate': '2026-11-25T00:00:00Z',
+        }}
+        item = {'type': 'reviewSubmissionItems', 'id': 'review-item',
+                'attributes': {'state': 'READY_FOR_REVIEW'},
+                'relationships': {'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': 'draft'}}}}
+        self.api.items.side_effect = [[], [record], [{**self.exact, 'attributes': self.build}], [submission], [item]]
+        with self.assertRaisesRegex(ValueError, 'submitted or non-ready'):
+            review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertFalse(any(call.kwargs.get('method') == 'DELETE' for call in self.api.request.call_args_list))
 
     def test_existing_target_draft_takes_priority(self):
         self.relationships = {'data': self.exact}
