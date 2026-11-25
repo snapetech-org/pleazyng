@@ -545,7 +545,10 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
 
     def test_assembly_checkout_must_include_transitive_script_imports(self) -> None:
         workflow = self._workflow()
-        result = self._run(workflow.replace('            scripts/**\n', '            scripts/recover_release_platforms.py\n', 1))
+        start = workflow.index("  create-release:\n")
+        prefix, release = workflow[:start], workflow[start:]
+        result = self._run(prefix + release.replace(
+            '            scripts/**\n', '            scripts/recover_release_platforms.py\n', 1))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('sparse checkout', result.stderr)
 
@@ -700,7 +703,9 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
         workflow = self._workflow()
         entry = '            scripts/**\n'
         self.assertIn(entry, workflow)
-        result = self._run(workflow.replace(entry, '', 1))
+        start = workflow.index("  create-release:\n")
+        prefix, release = workflow[:start], workflow[start:]
+        result = self._run(prefix + release.replace(entry, '', 1))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('sparse checkout must include every executed script', result.stderr)
 

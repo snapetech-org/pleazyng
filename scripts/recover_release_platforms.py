@@ -95,6 +95,10 @@ ARTIFACTS = {
     "windows-chocolatey": "windows-chocolatey", "linux-x64": "linux-x64",
     "linux-arm64": "linux-arm64", "linux-x64-appimage": "linux-x64",
 }
+WINDOWS_REPACKAGED_ARTIFACTS = frozenset({
+    "windows-x64-portable", "windows-installer", "windows-chocolatey",
+})
+WINDOWS_RAW_X64_ARTIFACT = "windows-x64-build"
 TVOS_RUNTIME_RECEIPT = "tvos-runtime-dependency-receipt.json"
 TVOS_RUNTIME_SYSTEM_PREFIXES = ("/System/Library/", "/System/iOSSupport/", "/usr/lib/")
 TVOS_MACHO_MAGICS = frozenset(bytes.fromhex(value) for value in (
@@ -142,6 +146,89 @@ def collection(path, key):
     from release_job_inventory import inventory, mac_package_evidence
     values = inventory(path, key, api, RecoveryError, page_size=30)
     return mac_package_evidence(values) if key == "jobs" else values
+
+
+def verified_run_artifact(inventory, name, run_id, source_sha, repository=REPOSITORY):
+    """Return unique unexpired artifact evidence tied to the exact workflow run."""
+    matches = [item for item in inventory
+               if item.get("name") == name and item.get("expired") is False]
+    if len(matches) != 1:
+        raise RecoveryError(f"Reusable artifact is missing, expired, or ambiguous: {name}")
+    artifact = matches[0]
+    digest = artifact.get("digest") or ""
+    identity = artifact.get("workflow_run") or {}
+    if (type(artifact.get("id")) is not int or artifact["id"] < 1
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+            or identity.get("id") != int(run_id) or identity.get("head_sha") != source_sha):
+        raise RecoveryError(f"Reusable artifact identity or digest is invalid: {name}")
+    metadata = api(f"repos/{repository}/actions/artifacts/{artifact['id']}")
+    metadata_run = metadata.get("workflow_run") or {}
+    if (metadata.get("id") != artifact["id"] or metadata.get("name") != name
+            or metadata.get("expired") is not False or metadata.get("digest") != digest
+            or metadata_run.get("id") != int(run_id) or metadata_run.get("head_sha") != source_sha):
+        raise RecoveryError(f"Reusable artifact metadata changed after source validation: {name}")
+    return artifact
+
+
+def verify_skipped_windows_packaging(source, jobs, repository=REPOSITORY):
+    """Recognize only an unassigned source package skip with retained x64 bytes."""
+    run_id = source.get("id")
+    source_sha = source.get("head_sha")
+    attempt = source.get("run_attempt")
+    if (type(run_id) is not int or run_id < 1 or type(attempt) is not int
+            or not 1 <= attempt <= 100 or not re.fullmatch(r"[0-9a-f]{40}", str(source_sha))):
+        raise RecoveryError("Windows package recovery requires an exact source run attempt")
+    package_jobs = [job for job in jobs if job.get("name") == "package-windows"]
+    if len(package_jobs) != 1:
+        raise RecoveryError("Windows package recovery requires one original package-windows job")
+    package_job = package_jobs[0]
+    if (package_job.get("status") != "completed" or package_job.get("conclusion") != "skipped"
+            or package_job.get("runner_id") not in (None, 0)
+            or package_job.get("runner_name") not in (None, "")
+            or not isinstance(package_job.get("steps"), list) or package_job["steps"]
+            or package_job.get("run_id") != run_id or package_job.get("run_attempt") != attempt
+            or package_job.get("head_sha") != source_sha):
+        raise RecoveryError("Windows packaging may only be recovered after an exact unassigned source skip")
+    chocolatey_jobs = [job for job in jobs if job.get("name") == "Package Windows Chocolatey"]
+    if len(chocolatey_jobs) != 1:
+        raise RecoveryError("Windows package recovery requires one original Chocolatey job")
+    chocolatey_job = chocolatey_jobs[0]
+    if (chocolatey_job.get("status") != "completed" or chocolatey_job.get("conclusion") != "skipped"
+            or chocolatey_job.get("runner_id") not in (None, 0)
+            or chocolatey_job.get("runner_name") not in (None, "")
+            or not isinstance(chocolatey_job.get("steps"), list) or chocolatey_job["steps"]
+            or chocolatey_job.get("run_id") != run_id or chocolatey_job.get("run_attempt") != attempt
+            or chocolatey_job.get("head_sha") != source_sha):
+        raise RecoveryError("Chocolatey packaging may only be recovered after an exact unassigned source skip")
+    x64_jobs = [job for job in jobs if job.get("name") == "Build Windows (x64)"]
+    if len(x64_jobs) != 1:
+        raise RecoveryError("Windows package recovery requires one original x64 build job")
+    x64_job = x64_jobs[0]
+    if (x64_job.get("status") != "completed" or x64_job.get("conclusion") != "success"
+            or x64_job.get("run_id") != run_id or x64_job.get("run_attempt") != attempt
+            or x64_job.get("head_sha") != source_sha):
+        raise RecoveryError("Windows x64 package input was not produced by the exact successful source attempt")
+    required_steps = ("Build Windows x64", "Verify Windows bundle contents", "Upload x64 build")
+    for step_name in required_steps:
+        steps = [step for step in x64_job.get("steps", []) if step.get("name") == step_name]
+        if len(steps) != 1 or steps[0].get("status") != "completed" or steps[0].get("conclusion") != "success":
+            raise RecoveryError(f"Original Windows x64 checkpoint is missing its successful step: {step_name}")
+    inventory = collection(f"repos/{repository}/actions/runs/{run_id}/artifacts", "artifacts")
+    if any(item.get("name") in WINDOWS_REPACKAGED_ARTIFACTS for item in inventory):
+        raise RecoveryError("Skipped Windows packaging has unexpected original package artifacts")
+    artifact = verified_run_artifact(inventory, WINDOWS_RAW_X64_ARTIFACT, run_id, source_sha, repository)
+    return {
+        "source_run_id": run_id,
+        "source_sha": source_sha,
+        "run_attempt": attempt,
+        "source_package_job_id": package_job.get("id"),
+        "source_chocolatey_job_id": chocolatey_job.get("id"),
+        "source_x64_build_job_id": x64_job.get("id"),
+        "artifact_name": WINDOWS_RAW_X64_ARTIFACT,
+        "artifact_id": artifact["id"],
+        "artifact_digest": artifact["digest"],
+        "missing_original_artifacts": sorted(WINDOWS_REPACKAGED_ARTIFACTS),
+    }
 
 
 def trusted_versioned_release_title(run, version):
@@ -1031,6 +1118,10 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
         raise RecoveryError("Do not rebuild Linux/Mac while explicitly reusing their repaired outputs")
     repaired = verify_repaired_run(repaired_run, head_sha, version, repository, allow_pending=allow_pending, require_homebrew_cask=require_homebrew_cask) if repaired_run else None
     jobs = collection(f"repos/{repository}/actions/runs/{run_id}/jobs", "jobs")
+    windows_repackaging = None
+    package_jobs = [job for job in jobs if job.get("name") == "package-windows"]
+    if qualification_run is not None and len(package_jobs) == 1 and package_jobs[0].get("conclusion") == "skipped":
+        windows_repackaging = verify_skipped_windows_packaging(source, jobs, repository)
     pending_jobs = []
     ios_developer_source = (verify_unsigned_ios_run(ios_developer_run, head_sha, version, repository)
                             if ios_developer_run else None)
@@ -1039,6 +1130,7 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                           and not ((rebuild_macos or repaired or append_apple_only) and name == "build-macos")
                           and not (rebuild_tvos and name == "Build tvOS developer package (arm64)")
                           and not ((rebuild_ios or ios_developer_source) and name == "build-ios")
+                          and not (windows_repackaging and name == "package-windows")
                           and not (rebuild_tizen and name == TIZEN_PACKAGE_JOB))
     if append_apple_only:
         macos_jobs = [job for job in jobs if job.get('name') == 'build-macos']
@@ -1159,6 +1251,8 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
     return {"source_run_id": int(run_id), "source_sha": source_sha, "head_sha": head_sha,
             "run_attempt": source.get("run_attempt"),
             "version": version, "reused_jobs": reused_jobs,
+            "repackage_windows": windows_repackaging is not None,
+            **({"windows_repackaging": windows_repackaging} if windows_repackaging else {}),
             "rebuilt_jobs": sorted(rebuilt_jobs), "rebuild_linux": rebuild_linux, "rebuild_macos": rebuild_macos, "rebuild_tvos": rebuild_tvos, "rebuild_ios": rebuild_ios, "rebuild_tizen": rebuild_tizen,
             "macos_cask_qualified": repaired["macos_cask_qualified"] if repaired else cask_qualified,
             "webos_link_compatibility_repaired": any(entry.get("filename") == "webos/CMakeLists.txt" for entry in changed),
@@ -1452,6 +1546,33 @@ def extract_verified(archive, destination):
             if target.exists() and not member.is_dir():
                 raise RecoveryError(f"Artifact would overwrite another platform file: {target}")
         source.extractall(destination)
+
+
+def download_windows_build_artifact(proof, destination, repository=REPOSITORY):
+    """Download and safely extract the raw x64 checkpoint for trusted repackaging."""
+    evidence = proof.get("windows_repackaging")
+    if not proof.get("repackage_windows") or not isinstance(evidence, dict):
+        raise RecoveryError("Windows source build download requires validated supplemental repackage proof")
+    inventory = collection(
+        f"repos/{repository}/actions/runs/{proof['source_run_id']}/artifacts", "artifacts")
+    artifact = verified_run_artifact(
+        inventory, WINDOWS_RAW_X64_ARTIFACT, proof["source_run_id"], proof["source_sha"], repository)
+    if artifact.get("id") != evidence.get("artifact_id") or artifact.get("digest") != evidence.get("artifact_digest"):
+        raise RecoveryError("Windows x64 checkpoint artifact changed after source approval")
+    with tempfile.TemporaryDirectory(prefix="pleazyng-windows-checkpoint-") as scratch:
+        archive = Path(scratch) / "artifact.zip"
+        with archive.open("wb") as output:
+            result = subprocess.run(["gh", "api", "--allow-escape-sequences",
+                                     f"repos/{repository}/actions/artifacts/{artifact['id']}/zip"],
+                                    stdout=output, stderr=subprocess.PIPE, text=True)
+        with archive.open("rb") as downloaded:
+            actual_digest = hashlib.file_digest(downloaded, "sha256").hexdigest()
+        if result.returncode or actual_digest != artifact["digest"][7:]:
+            raise RecoveryError("Windows x64 checkpoint download failed digest verification")
+        extract_verified(archive, destination)
+    if not (destination / "pleazyng.exe").is_file():
+        raise RecoveryError("Windows x64 checkpoint is missing pleazyng.exe")
+    return evidence
 
 
 def tvos_package_names(source):
@@ -1854,7 +1975,8 @@ def preflight_platform_artifacts(proof, repository=REPOSITORY):
                     or proof.get('rebuild_tvos') and name == 'tvos-ipa'
                     or proof.get('rebuild_ios') and name == 'ios-ipa'
                     or proof.get('rebuild_tizen') and name == 'pleazyng-tizen-arm-experimental'
-                    or proof.get('ios_developer_source') and name == 'ios-ipa'):
+                    or proof.get('ios_developer_source') and name == 'ios-ipa'
+                    or proof.get('repackage_windows') and name in WINDOWS_REPACKAGED_ARTIFACTS):
                 continue
             wanted[name] = proof
         if proof.get('profile') == 'macos-packaging':
@@ -1883,27 +2005,109 @@ def preflight_platform_artifacts(proof, repository=REPOSITORY):
         if source is None:
             raise RecoveryError(f'Reusable artifact has no verified source record: {name}')
         source_run = source['source_run_id']
-        matches = [item for item in inventories[source_run]
-                   if item.get('name') == name and item.get('expired') is False]
-        if len(matches) != 1:
-            raise RecoveryError(f'Reusable artifact is missing, expired, or ambiguous: {name}')
-        artifact = matches[0]
-        digest = artifact.get('digest')
         expected_sha = source.get('workflow_source_sha') or source['source_sha']
-        identity = artifact.get('workflow_run') or {}
-        if (type(artifact.get('id')) is not int or artifact['id'] < 1
-                or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(digest))
-                or identity.get('id') != source_run or identity.get('head_sha') != expected_sha):
-            raise RecoveryError(f'Reusable artifact identity or digest is invalid: {name}')
-        metadata = api(f'repos/{repository}/actions/artifacts/{artifact["id"]}')
-        metadata_run = metadata.get('workflow_run') or {}
-        if (metadata.get('id') != artifact['id'] or metadata.get('name') != name
-                or metadata.get('expired') is not False or metadata.get('digest') != digest
-                or metadata_run.get('id') != source_run or metadata_run.get('head_sha') != expected_sha):
-            raise RecoveryError(f'Reusable artifact metadata changed after source validation: {name}')
+        artifact = verified_run_artifact(inventories[source_run], name, source_run, expected_sha, repository)
         selected.append({'name': name, 'artifact_id': artifact['id'], 'source_run_id': source_run,
-                         'source_sha': source.get('source_sha'), 'digest': digest})
+                         'source_sha': source.get('source_sha'), 'digest': artifact['digest']})
+    if proof.get('repackage_windows'):
+        inventory = inventories[run_id]
+        if any(item.get('name') in WINDOWS_REPACKAGED_ARTIFACTS for item in inventory):
+            raise RecoveryError('Skipped Windows package artifacts appeared after source approval')
+        raw = verified_run_artifact(
+            inventory, WINDOWS_RAW_X64_ARTIFACT, run_id, proof['source_sha'], repository)
+        evidence = proof.get('windows_repackaging') or {}
+        if raw.get('id') != evidence.get('artifact_id') or raw.get('digest') != evidence.get('artifact_digest'):
+            raise RecoveryError('Windows x64 checkpoint changed after source approval')
+        selected.append({'name': WINDOWS_RAW_X64_ARTIFACT, 'artifact_id': raw['id'],
+                         'source_run_id': run_id, 'source_sha': proof['source_sha'],
+                         'digest': raw['digest']})
     return selected
+
+
+def verify_windows_repackaging_assembly(proof, assembly_run_id, repository=REPOSITORY):
+    """Bind recovered Windows packaging to this exact trusted assembly attempt."""
+    if not proof.get('repackage_windows'):
+        return None
+    if (repository != REPOSITORY or not str(assembly_run_id).isdigit()
+            or not proof.get('qualification_run_id')):
+        raise RecoveryError('Windows repackaging requires the exact qualified assembly run')
+    assembly = api(f'repos/{repository}/actions/runs/{assembly_run_id}')
+    source_run_id = proof['source_run_id']
+    suffix = ':rebuild-tvos' if proof.get('rebuild_tvos') else ''
+    title = (f'action:release:pool:public:tag:v{proof["version"]}:assembly:source:'
+             f'{source_run_id}:qualification:{proof["qualification_run_id"]}{suffix}')
+    if assembly.get('display_title') not in {title, 'apple-signing-unavailable:' + title}:
+        raise RecoveryError('Windows packaging assembly run title does not bind its source and qualification')
+    if (assembly.get('id') != int(assembly_run_id) or assembly.get('event') != 'workflow_dispatch'
+            or assembly.get('head_branch') != 'main'
+            or (assembly.get('head_repository') or {}).get('full_name') != repository
+            or assembly.get('path', '').split('@')[0] != '.github/workflows/build.yml'
+            or assembly.get('head_sha') != os.environ.get('GITHUB_SHA')
+            or type(assembly.get('run_attempt')) is not int):
+        raise RecoveryError('Windows packaging assembly is not the exact trusted main workflow attempt')
+    from verify_embedded_release_ci import latest_attempt_jobs
+
+    if not 1 <= assembly['run_attempt'] <= 100:
+        raise RecoveryError('Windows packaging assembly attempt count is outside the supported bound')
+    attempts = [collection(
+        f'repos/{repository}/actions/runs/{assembly_run_id}/attempts/{attempt}/jobs', 'jobs')
+        for attempt in range(1, assembly['run_attempt'] + 1)]
+    try:
+        jobs = latest_attempt_jobs(attempts)
+    except release_ci.GateError as error:
+        raise RecoveryError(f'Windows packaging assembly attempt history is invalid: {error}') from error
+    expected_jobs = {
+        'package-windows': ('Recover verified immutable Windows x64 checkpoint',
+                            'Build installer and portables', 'Attest Windows artifacts',
+                            'Upload x64 portable', 'Upload installer'),
+        'Package Windows Chocolatey': ('Package Chocolatey release', 'Attest Chocolatey package',
+                                       'Upload Chocolatey package'),
+    }
+    selected_jobs = {}
+    for name, required_steps in expected_jobs.items():
+        matches = [job for job in jobs if job.get('name') == name]
+        if len(matches) != 1:
+            raise RecoveryError(f'Windows repackage job is missing or ambiguous: {name}')
+        job = matches[0]
+        if (job.get('status') != 'completed' or job.get('conclusion') != 'success'
+                or job.get('run_id') != int(assembly_run_id)
+                or job.get('head_sha') != assembly.get('head_sha')):
+            raise RecoveryError(f'Windows repackage job did not succeed in the exact assembly attempt: {name}')
+        for step_name in required_steps:
+            steps = [step for step in job.get('steps', []) if step.get('name') == step_name]
+            if len(steps) != 1 or steps[0].get('status') != 'completed' or steps[0].get('conclusion') != 'success':
+                raise RecoveryError(f'Windows repackage job is missing a successful step: {name}/{step_name}')
+        if name == 'package-windows':
+            checkout_steps = [step for step in job.get('steps', [])
+                              if step.get('name') == 'Verify immutable Windows package source']
+            if (len(checkout_steps) != 1 or checkout_steps[0].get('status') != 'completed'
+                    or checkout_steps[0].get('conclusion') != 'success'):
+                raise RecoveryError('Windows packaging did not verify the immutable product checkout')
+        selected_jobs[name] = job
+    inventory = collection(f'repos/{repository}/actions/runs/{assembly_run_id}/artifacts', 'artifacts')
+    artifacts = {}
+    for name in sorted(WINDOWS_REPACKAGED_ARTIFACTS):
+        artifact = verified_run_artifact(inventory, name, assembly_run_id, assembly['head_sha'], repository)
+        producer = selected_jobs['Package Windows Chocolatey' if name == 'windows-chocolatey' else 'package-windows']
+        try:
+            created = datetime.fromisoformat(artifact['created_at'].replace('Z', '+00:00'))
+            started = datetime.fromisoformat(producer['started_at'].replace('Z', '+00:00'))
+            completed = datetime.fromisoformat(producer['completed_at'].replace('Z', '+00:00'))
+        except (KeyError, TypeError, ValueError) as error:
+            raise RecoveryError(f'Windows packaging artifact lacks job-interval evidence: {name}') from error
+        if not started <= created <= completed:
+            raise RecoveryError(f'Windows packaging artifact was not created by its verified producer job: {name}')
+        artifacts[name] = {'artifact_id': artifact['id'], 'digest': artifact['digest']}
+    return {
+        **(proof.get('windows_repackaging') or {}),
+        'assembly_run_id': int(assembly_run_id),
+        'assembly_head_sha': assembly['head_sha'],
+        'assembly_run_attempt': assembly['run_attempt'],
+        'product_checkout_sha': proof['source_sha'],
+        'package_job_id': selected_jobs['package-windows']['id'],
+        'chocolatey_job_id': selected_jobs['Package Windows Chocolatey']['id'],
+        'assembly_artifacts': artifacts,
+    }
 
 
 def download_platforms(proof, destination, repository=REPOSITORY):
@@ -1927,6 +2131,7 @@ def download_platforms(proof, destination, repository=REPOSITORY):
                   and not (proof.get("rebuild_tvos") and name == "tvos-ipa")
                   and not (proof.get("rebuild_ios") and name == "ios-ipa")
                   and not (proof.get("rebuild_tizen") and name == "pleazyng-tizen-arm-experimental")
+                  and not (proof.get("repackage_windows") and name in WINDOWS_REPACKAGED_ARTIFACTS)
                   and not (proof.get("ios_developer_source") and name == "ios-ipa")}
         if any(item.get("name") == "windows-msix" for item in inventory):
             wanted["windows-msix"] = "windows-msix"
@@ -2062,6 +2267,13 @@ def download_platforms(proof, destination, repository=REPOSITORY):
             proof.update(assembly_run_id=int(assembly), actual_checkout_sha=actual,
                          linux_archive_sha256=linux_digest,
                          assembly_scope='full-platform-recovery')
+    if proof.get('repackage_windows'):
+        assembly = os.environ.get('GITHUB_RUN_ID', '')
+        actual = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        if not assembly.isdigit() or actual != os.environ.get('GITHUB_SHA'):
+            raise RecoveryError('Windows package proof must be created by the exact trusted assembler checkout')
+        proof = {**proof, 'windows_repackaging': verify_windows_repackaging_assembly(proof, assembly, repository)}
+        proof['repackaged_jobs'] = ['package-windows', 'Package Windows Chocolatey']
     (destination / "platform-reuse-provenance.json").write_text(json.dumps(proof, indent=2) + "\n")
     return proof
 
@@ -2075,6 +2287,8 @@ def main():
     parser.add_argument('--workflow-source-sha')
     parser.add_argument('--include-apple-store-build', action='store_true')
     parser.add_argument("--download", type=Path)
+    parser.add_argument("--download-windows-build", type=Path,
+                        help="Download the exact original x64 checkpoint for a verified qualified release assembly")
     parser.add_argument("--macos-run", help="Reuse a qualified signing-only Mac recovery after every original platform succeeds.")
     parser.add_argument("--rebuild-linux", action="store_true", help="Rebuild both Linux architectures instead of reusing their artifacts")
     parser.add_argument("--rebuild-ios", action="store_true", help="Rebuild the iOS developer package instead of reusing its original artifact")
@@ -2111,6 +2325,11 @@ def main():
         parser.error("WebOS reuse must remain included and cannot substitute signing-only recovery")
     if args.allow_building and args.download:
         parser.error("--allow-building is only a preflight; downloads require completed successful platform jobs")
+    if args.download_windows_build and (
+            args.download or args.allow_building or args.wait_for_source or args.freeze_qualified_release
+            or args.qualification_run is None or str(args.android_run) != args.source_run
+            or str(args.webos_run) != args.source_run or args.skip_webos_build):
+        parser.error("Windows checkpoint downloads require a completed supplemental qualification assembly")
     if not 0 <= args.wait_for_source <= 10800:
         parser.error("--wait-for-source must be between 0 and 10800 seconds")
     if bool(args.packaging_source_sha) != bool(args.workflow_source_sha):
@@ -2152,6 +2371,14 @@ def main():
              verify_source_run(args.source_run, args.head_sha, args.version, allow_pending=args.allow_building, rebuild_linux=args.rebuild_linux, rebuild_macos=args.rebuild_macos, rebuild_tvos=args.rebuild_tvos, rebuild_ios=args.rebuild_ios, rebuild_tizen=args.rebuild_tizen, repaired_run=args.repaired_run, require_homebrew_cask=args.require_homebrew_cask, ios_developer_run=args.ios_developer_run, **frozen_options))
     proof = compose_proof(proof, args.android_run, not args.skip_webos_build, args.webos_run,
                           args.ios_developer_run)
+    if args.download_windows_build:
+        if not proof.get('repackage_windows'):
+            raise RecoveryError('The exact source run does not qualify for Windows packaging recovery')
+        preflight_platform_artifacts(proof)
+        evidence = download_windows_build_artifact(proof, args.download_windows_build)
+        print(json.dumps({"source_run_id": proof["source_run_id"], "source_sha": proof["source_sha"],
+                          "windows_repackaging": evidence}, indent=2))
+        return
     if args.freeze_qualified_release:
         from verify_embedded_release_ci import create_stable_tag
 
@@ -2162,6 +2389,7 @@ def main():
     if os.environ.get("GITHUB_OUTPUT"):
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
             output.write(f"source_sha={proof['source_sha']}\nci_run_id={proof['ci_run_id']}\n")
+            output.write(f"repackage_windows={str(proof.get('repackage_windows', False)).lower()}\n")
             if proof.get("webos_source"):
                 output.write(f"webos_source_sha={proof['webos_source']['source_sha']}\n")
             if proof.get("android_source"):

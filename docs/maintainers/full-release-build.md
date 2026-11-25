@@ -131,6 +131,19 @@ authenticated `gh` session. Assembly independently verifies the same proof, tag,
 and downloaded artifact digests before drafting the release. Keep the original
 run ID and qualification run ID when retrying delivery for the same version.
 
+If the original `package-windows` job was skipped before runner assignment
+because an optional workflow dependency skipped it, supplemental qualification
+also permits a guarded Windows packaging recovery. The verifier requires the
+original package and Chocolatey jobs to be unassigned with no steps, all three
+packaged artifacts to be absent, and the successful x64 build job plus its
+retained raw artifact to match the exact source run and attempt. A hosted
+Windows runner then packages that checkpoint using the immutable stable tag
+checkout; it does not compile the app again. The assembler records the original
+checkpoint artifact and recovered job and artifact identities in
+`platform-reuse-provenance.json`, which is covered by the release checksum.
+The supplemental assembly command above selects this path automatically only
+when those source records prove the exact skipped-package case.
+
 If the original **Build tvOS developer package (arm64)** job is terminal and was
 cancelled before acquiring a `macos-26` runner, with no runner assignment and no
 steps started, retain the same source and Apple qualification and add

@@ -127,6 +127,174 @@ class ArtifactPreflightTests(unittest.TestCase):
         profile_by_name = {item['name']: item for item in profile_records}
         self.assertEqual(profile_by_name['webos-ipk']['source_run_id'], self.run_id)
 
+    def test_windows_repackage_preflights_the_original_raw_x64_checkpoint(self):
+        inventory = [item for item in self.inventory
+                     if item['name'] not in recovery.WINDOWS_REPACKAGED_ARTIFACTS]
+        raw = {'id': 900, 'name': recovery.WINDOWS_RAW_X64_ARTIFACT, 'expired': False,
+               'digest': 'sha256:' + '9' * 64,
+               'workflow_run': {'id': self.run_id, 'head_sha': self.sha}}
+        inventory.append(raw)
+        proof = {**self.proof, 'repackage_windows': True,
+                 'windows_repackaging': {'artifact_id': raw['id'], 'artifact_digest': raw['digest']}}
+
+        def metadata(path):
+            artifact_id = int(path.rsplit('/', 1)[-1])
+            artifact = next(item for item in inventory if item['id'] == artifact_id)
+            return {**artifact, 'workflow_run': dict(artifact['workflow_run'])}
+
+        with patch.object(recovery, 'collection', return_value=inventory), \
+                patch.object(recovery, 'api', side_effect=metadata):
+            records = recovery.preflight_platform_artifacts(proof)
+        names = {item['name'] for item in records}
+        self.assertEqual(names, (set(recovery.ARTIFACTS) - recovery.WINDOWS_REPACKAGED_ARTIFACTS)
+                         | {recovery.WINDOWS_RAW_X64_ARTIFACT})
+
+
+class WindowsPackageRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.run_id = 55
+        self.sha = 'c' * 40
+        self.source = {'id': self.run_id, 'head_sha': self.sha, 'run_attempt': 2}
+        self.raw = {'id': 900, 'name': recovery.WINDOWS_RAW_X64_ARTIFACT, 'expired': False,
+                    'digest': 'sha256:' + '9' * 64,
+                    'workflow_run': {'id': self.run_id, 'head_sha': self.sha}}
+        package = {'name': 'package-windows', 'id': 101, 'status': 'completed',
+                   'conclusion': 'skipped', 'runner_id': 0, 'runner_name': '', 'steps': [],
+                   'run_id': self.run_id, 'run_attempt': 2, 'head_sha': self.sha}
+        chocolatey = {'name': 'Package Windows Chocolatey', 'id': 102, 'status': 'completed',
+                      'conclusion': 'skipped', 'runner_id': 0, 'runner_name': '', 'steps': [],
+                      'run_id': self.run_id, 'run_attempt': 2, 'head_sha': self.sha}
+        x64 = {'name': 'Build Windows (x64)', 'id': 103, 'status': 'completed',
+               'conclusion': 'success', 'run_id': self.run_id, 'run_attempt': 2,
+               'head_sha': self.sha, 'steps': [
+                   {'name': name, 'status': 'completed', 'conclusion': 'success'}
+                   for name in ('Build Windows x64', 'Verify Windows bundle contents', 'Upload x64 build')
+               ]}
+        self.jobs = [package, chocolatey, x64]
+
+    def verify(self, jobs=None, inventory=None, metadata=None):
+        inventory = [self.raw] if inventory is None else inventory
+        if metadata is None:
+            metadata = lambda _path: {**self.raw, 'workflow_run': dict(self.raw['workflow_run'])}
+        with patch.object(recovery, 'collection', return_value=inventory), \
+                patch.object(recovery, 'api', side_effect=metadata):
+            return recovery.verify_skipped_windows_packaging(self.source, self.jobs if jobs is None else jobs)
+
+    def test_only_exact_unassigned_skip_can_repackage_the_verified_x64_checkpoint(self):
+        proof = self.verify()
+        self.assertEqual(proof['source_run_id'], self.run_id)
+        self.assertEqual(proof['source_x64_build_job_id'], 103)
+        self.assertEqual(proof['artifact_id'], self.raw['id'])
+        self.assertEqual(proof['artifact_digest'], self.raw['digest'])
+
+    def test_runner_assignment_attempt_drift_or_partial_outputs_reject_repackaging(self):
+        for mutate in (
+                lambda jobs: jobs[0].update(conclusion='failure'),
+                lambda jobs: jobs[0].update(runner_id=123),
+                lambda jobs: jobs[0].update(steps=[{'name': 'Set up job'}]),
+                lambda jobs: jobs[2].update(run_attempt=1),
+        ):
+            jobs = copy.deepcopy(self.jobs)
+            mutate(jobs)
+            with self.subTest(jobs=jobs), self.assertRaises(recovery.RecoveryError):
+                self.verify(jobs=jobs)
+        with self.assertRaisesRegex(recovery.RecoveryError, 'unexpected original package artifacts'):
+            self.verify(inventory=[self.raw, {'name': 'windows-installer'}])
+
+    def test_windows_checkpoint_download_verifies_digest_and_safe_extracts(self):
+        content = io.BytesIO()
+        with zipfile.ZipFile(content, 'w') as archive:
+            archive.writestr('pleazyng.exe', b'compiled application')
+            archive.writestr('data/app.so', b'compiled runtime')
+        payload = content.getvalue()
+        digest = 'sha256:' + hashlib.sha256(payload).hexdigest()
+        self.raw['digest'] = digest
+        proof = {'repackage_windows': True, 'source_run_id': self.run_id, 'source_sha': self.sha,
+                 'windows_repackaging': {'artifact_id': self.raw['id'], 'artifact_digest': digest}}
+
+        def gh_download(_command, **kwargs):
+            kwargs['stdout'].write(payload)
+            return SimpleNamespace(returncode=0, stderr='')
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(recovery, 'collection', return_value=[self.raw]), \
+                patch.object(recovery, 'api', return_value=self.raw), \
+                patch.object(recovery.subprocess, 'run', side_effect=gh_download):
+            destination = Path(directory) / 'build-x64'
+            evidence = recovery.download_windows_build_artifact(proof, destination)
+            self.assertEqual(evidence['artifact_id'], self.raw['id'])
+            self.assertEqual((destination / 'pleazyng.exe').read_bytes(), b'compiled application')
+            self.assertEqual((destination / 'data/app.so').read_bytes(), b'compiled runtime')
+
+    def test_assembly_proof_binds_repackage_jobs_and_outputs_to_current_attempt(self):
+        assembly_id = 77
+        assembly_sha = 'd' * 40
+        title = ('action:release:pool:public:tag:v3.0.52:assembly:source:55:'
+                 'qualification:88:rebuild-tvos')
+        assembly = {'id': assembly_id, 'display_title': title, 'event': 'workflow_dispatch',
+                    'head_branch': 'main', 'head_repository': {'full_name': recovery.REPOSITORY},
+                    'path': '.github/workflows/build.yml@refs/heads/main',
+                    'head_sha': assembly_sha, 'run_attempt': 2}
+        jobs = [
+            {'name': 'package-windows', 'id': 701, 'status': 'completed', 'conclusion': 'success',
+             'run_id': assembly_id, 'run_attempt': 1, 'head_sha': assembly_sha,
+             'started_at': '2026-11-25T00:00:00Z', 'completed_at': '2026-11-25T01:00:00Z', 'steps': [
+                 {'name': name, 'status': 'completed', 'conclusion': 'success'}
+                 for name in ('Recover verified immutable Windows x64 checkpoint',
+                              'Build installer and portables', 'Attest Windows artifacts',
+                              'Upload x64 portable', 'Upload installer',
+                              'Verify immutable Windows package source')
+             ]},
+            {'name': 'Package Windows Chocolatey', 'id': 702, 'status': 'completed',
+             'conclusion': 'success', 'run_id': assembly_id, 'run_attempt': 1,
+             'head_sha': assembly_sha, 'started_at': '2026-11-25T00:00:00Z',
+             'completed_at': '2026-11-25T01:00:00Z', 'steps': [
+                 {'name': name, 'status': 'completed', 'conclusion': 'success'}
+                 for name in ('Package Chocolatey release', 'Attest Chocolatey package',
+                              'Upload Chocolatey package')
+             ]},
+        ]
+        artifacts = [
+            {'id': index, 'name': name, 'expired': False,
+             'digest': 'sha256:' + str(index) * 64,
+             'created_at': '2026-11-25T00:30:00Z',
+             'workflow_run': {'id': assembly_id, 'head_sha': assembly_sha}}
+            for index, name in enumerate(sorted(recovery.WINDOWS_REPACKAGED_ARTIFACTS), start=1)
+        ]
+        rerun_jobs = [{'name': 'create-release', 'id': 703, 'status': 'in_progress',
+                       'conclusion': None, 'run_id': assembly_id, 'run_attempt': 2,
+                       'head_sha': assembly_sha}]
+        proof = {'source_run_id': 55, 'source_sha': self.sha, 'version': '3.0.52',
+                 'qualification_run_id': 88, 'rebuild_tvos': True, 'repackage_windows': True,
+                 'windows_repackaging': {'artifact_id': 900, 'artifact_digest': self.raw['digest']}}
+
+        def metadata(path):
+            artifact_id = int(path.rsplit('/', 1)[-1])
+            artifact = next(item for item in artifacts if item['id'] == artifact_id)
+            return {**artifact, 'workflow_run': dict(artifact['workflow_run'])}
+
+        def api_response(path):
+            return assembly if path.endswith(f'/actions/runs/{assembly_id}') else metadata(path)
+
+        with patch.dict('os.environ', {'GITHUB_SHA': assembly_sha}), \
+                patch.object(recovery, 'api', side_effect=api_response), \
+                patch.object(recovery, 'collection', side_effect=[jobs, rerun_jobs, artifacts]):
+            evidence = recovery.verify_windows_repackaging_assembly(proof, assembly_id)
+        self.assertEqual(evidence['assembly_run_id'], assembly_id)
+        self.assertEqual(evidence['assembly_run_attempt'], 2)
+        self.assertEqual(evidence['product_checkout_sha'], self.sha)
+        self.assertEqual(evidence['package_job_id'], 701)
+        self.assertEqual(evidence['chocolatey_job_id'], 702)
+        self.assertEqual(set(evidence['assembly_artifacts']), recovery.WINDOWS_REPACKAGED_ARTIFACTS)
+
+        failed = copy.deepcopy(jobs[0])
+        failed.update(id=704, status='completed', conclusion='failure', run_attempt=2)
+        with patch.dict('os.environ', {'GITHUB_SHA': assembly_sha}), \
+                patch.object(recovery, 'api', return_value={**assembly, 'run_attempt': 2}), \
+                patch.object(recovery, 'collection', side_effect=[jobs, [failed]]), \
+                self.assertRaisesRegex(recovery.RecoveryError, 'did not succeed in the exact assembly attempt'):
+            recovery.verify_windows_repackaging_assembly(proof, assembly_id)
+
 
 class SourceProofTests(unittest.TestCase):
     def setUp(self):
@@ -209,6 +377,45 @@ class SourceProofTests(unittest.TestCase):
             self.prove(qualification_run=84)
         with self.assertRaisesRegex(recovery.RecoveryError, 'original unsigned release assets'):
             self.prove(head_sha=sha, qualification_run=84, rebuild_ios=True)
+
+    def test_supplemental_release_auto_selects_only_the_verified_skipped_windows_package_route(self):
+        sha = self.source['head_sha']
+        self.source.update(id=42, status='completed', conclusion='failure', run_attempt=1,
+                           display_title='action:release:pool:public:tag:v3.0.0')
+        self.compare.update(status='identical', files=[])
+        tvos = next(job for job in self.jobs if job['name'] == 'Build tvOS developer package (arm64)')
+        tvos.update(id=100, run_id=42, run_attempt=1, head_sha=sha)
+        package = next(job for job in self.jobs if job['name'] == 'package-windows')
+        package.update(id=101, status='completed', conclusion='skipped', runner_id=0,
+                       runner_name='', steps=[], run_id=42, run_attempt=1, head_sha=sha)
+        chocolatey = {'name': 'Package Windows Chocolatey', 'id': 102, 'status': 'completed',
+                      'conclusion': 'skipped', 'runner_id': 0, 'runner_name': '', 'steps': [],
+                      'run_id': 42, 'run_attempt': 1, 'head_sha': sha}
+        x64 = next(job for job in self.jobs if job['name'] == 'Build Windows (x64)')
+        x64.update(id=103, run_id=42, run_attempt=1, head_sha=sha, steps=[
+            {'name': name, 'status': 'completed', 'conclusion': 'success'}
+            for name in ('Build Windows x64', 'Verify Windows bundle contents', 'Upload x64 build')
+        ])
+        self.jobs.extend([
+            chocolatey,
+            {'name': 'Build WebOS TV package (ARMv7)', 'id': 104,
+             'status': 'completed', 'conclusion': 'success'},
+            {'name': 'Release CI / Apple native reliability (iOS)',
+             'status': 'completed', 'conclusion': 'failure'},
+        ])
+        next(job for job in self.jobs if job['name'] == 'build-android').update(
+            conclusion='success', id=105)
+        raw = {'id': 900, 'name': recovery.WINDOWS_RAW_X64_ARTIFACT, 'expired': False,
+               'digest': 'sha256:' + '9' * 64,
+               'workflow_run': {'id': 42, 'head_sha': sha}}
+        with patch.object(recovery, 'api', side_effect=[self.source, self.compare, raw]), \
+                patch.object(recovery, 'collection', side_effect=[self.jobs, [raw]]), \
+                patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 84}):
+            proof = recovery.verify_source_run(42, sha, '3.0.0', qualification_run=84)
+        self.assertTrue(proof['repackage_windows'])
+        self.assertEqual(proof['windows_repackaging']['artifact_id'], raw['id'])
+        self.assertNotIn('package-windows', proof['reused_jobs'])
+        self.assertIn('Build Windows (x64)', proof['reused_jobs'])
 
     def test_supplemental_qualification_does_not_allow_an_unrelated_ci_failure(self):
         sha = self.source['head_sha']

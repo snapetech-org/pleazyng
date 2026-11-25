@@ -4,6 +4,8 @@
 
 - Update release packaging to version 3.0.52 on all supported platforms.
 
+- Keep Windows installer and Chocolatey packaging running after optional release-gate skips, and recover those packages from the verified source x64 checkpoint without recompiling the app.
+
 - Recover the v3.0.51 Homebrew Cask from the exact published macOS app, adding a notarized and attested supplemental DMG while preserving the original release assets and enabling digest-checked upload recovery.
 
 - Add reusable Homebrew recovery for exact successful macOS release checkpoints and verified platform assemblies, while preserving the v3.0.51 recovery proof.

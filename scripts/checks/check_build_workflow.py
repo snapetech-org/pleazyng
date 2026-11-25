@@ -994,10 +994,33 @@ require(
 
 
 package_windows = job("package-windows") + job("windows-msix") + job("windows-chocolatey")
+package_windows_job = job("package-windows")
+windows_msix_job = job("windows-msix")
+windows_chocolatey_job = job("windows-chocolatey")
 validate_windows_signing(package_windows)
 require(
     "needs: [validate-trusted-ref, build-windows]" in package_windows,
     "Windows packaging must depend on the trust check and complete Windows matrix",
+)
+require(
+    "always() && !cancelled()" in package_windows_job
+    and "needs.validate-trusted-ref.result == 'success'" in package_windows_job
+    and "needs.build-windows.result == 'success'" in package_windows_job
+    and "needs.validate-trusted-ref.outputs.repackage_windows == 'true'" in package_windows_job
+    and "needs.build-windows.result == 'skipped'" in package_windows_job
+    and "needs.windows-store-native.result == 'success'" in windows_msix_job
+    and "always() && !cancelled()" in windows_msix_job
+    and "needs.package-windows.result == 'success'" in windows_chocolatey_job
+    and "always() && !cancelled()" in windows_chocolatey_job,
+    "Windows packaging must run after optional skipped ancestors only when its direct trusted dependencies succeeded",
+)
+require(
+    "outputs.repackage_windows == 'true' && needs.validate-trusted-ref.outputs.release_commit" in package_windows_job
+    and "name: Verify immutable Windows package source" in package_windows_job
+    and "--download-windows-build build-x64" in package_windows_job
+    and "ref: ${{ github.sha }}" in package_windows_job
+    and "path: .release-control" in package_windows_job,
+    "qualified Windows packaging recovery must consume only the exact stable-tag checkpoint with trusted recovery tooling",
 )
 for artifact in (
     "windows-x64-build",
@@ -2146,6 +2169,9 @@ require(
     and "needs.build-tizen.result == 'success'" in release_condition
     and "needs.build-tizen.result == 'skipped'" in release_condition
     and "inputs.reuse_repaired_run_id == 'tizen-rebuild'" in release_condition
+    and "needs.validate-trusted-ref.outputs.repackage_windows == 'true'" in release_condition
+    and "needs.package-windows.result == 'success'" in release_condition
+    and "needs.windows-chocolatey.result == 'success'" in release_condition
     and "contains(needs.*.result, 'failure')" in release_condition
     and "contains(needs.*.result, 'cancelled')" in release_condition,
     "draft release creation must require a successful complete build",

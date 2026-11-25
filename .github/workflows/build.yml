@@ -448,6 +448,7 @@ jobs:
       reuse_source_sha: ${{ steps.reuse-platforms.outputs.source_sha }}
       android_source_sha: ${{ steps.reuse-platforms.outputs.android_source_sha }}
       webos_source_sha: ${{ steps.reuse-platforms.outputs.webos_source_sha }}
+      repackage_windows: ${{ steps.reuse-platforms.outputs.repackage_windows }}
       version: ${{ steps.request.outputs.version }}
       include_webos_build: ${{ steps.request.outputs.include_webos_build }}
       include_webos_release: ${{ steps.request.outputs.include_webos_release }}
@@ -3683,11 +3684,12 @@ jobs:
     steps: *windows-build-steps
 
   package-windows:
-    if: ${{ inputs.reuse_platform_run_id == '' && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && needs.validate-trusted-ref.outputs.mode == 'release' }}
+    if: ${{ always() && !cancelled() && needs.validate-trusted-ref.result == 'success' && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && needs.validate-trusted-ref.outputs.mode == 'release' && ((inputs.reuse_platform_run_id == '' && needs.build-windows.result == 'success') || (inputs.reuse_platform_run_id != '' && needs.validate-trusted-ref.outputs.repackage_windows == 'true' && needs.build-windows.result == 'skipped')) }}
     needs: [validate-trusted-ref, build-windows]
     timeout-minutes: 60
     runs-on: windows-2025
     permissions:
+      actions: read
       id-token: write
       attestations: write
       contents: read
@@ -3696,8 +3698,50 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.recovery_source_sha || github.sha }}
+          ref: ${{ needs.validate-trusted-ref.outputs.repackage_windows == 'true' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_source_sha || github.sha }}
           persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: ${{ needs.validate-trusted-ref.outputs.repackage_windows == 'true' }}
+        with:
+          ref: ${{ github.sha }}
+          path: .release-control
+          sparse-checkout: |
+            scripts/**
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Verify immutable Windows package source
+        if: ${{ needs.validate-trusted-ref.outputs.repackage_windows == 'true' }}
+        shell: pwsh
+        env:
+          EXPECTED_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.release_commit }}
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -cne $env:EXPECTED_PRODUCT_SOURCE_SHA) {
+            throw "Windows packaging checkout $actual does not match immutable product source $env:EXPECTED_PRODUCT_SOURCE_SHA"
+          }
+
+      - name: Recover verified immutable Windows x64 checkpoint
+        if: ${{ needs.validate-trusted-ref.outputs.repackage_windows == 'true' }}
+        shell: bash
+        env:
+          SOURCE_RUN: ${{ inputs.reuse_platform_run_id }}
+          QUALIFICATION: ${{ inputs.reuse_repaired_run_id }}
+          SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.reuse_source_sha }}
+          ANDROID_RUN: ${{ inputs.reuse_android_run_id }}
+          WEBOS_RUN: ${{ inputs.reuse_webos_run_id }}
+          REBUILD_TVOS: ${{ inputs.rebuild_tvos }}
+          VERSION: ${{ needs.validate-trusted-ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$QUALIFICATION" =~ ^qualification:([1-9][0-9]*)$ || "$ANDROID_RUN" != "$SOURCE_RUN" || "$WEBOS_RUN" != "$SOURCE_RUN" ]]; then
+            echo "Windows packaging recovery requires the exact supplemental qualification assembly." >&2
+            exit 1
+          fi
+          options=(--qualification-run "${BASH_REMATCH[1]}" --android-run "$SOURCE_RUN" --webos-run "$SOURCE_RUN" --download-windows-build build-x64)
+          if [[ "$REBUILD_TVOS" == true ]]; then options+=(--rebuild-tvos); fi
+          python3 .release-control/scripts/recover_release_platforms.py "$SOURCE_RUN" --head-sha "$SOURCE_SHA" --version "$VERSION" "${options[@]}"
 
       - name: Provision and verify pinned Windows build tools
         shell: pwsh
@@ -3720,6 +3764,7 @@ jobs:
         run: flutter pub get --enforce-lockfile --no-example
 
       - name: Download x64 build
+        if: ${{ needs.validate-trusted-ref.outputs.repackage_windows != 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-x64-build
@@ -3832,7 +3877,7 @@ jobs:
 
   windows-msix:
     name: Package Windows MSIX
-    if: ${{ vars.MSSTORE_PACKAGE_NAME != '' && vars.MSSTORE_PUBLISHER != '' && vars.MSSTORE_PUBLISHER_DISPLAY_NAME != '' && vars.MSSTORE_LIFETIME_PRODUCT_ID != '' && inputs.reuse_platform_run_id == '' && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && needs.validate-trusted-ref.outputs.mode == 'release' }}
+    if: ${{ always() && !cancelled() && needs.validate-trusted-ref.result == 'success' && needs.windows-store-native.result == 'success' && vars.MSSTORE_PACKAGE_NAME != '' && vars.MSSTORE_PUBLISHER != '' && vars.MSSTORE_PUBLISHER_DISPLAY_NAME != '' && vars.MSSTORE_LIFETIME_PRODUCT_ID != '' && inputs.reuse_platform_run_id == '' && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && needs.validate-trusted-ref.outputs.mode == 'release' }}
     needs: [validate-trusted-ref, windows-store-native]
     timeout-minutes: 45
     runs-on: windows-2025
@@ -3904,8 +3949,8 @@ jobs:
 
   windows-chocolatey:
     name: Package Windows Chocolatey
-    continue-on-error: true
-    if: ${{ inputs.reuse_platform_run_id == '' && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && needs.validate-trusted-ref.outputs.mode == 'release' }}
+    continue-on-error: ${{ needs.validate-trusted-ref.outputs.repackage_windows != 'true' }}
+    if: ${{ always() && !cancelled() && needs.validate-trusted-ref.result == 'success' && needs.package-windows.result == 'success' && inputs.runner_pool != '' && (inputs.action == 'build' || inputs.action == 'release') && needs.validate-trusted-ref.outputs.runner_pool == 'public' && (needs.validate-trusted-ref.outputs.action == 'build' || needs.validate-trusted-ref.outputs.action == 'release') && needs.validate-trusted-ref.outputs.mode == 'release' && (inputs.reuse_platform_run_id == '' || needs.validate-trusted-ref.outputs.repackage_windows == 'true') }}
     needs: [validate-trusted-ref, package-windows]
     timeout-minutes: 30
     runs-on: windows-2025
@@ -3918,7 +3963,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.recovery_source_sha || github.sha }}
+          ref: ${{ needs.validate-trusted-ref.outputs.repackage_windows == 'true' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_source_sha || github.sha }}
           persist-credentials: false
 
       - name: Restore signed installer for Chocolatey
@@ -3936,7 +3981,7 @@ jobs:
 
       - name: Package Chocolatey release
         id: chocolatey-package
-        continue-on-error: true
+        continue-on-error: ${{ needs.validate-trusted-ref.outputs.repackage_windows != 'true' }}
         shell: pwsh
         env:
           RELEASE_TAG: ${{ needs.validate-trusted-ref.outputs.release_tag }}
@@ -3992,14 +4037,14 @@ jobs:
 
       - name: Attest Chocolatey package
         if: steps.chocolatey-package.outcome == 'success'
-        continue-on-error: true
+        continue-on-error: ${{ needs.validate-trusted-ref.outputs.repackage_windows != 'true' }}
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: release-packages/pleazyng.${{ steps.version.outputs.version }}.nupkg
 
       - name: Upload Chocolatey package
         if: steps.chocolatey-package.outcome == 'success'
-        continue-on-error: true
+        continue-on-error: ${{ needs.validate-trusted-ref.outputs.repackage_windows != 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-chocolatey
@@ -4600,7 +4645,7 @@ jobs:
 
   create-release:
     needs: [freeze-qualified-source, validate-trusted-ref, build-android, build-webos, build-tizen, build-ios, build-tvos, build-macos, finish-notarization, build-windows, package-windows, windows-msix, windows-chocolatey, build-linux, assemble-linux-arm64]
-    if: ${{ always() && (needs.freeze-qualified-source.result == 'success' || (inputs.candidate_ref == '' && inputs.reuse_platform_run_id == '' && needs.freeze-qualified-source.result == 'skipped' && needs.validate-trusted-ref.outputs.qualified_tag_commit != '' && needs.validate-trusted-ref.outputs.qualified_tag_commit == needs.validate-trusted-ref.outputs.release_commit) || (inputs.reuse_platform_run_id != '' && needs.validate-trusted-ref.outputs.reuse_source_sha != '' && needs.freeze-qualified-source.result == 'skipped')) && inputs.runner_pool != '' && inputs.action == 'release' && needs.validate-trusted-ref.outputs.runner_pool == 'public' && needs.validate-trusted-ref.outputs.action == 'release' && needs.validate-trusted-ref.outputs.mode == 'release' && needs.validate-trusted-ref.result == 'success' && (needs.build-android.result == 'success' || (inputs.reuse_android_run_id != '' && needs.validate-trusted-ref.outputs.android_source_sha != '' && needs.build-android.result == 'skipped')) && ((inputs.reuse_platform_run_id == '' && needs.build-ios.result == 'success' && needs.build-tvos.result == 'success' && needs.build-macos.result == 'success' && needs.build-windows.result == 'success' && needs.package-windows.result == 'success' && needs.build-linux.result == 'success' && (needs.build-webos.result == 'success' || (needs.validate-trusted-ref.outputs.include_webos_build != 'true' && needs.validate-trusted-ref.outputs.include_webos_release != 'true' && needs.build-webos.result == 'skipped')) && (needs.build-tizen.result == 'success' || (needs.validate-trusted-ref.outputs.include_tizen_build != 'true' && needs.build-tizen.result == 'skipped'))) || (inputs.reuse_platform_run_id != '' && needs.validate-trusted-ref.outputs.reuse_source_sha != '' && ((inputs.rebuild_ios && needs.build-ios.result == 'success') || (!inputs.rebuild_ios && needs.build-ios.result == 'skipped')) && ((inputs.rebuild_tvos && needs.build-tvos.result == 'success') || (!inputs.rebuild_tvos && needs.build-tvos.result == 'skipped')) && ((inputs.rebuild_macos && needs.build-macos.result == 'success') || (!inputs.rebuild_macos && needs.build-macos.result == 'skipped')) && needs.build-windows.result == 'skipped' && needs.package-windows.result == 'skipped' && ((inputs.rebuild_linux && needs.build-linux.result == 'success') || (!inputs.rebuild_linux && needs.build-linux.result == 'skipped')) && (needs.build-webos.result == 'success' || (inputs.reuse_webos_run_id != '' && needs.validate-trusted-ref.outputs.webos_source_sha != '' && needs.build-webos.result == 'skipped') || (inputs.reuse_macos_package_run_id != '' && needs.validate-trusted-ref.outputs.reuse_source_sha != '' && needs.build-webos.result == 'skipped') || (needs.validate-trusted-ref.outputs.include_webos_build != 'true' && needs.validate-trusted-ref.outputs.include_webos_release != 'true' && needs.build-webos.result == 'skipped')) && ((inputs.reuse_repaired_run_id == 'tizen-rebuild' && needs.build-tizen.result == 'success') || (inputs.reuse_repaired_run_id != 'tizen-rebuild' && needs.build-tizen.result == 'skipped')))) && (needs.build-macos.result == 'skipped' || needs.validate-trusted-ref.outputs.prepare_homebrew_cask != 'true' || needs.finish-notarization.result == 'success') && needs.assemble-linux-arm64.result == needs.build-linux.result && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    if: ${{ always() && (needs.freeze-qualified-source.result == 'success' || (inputs.candidate_ref == '' && inputs.reuse_platform_run_id == '' && needs.freeze-qualified-source.result == 'skipped' && needs.validate-trusted-ref.outputs.qualified_tag_commit != '' && needs.validate-trusted-ref.outputs.qualified_tag_commit == needs.validate-trusted-ref.outputs.release_commit) || (inputs.reuse_platform_run_id != '' && needs.validate-trusted-ref.outputs.reuse_source_sha != '' && needs.freeze-qualified-source.result == 'skipped')) && inputs.runner_pool != '' && inputs.action == 'release' && needs.validate-trusted-ref.outputs.runner_pool == 'public' && needs.validate-trusted-ref.outputs.action == 'release' && needs.validate-trusted-ref.outputs.mode == 'release' && needs.validate-trusted-ref.result == 'success' && (needs.build-android.result == 'success' || (inputs.reuse_android_run_id != '' && needs.validate-trusted-ref.outputs.android_source_sha != '' && needs.build-android.result == 'skipped')) && ((inputs.reuse_platform_run_id == '' && needs.build-ios.result == 'success' && needs.build-tvos.result == 'success' && needs.build-macos.result == 'success' && needs.build-windows.result == 'success' && needs.package-windows.result == 'success' && needs.build-linux.result == 'success' && (needs.build-webos.result == 'success' || (needs.validate-trusted-ref.outputs.include_webos_build != 'true' && needs.validate-trusted-ref.outputs.include_webos_release != 'true' && needs.build-webos.result == 'skipped')) && (needs.build-tizen.result == 'success' || (needs.validate-trusted-ref.outputs.include_tizen_build != 'true' && needs.build-tizen.result == 'skipped'))) || (inputs.reuse_platform_run_id != '' && needs.validate-trusted-ref.outputs.reuse_source_sha != '' && ((inputs.rebuild_ios && needs.build-ios.result == 'success') || (!inputs.rebuild_ios && needs.build-ios.result == 'skipped')) && ((inputs.rebuild_tvos && needs.build-tvos.result == 'success') || (!inputs.rebuild_tvos && needs.build-tvos.result == 'skipped')) && ((inputs.rebuild_macos && needs.build-macos.result == 'success') || (!inputs.rebuild_macos && needs.build-macos.result == 'skipped')) && needs.build-windows.result == 'skipped' && ((needs.validate-trusted-ref.outputs.repackage_windows == 'true' && needs.package-windows.result == 'success' && needs.windows-chocolatey.result == 'success') || (needs.validate-trusted-ref.outputs.repackage_windows != 'true' && needs.package-windows.result == 'skipped' && needs.windows-chocolatey.result == 'skipped')) && ((inputs.rebuild_linux && needs.build-linux.result == 'success') || (!inputs.rebuild_linux && needs.build-linux.result == 'skipped')) && (needs.build-webos.result == 'success' || (inputs.reuse_webos_run_id != '' && needs.validate-trusted-ref.outputs.webos_source_sha != '' && needs.build-webos.result == 'skipped') || (inputs.reuse_macos_package_run_id != '' && needs.validate-trusted-ref.outputs.reuse_source_sha != '' && needs.build-webos.result == 'skipped') || (needs.validate-trusted-ref.outputs.include_webos_build != 'true' && needs.validate-trusted-ref.outputs.include_webos_release != 'true' && needs.build-webos.result == 'skipped')) && ((inputs.reuse_repaired_run_id == 'tizen-rebuild' && needs.build-tizen.result == 'success') || (inputs.reuse_repaired_run_id != 'tizen-rebuild' && needs.build-tizen.result == 'skipped')))) && (needs.build-macos.result == 'skipped' || needs.validate-trusted-ref.outputs.prepare_homebrew_cask != 'true' || needs.finish-notarization.result == 'success') && needs.assemble-linux-arm64.result == needs.build-linux.result && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     timeout-minutes: 75
     runs-on: ubuntu-24.04
     permissions:
@@ -4977,7 +5022,7 @@ jobs:
           path: artifacts/macos-dmg
 
       - name: Download Windows x64 artifact
-        if: ${{ steps.release-mode.outputs.append_only != 'true' && inputs.reuse_platform_run_id == '' }}
+        if: ${{ steps.release-mode.outputs.append_only != 'true' && (inputs.reuse_platform_run_id == '' || needs.validate-trusted-ref.outputs.repackage_windows == 'true') }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-x64-portable
@@ -5011,7 +5056,7 @@ jobs:
           subject-path: artifacts/windows-arm64-portable/pleazyng-windows-arm64-portable.zip
 
       - name: Download Windows installer artifact
-        if: ${{ steps.release-mode.outputs.append_only != 'true' && inputs.reuse_platform_run_id == '' }}
+        if: ${{ steps.release-mode.outputs.append_only != 'true' && (inputs.reuse_platform_run_id == '' || needs.validate-trusted-ref.outputs.repackage_windows == 'true') }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-installer
@@ -5025,8 +5070,8 @@ jobs:
           path: artifacts/windows-msix
 
       - name: Download Chocolatey package
-        continue-on-error: true
-        if: ${{ steps.release-mode.outputs.append_only != 'true' && inputs.reuse_platform_run_id == '' }}
+        continue-on-error: ${{ needs.validate-trusted-ref.outputs.repackage_windows != 'true' }}
+        if: ${{ steps.release-mode.outputs.append_only != 'true' && (inputs.reuse_platform_run_id == '' || needs.validate-trusted-ref.outputs.repackage_windows == 'true') }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: windows-chocolatey
