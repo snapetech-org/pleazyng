@@ -1358,6 +1358,13 @@ def capture(args: argparse.Namespace) -> None:
     simulator_signing: dict[str, Any] | None = None
     installed_app_receipt: dict[str, Any] | None = None
     try:
+        xcode_version = command(["xcodebuild", "-version"], capture=True, timeout=60)
+        write_json(output / "xcode-version-preflight.json", {
+            "command": ["xcodebuild", "-version"],
+            "output": xcode_version,
+            "developer_directory": command(["xcode-select", "-p"], capture=True, timeout=30),
+            "qualification": "Captured before simulator creation and app installation.",
+        })
         device = create_storekit_simulator(
             args.display_target,
             args.run_id,
@@ -1522,7 +1529,7 @@ def capture(args: argparse.Namespace) -> None:
             "storekit_restore_sync": restore_sync_evidence,
             "capture_display_target": args.display_target,
             "simulator": device,
-            "xcode_version": command(["xcodebuild", "-version"], capture=True, timeout=60),
+            "xcode_version": xcode_version,
             "xcode_test_result_bundle": result_bundle.name,
             "test_runner_build_log_sha256": sha256_file(build_log),
             "ui_test_log_sha256": sha256_file(test_log),

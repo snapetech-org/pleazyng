@@ -1054,6 +1054,12 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('"status": "not-applied"', capture_body)
         self.assertIn('expected_sha256=receipt["product_app_bundle_sha256"]', capture_body)
         self.assertLess(
+            capture_body.index('xcode_version = command(["xcodebuild", "-version"], capture=True, timeout=60)'),
+            capture_body.index('device = create_storekit_simulator('),
+        )
+        self.assertIn('output / "xcode-version-preflight.json"', capture_body)
+        self.assertIn('"xcode_version": xcode_version', capture_body)
+        self.assertLess(
             capture_body.index("installed_app_receipt = install_verified_app_on_simulator("),
             capture_body.index("test_command = ["),
         )
