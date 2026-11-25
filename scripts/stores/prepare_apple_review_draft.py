@@ -67,6 +67,19 @@ def prepare(api, platform, version, build_number, *, inspect_only=False):
 
 
 def inspect_review(api, draft_id, platform):
+    contact_fields = ('contactFirstName', 'contactLastName', 'contactPhone', 'contactEmail')
+    review_fields = (*contact_fields, 'demoAccountRequired', 'notes')
+    query = urlencode({'include': 'appStoreReviewDetail', 'fields[appStoreVersions]': 'appStoreReviewDetail',
+                       'fields[appStoreReviewDetails]': ','.join(review_fields)})
+    version = api.request(f'/v1/appStoreVersions/{draft_id}?{query}')
+    details = next((item['attributes'] for item in version.get('included', [])
+                    if item['type'] == 'appStoreReviewDetails'), {})
+    # Workflow receipts only record readiness. Keep contact information and notes in Apple.
+    review_detail = {
+        'contact_complete': all(bool(details.get(field)) for field in contact_fields),
+        'demo_account_required': details.get('demoAccountRequired'),
+        'notes_present': bool(details.get('notes')),
+    }
     localizations = []
     for locale in api.items(f'/v1/appStoreVersions/{draft_id}/appStoreVersionLocalizations'):
         metadata = locale['attributes']
@@ -88,7 +101,8 @@ def inspect_review(api, draft_id, platform):
         if product['attributes'].get('productId') in {'pleazyng_7_day_trial', 'pleazyng_lifetime_unlock'}
     ]
     submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions?' + urlencode({'filter[platform]': platform}))
-    return {'localizations': localizations, 'purchases': purchase_states, 'review_submissions': [
+    return {'localizations': localizations, 'app_review_detail': review_detail,
+            'purchases': purchase_states, 'review_submissions': [
         {key: submission['attributes'].get(key) for key in ('state', 'submittedDate')}
         for submission in submissions if submission['attributes'].get('platform') == platform
     ]}

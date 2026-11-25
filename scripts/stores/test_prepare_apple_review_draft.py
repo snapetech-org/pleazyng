@@ -29,6 +29,11 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
         if path in ('/v1/builds/tv-build/preReleaseVersion', '/v1/builds/phone-build/preReleaseVersion'):
             platform = 'TV_OS' if 'tv-build' in path else 'IOS'
             return {'data': {'type': 'preReleaseVersions', 'attributes': {'platform': platform, 'version': '3.0.51'}}}
+        if path.startswith('/v1/appStoreVersions/draft?include=appStoreReviewDetail&'):
+            return {'included': [{'type': 'appStoreReviewDetails', 'attributes': {
+                'contactFirstName': 'Example', 'contactLastName': 'Reviewer', 'contactPhone': '5550100',
+                'contactEmail': 'test@example.invalid', 'demoAccountRequired': False, 'notes': 'Private review notes',
+            }}]}
         self.assertEqual(path, self.relationship)
         if method == 'PATCH':
             self.assertEqual(body, {'data': self.exact})
@@ -72,6 +77,10 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
         self.assertEqual(receipt['localizations'][0]['screenshots'], [{'group': 'TV', 'state': 'APPROVED'}])
         self.assertEqual(receipt['purchases'][0]['state'], 'READY_TO_SUBMIT')
         self.assertEqual(receipt['review_submissions'][0]['state'], 'READY_FOR_REVIEW')
+        self.assertEqual(receipt['app_review_detail'], {
+            'contact_complete': True, 'demo_account_required': False, 'notes_present': True,
+        })
+        self.assertNotIn('test@example.invalid', str(receipt))
         self.assert_no_patch()
 
     def assert_no_patch(self):
