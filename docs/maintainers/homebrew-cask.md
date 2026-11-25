@@ -57,6 +57,69 @@ Do not upload with `--clobber` or edit the original core checksum manifest.
 
 The Developer ID Application certificate was issued on 2026-11-05 for team `DM9A59DC85`, and the two dedicated macOS certificate secrets are configured. Existing iOS distribution credentials are separate and remain unchanged. Notarization uses the existing App Store Connect API key; an Apple app-specific password and persistent keychain password are not required. Native import, signing, notarization and Gatekeeper still need to pass on the qualified release.
 
+## Stable-release recovery
+
+For a published stable release created by one successful direct full run of
+`.github/workflows/build.yml`, use **Recover Stable Homebrew Cask** on `main`.
+Supply the exact release tag, source run ID and attempt. The workflow requires
+successful `build-macos` and `create-release` jobs in that same attempt.
+It verifies the published tag resolves to that run's source commit, checks the
+attested core checksum manifest and immutable DMG digest, and confirms the app
+inside the published DMG has the same tree as the run's durable unsigned Mac
+compilation checkpoint before signing a working copy. The original DMG and
+core manifest remain unchanged.
+
+```sh
+gh workflow run recover-homebrew-cask.yml \
+  --repo snapetech-org/pleazyng --ref main \
+  -f release_tag=v3.0.52 \
+  -f source_run_id="$RELEASE_RUN_ID" \
+  -f source_attempt="$RELEASE_ATTEMPT"
+```
+
+If the published release was assembled from a separate source run, pass that
+source run and checkpoint attempt as above, then also supply the successful
+assembly run ID and attempt:
+
+```sh
+gh workflow run recover-homebrew-cask.yml \
+  --repo snapetech-org/pleazyng --ref main \
+  -f release_tag=v3.0.52 \
+  -f source_run_id="$SOURCE_RUN_ID" \
+  -f source_attempt="$SOURCE_ATTEMPT" \
+  -f assembly_run_id="$ASSEMBLY_RUN_ID" \
+  -f assembly_attempt="$ASSEMBLY_ATTEMPT"
+```
+
+In this mode, the source attempt must contain a successful `build-macos`
+checkpoint and identify the versioned source commit. The assembly attempt must
+have a successful `create-release` job, and its signed checksum manifest and
+`platform-reuse-provenance.json` must bind the release assets to that exact
+assembly and original Mac source run. The recovery receipt preserves both run
+identities, the checkpoint digest and successful job IDs. Releases assembled
+from platform reuse are rejected when the separate assembly identity or proof
+is missing.
+
+After all four attested recovery assets are attached, update the custom tap:
+
+```sh
+gh workflow run update-packages.yml --repo snapetech-org/pleazyng --ref main \
+  -f action=update-packages -f runner_pool=public -f release_tag=v3.0.52
+```
+
+If the release accepts only part of the recovery bundle, resume the saved
+attempt without signing again:
+
+```sh
+gh workflow run resume-homebrew-cask.yml \
+  --repo snapetech-org/pleazyng --ref main \
+  -f source_run_id="$RECOVERY_RUN_ID" -f source_attempt="$RECOVERY_ATTEMPT"
+```
+
+Keep the pinned v3.0.51 recovery workflow and its historical assembly evidence
+unchanged; the reusable workflow handles direct releases and later platform
+assemblies with explicit run identities and provenance.
+
 ## Release handoff
 
 With `--publish`, the release controller updates the Pleazyng tap only when the

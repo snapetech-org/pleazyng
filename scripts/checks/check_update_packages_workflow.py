@@ -11,13 +11,19 @@ from workflow_yaml import job_block
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/update-packages.yml"
 RECOVERY_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/recover-homebrew-cask-v3051.yml"
 RESUME_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/resume-homebrew-cask-v3051.yml"
+DIRECT_RECOVERY_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/recover-homebrew-cask.yml"
+DIRECT_RESUME_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/resume-homebrew-cask.yml"
 text = WORKFLOW.read_text(encoding="utf-8")
 recovery_text = RECOVERY_WORKFLOW.read_text(encoding="utf-8")
 resume_text = RESUME_WORKFLOW.read_text(encoding="utf-8")
+direct_recovery_text = DIRECT_RECOVERY_WORKFLOW.read_text(encoding="utf-8")
+direct_resume_text = DIRECT_RESUME_WORKFLOW.read_text(encoding="utf-8")
 root = Path(__file__).resolve().parents[2]
 recovery_script = (root / "scripts/recover_macos_dmg_for_homebrew.py").read_text(encoding="utf-8")
 upload_script = (root / "scripts/upload_homebrew_recovery_assets.py").read_text(encoding="utf-8")
 resume_script = (root / "scripts/resume_homebrew_recovery_upload.py").read_text(encoding="utf-8")
+direct_recovery_script = (root / "scripts/recover_macos_dmg_for_homebrew_direct.py").read_text(encoding="utf-8")
+direct_resume_script = (root / "scripts/resume_homebrew_recovery_upload_direct.py").read_text(encoding="utf-8")
 errors: list[str] = []
 
 
@@ -135,6 +141,15 @@ require(
     "Homebrew must pin and validate the distinct notarized recovery DMG when present",
 )
 require(
+    'homebrew_recovery_kind: ${{ steps.release.outputs.homebrew_recovery_kind }}' in resolver
+    and 'HOMEBREW_RECOVERY_KIND: ${{ needs.resolve-release.outputs.homebrew_recovery_kind }}' in homebrew
+    and 'HOMEBREW_RECOVERY_KIND" == legacy-assembly' in homebrew
+    and 'HOMEBREW_RECOVERY_KIND" == platform-assembly' in homebrew
+    and 'HOMEBREW_RECOVERY_KIND" != direct-source' in homebrew
+    and 'recover_macos_dmg_for_homebrew_direct.py" verify' in homebrew,
+    "Homebrew publication must verify direct-source and platform-reuse recovery receipts separately",
+)
+require(
     'scripts/check_homebrew_cask_update.py' in homebrew
     and '--version "$RELEASE_VERSION"' in homebrew,
     "Homebrew tap updates must reject version rollbacks and same-version byte changes",
@@ -185,6 +200,49 @@ require(
     and "per_page=30&page={page}" in recovery_script
     and "HTTP 5\\d\\d" in recovery_script,
     "v3.0.51 source-job verification must page through smaller responses and retry transient API failures",
+)
+direct_recovery = job_block(direct_recovery_text, "recover-homebrew")
+direct_resolver = job_block(direct_recovery_text, "resolve-direct-release")
+require(bool(direct_recovery) and bool(direct_resolver), "missing direct stable recovery jobs")
+require(
+    "runs-on: macos-26-intel" in direct_recovery
+    and "runs-on: ubuntu-24.04" in direct_resolver
+    and "github.ref == 'refs/heads/main'" in direct_recovery_text
+    and "source_run_id" in direct_recovery_text
+    and "source_attempt" in direct_recovery_text,
+    "direct stable recovery must resolve exact source identities and use hosted runners from canonical main",
+)
+for required in (
+    "verify_direct_source", "create-release", "build-macos", "restore_portable_checkpoint",
+    "platform-reuse-provenance.json", "app_tree_sha256", "verify_build_attestation",
+    "hdiutil attach", "codesign --verify --deep --strict", "notarization_checkpoint.py verify",
+    "xcrun stapler validate", "spctl --assess --type execute", "actions/attest-build-provenance",
+    "retention-days: 90", "recover_macos_dmg_for_homebrew_direct.py upload",
+):
+    require(required in direct_recovery_text or required in direct_recovery_script,
+            f"direct recovery is missing source/signing/publication check {required}")
+require(
+    "actions: read" in direct_recovery
+    and "attestations: write" in direct_recovery
+    and "contents: write" in direct_recovery
+    and "id-token: write" in direct_recovery
+    and "self-hosted" not in direct_recovery
+    and "macos-compiled-app-" in direct_recovery_script
+    and "source_run_id" in direct_recovery_script
+    and "release_job_id" in direct_recovery_script
+    and "assembly_run_id" in direct_recovery_script
+    and "verify_platform_reuse" in direct_recovery_script
+    and "verify_build_attestation" in direct_recovery_script
+    and "assembly_run_id" in direct_recovery_text,
+    "stable recovery must attest append-only assets and bind platform assemblies to their exact provenance",
+)
+require(
+    "resume_homebrew_recovery_upload_direct.py" in direct_resume_text
+    and "source_run_id" in direct_resume_text
+    and "source_attempt" in direct_resume_text
+    and "runInvocationURI" in direct_resume_script
+    and "--clobber" not in direct_resume_text,
+    "direct stable partial uploads must resume from their exact attested artifact without replacement",
 )
 require(
     "runs-on: ubuntu-24.04" in resume_text

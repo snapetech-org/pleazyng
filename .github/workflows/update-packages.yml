@@ -42,6 +42,7 @@ jobs:
       homebrew_asset: ${{ steps.release.outputs.homebrew_asset }}
       homebrew_checksums: ${{ steps.release.outputs.homebrew_checksums }}
       homebrew_recovery: ${{ steps.release.outputs.homebrew_recovery }}
+      homebrew_recovery_kind: ${{ steps.release.outputs.homebrew_recovery_kind }}
     steps:
       - name: Require the default branch for manual runs
         if: github.event_name == 'workflow_dispatch'
@@ -150,10 +151,20 @@ jobs:
             echo "homebrew_asset=pleazyng-macos-notarized.dmg" >> "$GITHUB_OUTPUT"
             echo "homebrew_checksums=pleazyng-homebrew-SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
             echo "homebrew_recovery=true" >> "$GITHUB_OUTPUT"
+            if jq -e '[.assets[]?.name] | any(. == "platform-reuse-provenance.json")' <<< "$RELEASE" >/dev/null; then
+              if [[ "$RESOLVED_TAG" == v3.0.51 ]]; then
+                echo "homebrew_recovery_kind=legacy-assembly" >> "$GITHUB_OUTPUT"
+              else
+                echo "homebrew_recovery_kind=platform-assembly" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "homebrew_recovery_kind=direct-source" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "homebrew_asset=pleazyng-macos.dmg" >> "$GITHUB_OUTPUT"
             echo "homebrew_checksums=SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
             echo "homebrew_recovery=false" >> "$GITHUB_OUTPUT"
+            echo "homebrew_recovery_kind=none" >> "$GITHUB_OUTPUT"
           fi
 
           if ((${#SKIP_REASONS[@]})); then
@@ -186,6 +197,7 @@ jobs:
       HOMEBREW_ASSET_NAME: ${{ needs.resolve-release.outputs.homebrew_asset }}
       HOMEBREW_CHECKSUMS_NAME: ${{ needs.resolve-release.outputs.homebrew_checksums }}
       HOMEBREW_RECOVERY: ${{ needs.resolve-release.outputs.homebrew_recovery }}
+      HOMEBREW_RECOVERY_KIND: ${{ needs.resolve-release.outputs.homebrew_recovery_kind }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -201,8 +213,13 @@ jobs:
           patterns=(--pattern "$HOMEBREW_ASSET_NAME" --pattern "$HOMEBREW_CHECKSUMS_NAME" \
             --pattern snapetech-pleazyng.rb)
           if [[ "$HOMEBREW_RECOVERY" == true ]]; then
-            patterns+=(--pattern SHA256SUMS.txt --pattern platform-reuse-provenance.json \
-              --pattern pleazyng-homebrew-recovery.json)
+            patterns+=(--pattern SHA256SUMS.txt --pattern pleazyng-homebrew-recovery.json)
+            if [[ "$HOMEBREW_RECOVERY_KIND" == legacy-assembly || "$HOMEBREW_RECOVERY_KIND" == platform-assembly ]]; then
+              patterns+=(--pattern platform-reuse-provenance.json)
+            elif [[ "$HOMEBREW_RECOVERY_KIND" != direct-source ]]; then
+              echo "Unknown Homebrew recovery provenance kind: $HOMEBREW_RECOVERY_KIND" >&2
+              exit 1
+            fi
           fi
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${patterns[@]}"
           python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" snapetech-pleazyng.rb \
@@ -212,11 +229,24 @@ jobs:
             python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" "$HOMEBREW_ASSET_NAME" --repo "$GITHUB_REPOSITORY"
             python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" "$HOMEBREW_CHECKSUMS_NAME" --repo "$GITHUB_REPOSITORY"
             python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" pleazyng-homebrew-recovery.json --repo "$GITHUB_REPOSITORY"
-            python3 "$GITHUB_WORKSPACE/scripts/recover_macos_dmg_for_homebrew.py" verify \
-              --tag "$RELEASE_TAG" --version "$RELEASE_VERSION" \
-              --core-checksums SHA256SUMS.txt --homebrew-checksums "$HOMEBREW_CHECKSUMS_NAME" \
-              --platform-reuse platform-reuse-provenance.json \
-              --receipt pleazyng-homebrew-recovery.json --asset "$HOMEBREW_ASSET_NAME"
+            if [[ "$HOMEBREW_RECOVERY_KIND" == legacy-assembly ]]; then
+              python3 "$GITHUB_WORKSPACE/scripts/recover_macos_dmg_for_homebrew.py" verify \
+                --tag "$RELEASE_TAG" --version "$RELEASE_VERSION" \
+                --core-checksums SHA256SUMS.txt --homebrew-checksums "$HOMEBREW_CHECKSUMS_NAME" \
+                --platform-reuse platform-reuse-provenance.json \
+                --receipt pleazyng-homebrew-recovery.json --asset "$HOMEBREW_ASSET_NAME"
+            elif [[ "$HOMEBREW_RECOVERY_KIND" == platform-assembly ]]; then
+              python3 "$GITHUB_WORKSPACE/scripts/recover_macos_dmg_for_homebrew_direct.py" verify \
+                --tag "$RELEASE_TAG" --version "$RELEASE_VERSION" \
+                --core-checksums SHA256SUMS.txt --homebrew-checksums "$HOMEBREW_CHECKSUMS_NAME" \
+                --platform-reuse platform-reuse-provenance.json \
+                --receipt pleazyng-homebrew-recovery.json --asset "$HOMEBREW_ASSET_NAME"
+            else
+              python3 "$GITHUB_WORKSPACE/scripts/recover_macos_dmg_for_homebrew_direct.py" verify \
+                --tag "$RELEASE_TAG" --version "$RELEASE_VERSION" \
+                --core-checksums SHA256SUMS.txt --homebrew-checksums "$HOMEBREW_CHECKSUMS_NAME" \
+                --receipt pleazyng-homebrew-recovery.json --asset "$HOMEBREW_ASSET_NAME"
+            fi
           fi
           python3 "$GITHUB_WORKSPACE/scripts/generate_homebrew_cask.py" \
             --version "$RELEASE_VERSION" --checksums "$HOMEBREW_CHECKSUMS_NAME" \

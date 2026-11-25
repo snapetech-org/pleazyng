@@ -6,6 +6,8 @@
 
 - Recover the v3.0.51 Homebrew Cask from the exact published macOS app, adding a notarized and attested supplemental DMG while preserving the original release assets and enabling digest-checked upload recovery.
 
+- Add reusable Homebrew recovery for exact successful macOS release checkpoints and verified platform assemblies, while preserving the v3.0.51 recovery proof.
+
 - Cancel pending Steam relay connections when permission ends and retry relay hosts that connect but never acknowledge readiness.
 - Keep Steam datagrams moving over the relay when the UDP route expires or a direct send cannot queue the packet. Try other IPv4 addresses for a Steam computer before deciding its local route is unavailable.
 

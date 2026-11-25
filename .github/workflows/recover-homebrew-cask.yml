@@ -1,0 +1,439 @@
+name: Recover Stable Homebrew Cask
+run-name: action:homebrew:recover:tag:${{ inputs.release_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact published stable release tag to recover
+        required: true
+        type: string
+      source_run_id:
+        description: Exact versioned source run containing the successful Mac compilation checkpoint
+        required: true
+        type: string
+      source_attempt:
+        description: Attempt number containing the Mac checkpoint
+        required: true
+        type: string
+      assembly_run_id:
+        description: Successful release assembly run when the published release reused the Mac checkpoint
+        required: false
+        type: string
+      assembly_attempt:
+        description: Attempt number that published the assembled release
+        required: false
+        type: string
+
+concurrency:
+  group: homebrew-cask-recovery-direct-stable
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  resolve-direct-release:
+    name: Verify published release and exact source runs
+    if: ${{ github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      version: ${{ steps.resolve.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve exact direct release source and successful jobs
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+          ASSEMBLY_RUN_ID: ${{ inputs.assembly_run_id }}
+          ASSEMBLY_ATTEMPT: ${{ inputs.assembly_attempt }}
+        run: |
+          set -euo pipefail
+          ASSEMBLY_ARGS=()
+          if [[ -n "$ASSEMBLY_RUN_ID" || -n "$ASSEMBLY_ATTEMPT" ]]; then
+            if [[ -z "$ASSEMBLY_RUN_ID" || -z "$ASSEMBLY_ATTEMPT" ]]; then
+              echo "Assembly run ID and attempt must be supplied together." >&2
+              exit 1
+            fi
+            ASSEMBLY_ARGS+=(--assembly-run-id "$ASSEMBLY_RUN_ID" --assembly-attempt "$ASSEMBLY_ATTEMPT")
+          fi
+          python3 scripts/recover_macos_dmg_for_homebrew_direct.py resolve \
+            --tag "$RELEASE_TAG" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-attempt "$SOURCE_ATTEMPT" \
+            "${ASSEMBLY_ARGS[@]}"
+
+  recover-homebrew:
+    needs: resolve-direct-release
+    if: ${{ needs.resolve-direct-release.result == 'success' && github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' }}
+    runs-on: macos-26-intel
+    timeout-minutes: 150
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.resolve-direct-release.outputs.version }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+      SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+      ASSEMBLY_RUN_ID: ${{ inputs.assembly_run_id }}
+      ASSEMBLY_ATTEMPT: ${{ inputs.assembly_attempt }}
+      COMPILE_SOURCE_SHA: ${{ needs.resolve-direct-release.outputs.source_sha }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare recovery workspace
+        run: |
+          set -euo pipefail
+          RECOVERY_ROOT="$RUNNER_TEMP/pleazyng-homebrew-direct"
+          mkdir -p "$RECOVERY_ROOT"
+          echo "PLEAZYNG_HOME_BREW_RECOVERY=$RECOVERY_ROOT" >> "$GITHUB_ENV"
+          echo "PLEAZYNG_APPLE_WORKSPACE=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+
+      - name: Restore prior notarization submission
+        id: restore-notarization
+        if: ${{ github.run_attempt > 1 }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/apple/resume_notarization_checkpoint.py --output "$GITHUB_WORKSPACE"
+
+      - name: Verify published source and recover exact compiled app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ASSEMBLY_ARGS=()
+          if [[ -n "$ASSEMBLY_RUN_ID" || -n "$ASSEMBLY_ATTEMPT" ]]; then
+            if [[ -z "$ASSEMBLY_RUN_ID" || -z "$ASSEMBLY_ATTEMPT" ]]; then
+              echo "Assembly run ID and attempt must be supplied together." >&2
+              exit 1
+            fi
+            ASSEMBLY_ARGS+=(--assembly-run-id "$ASSEMBLY_RUN_ID" --assembly-attempt "$ASSEMBLY_ATTEMPT")
+          fi
+          python3 scripts/recover_macos_dmg_for_homebrew_direct.py prepare \
+            --tag "$RELEASE_TAG" \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-attempt "$SOURCE_ATTEMPT" \
+            "${ASSEMBLY_ARGS[@]}" \
+            --release-dir "$PLEAZYNG_HOME_BREW_RECOVERY/release-assets" \
+            --checkpoint-dir "$PLEAZYNG_HOME_BREW_RECOVERY/compiled-checkpoint" \
+            --output-app "$PLEAZYNG_HOME_BREW_RECOVERY/source/Pleazyng.app" \
+            --output-receipt "$PLEAZYNG_HOME_BREW_RECOVERY/prepared-receipt.json"
+
+      - name: Check Developer ID and notarization credentials
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          for name in MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER_ID APPLE_API_PRIVATE_KEY APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Required Homebrew signing credential $name is missing." >&2
+              exit 1
+            fi
+          done
+          [[ "$APPLE_TEAM_ID" == DM9A59DC85 ]]
+
+      - name: Import Developer ID certificate
+        id: macos-signing-identity
+        if: steps.restore-notarization.outputs.restored != 'true'
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          python3 - "$RUNNER_TEMP/macos-original-keychains.json" <<'PYCHAIN'
+          import json, shlex, subprocess, sys
+          original = subprocess.check_output(['security', 'list-keychains', '-d', 'user'], text=True)
+          with open(sys.argv[1], 'x') as output:
+              json.dump(shlex.split(original), output)
+          PYCHAIN
+          KEYCHAIN_PASSWORD="$(/usr/bin/uuidgen)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 -D -o "$CERTIFICATE_PATH"
+          security import "$CERTIFICATE_PATH" -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          CHAIN_PATH="$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 15 --max-time 90 \
+            https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$CHAIN_PATH"
+          printf '%s  %s\n' f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a "$CHAIN_PATH" | shasum -a 256 --check
+          chain_fingerprints="$(security find-certificate -a -Z "$KEYCHAIN_PATH")"
+          if [[ "$chain_fingerprints" != *"F16CD3C54C7F83CEA4BF1A3E6A0819C8AAA8E4A1528FD144715F350643D2DF3A"* ]]; then
+            security import "$CHAIN_PATH" -k "$KEYCHAIN_PATH"
+          fi
+          python3 - "$KEYCHAIN_PATH" "$RUNNER_TEMP/macos-original-keychains.json" <<'PYCHAIN'
+          import json, subprocess, sys
+          with open(sys.argv[2]) as source:
+              original = json.load(source)
+          subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', sys.argv[1], *original], check=True)
+          PYCHAIN
+          identities="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          IDENTITY="$(printf '%s\n' "$identities" | python3 -c 'import os,re,sys; ids=re.findall(r"\b([A-F0-9]{40}) \"Developer ID Application: [^\"\n]+ \(" + re.escape(os.environ["APPLE_TEAM_ID"]) + r"\)\"", sys.stdin.read()); assert len(ids)==1, "Expected one valid Developer ID identity for the configured team"; print(ids[0])')"
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          printf 'int main(void) { return 0; }\n' | xcrun clang -x c - -o "$RUNNER_TEMP/macos-signing-probe"
+          codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime "$RUNNER_TEMP/macos-signing-probe"
+          codesign --verify --strict "$RUNNER_TEMP/macos-signing-probe"
+
+      - name: Verify App Store Connect notarization credentials
+        if: steps.restore-notarization.outputs.restored != 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          API_KEY_PATH="$RUNNER_TEMP/pleazyng-macos-notary-api-key.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$API_KEY_PATH"
+          xcrun notarytool history --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" --output-format json > /dev/null
+
+      - name: Stage verified app for signing
+        if: steps.restore-notarization.outputs.restored != 'true'
+        run: |
+          set -euo pipefail
+          APP_PATH="$GITHUB_WORKSPACE/build/macos/Build/Products/Release/Pleazyng.app"
+          if [[ -e "$APP_PATH" || -L "$APP_PATH" ]]; then
+            echo "Refusing to overwrite an existing macOS application." >&2
+            exit 1
+          fi
+          mkdir -p "$(dirname "$APP_PATH")"
+          ditto "$PLEAZYNG_HOME_BREW_RECOVERY/source/Pleazyng.app" "$APP_PATH"
+
+      - name: Sign application with Developer ID
+        if: steps.restore-notarization.outputs.restored != 'true'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          IDENTITY="${{ steps.macos-signing-identity.outputs.identity }}"
+          APP_PATH="$GITHUB_WORKSPACE/build/macos/Build/Products/Release/Pleazyng.app"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          python3 scripts/apple/prepare_macos_app_for_signing.py "$APP_PATH" \
+            --entitlements-source macos/Runner/Release.entitlements \
+            --entitlements-output "$RUNNER_TEMP/macos-release-entitlements.plist"
+          APP_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+          test -x "$APP_PATH/Contents/MacOS/plezy_visualizer_helper"
+          find "$APP_PATH/Contents/Frameworks" "$APP_PATH/Contents/MacOS" -type f -perm +111 ! -name '*.dylib' ! -path '*/Headers/*' ! -path '*/Modules/*' -print0 \
+            | while IFS= read -r -d '' exe; do
+              if [[ "$exe" == "$APP_PATH/Contents/MacOS/$APP_EXECUTABLE" ]]; then continue; fi
+              kind="$(/usr/bin/file -b "$exe")"
+              if [[ "$kind" != *'Mach-O'* || "$kind" == *'ar archive'* || "$kind" == *' object'* ]]; then continue; fi
+              preserve=()
+              if codesign -d "$exe" >/dev/null 2>&1; then preserve=(--preserve-metadata=entitlements); fi
+              codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime ${preserve[@]+"${preserve[@]}"} "$exe"
+            done
+          find "$APP_PATH/Contents/Frameworks" \( -name '*.xpc' -o -name '*.app' -o -name '*.framework' -o -name '*.dylib' \) -print0 \
+            | sort -zr \
+            | while IFS= read -r -d '' item; do
+              preserve=()
+              if codesign -d "$item" >/dev/null 2>&1; then preserve=(--preserve-metadata=entitlements); fi
+              codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime ${preserve[@]+"${preserve[@]}"} "$item"
+            done
+          python3 scripts/apple/finalize_macos_runtime_receipts.py "$APP_PATH"
+          codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime \
+            --entitlements "$RUNNER_TEMP/macos-release-entitlements.plist" "$APP_PATH"
+
+      - name: Verify Developer ID signature
+        run: |
+          set -euo pipefail
+          APP_PATH="$GITHUB_WORKSPACE/build/macos/Build/Products/Release/Pleazyng.app"
+          codesign --verify --deep --strict --verbose=2 \
+            --test-requirement='=identifier "org.snapetech.pleazyng" and anchor apple generic and certificate leaf[subject.OU] = "DM9A59DC85"' "$APP_PATH"
+          codesign -d --entitlements :- "$APP_PATH" > "$RUNNER_TEMP/macos-entitlements.plist"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.allow-jit' "$RUNNER_TEMP/macos-entitlements.plist"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.security.cs.allow-unsigned-executable-memory' "$RUNNER_TEMP/macos-entitlements.plist"
+
+      - name: Submit notarization request
+        id: notarization
+        if: steps.restore-notarization.outputs.restored != 'true'
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          APP_PATH="$GITHUB_WORKSPACE/build/macos/Build/Products/Release/Pleazyng.app"
+          API_KEY_PATH="$RUNNER_TEMP/pleazyng-macos-notary-api-key.p8"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$API_KEY_PATH"
+          ditto -c -k --keepParent "$APP_PATH" "$GITHUB_WORKSPACE/notarization.zip"
+          xcrun notarytool submit "$GITHUB_WORKSPACE/notarization.zip" --key "$API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" \
+            --output-format json > "$GITHUB_WORKSPACE/notary-submission.json"
+          SUBMISSION_ID="$(python3 scripts/apple/notarization_checkpoint.py record \
+            "$GITHUB_WORKSPACE/notarization.zip" "$GITHUB_WORKSPACE/notary-submission.json" \
+            "$GITHUB_WORKSPACE/notarization-checkpoint.json")"
+          echo "submission_id=$SUBMISSION_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Attest notarization submission checkpoint
+        if: steps.notarization.outcome == 'success'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            notarization.zip
+            notarization-checkpoint.json
+
+      - name: Upload notarization checkpoint
+        if: steps.notarization.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: macos-notarization-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            notarization.zip
+            notarization-checkpoint.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Wait for Apple notarization acceptance
+        id: notarization-status
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          SUBMISSION_ID: ${{ steps.restore-notarization.outputs.submission_id || steps.notarization.outputs.submission_id }}
+        run: |
+          set -euo pipefail
+          API_KEY_PATH="$RUNNER_TEMP/pleazyng-macos-notary-api-key.p8"
+          umask 077
+          trap 'rm -f "$API_KEY_PATH"' EXIT
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$API_KEY_PATH"
+          python3 scripts/apple/notarization_checkpoint.py verify notarization.zip \
+            notarization-checkpoint.json "$SUBMISSION_ID" --source-sha "$GITHUB_SHA" \
+            --product-source-sha "$COMPILE_SOURCE_SHA"
+          while true; do
+            xcrun notarytool info "$SUBMISSION_ID" --key "$API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER_ID" --output-format json > notary-result.json
+            STATUS="$(python3 -c 'import json; print(json.load(open("notary-result.json")).get("status", ""))')"
+            case "$STATUS" in
+              Accepted) break ;;
+              'In Progress') sleep 30 ;;
+              *) echo "Apple notarization ended with status: $STATUS" >&2; exit 1 ;;
+            esac
+          done
+          python3 scripts/apple/notarization_checkpoint.py accept notarization.zip notary-result.json \
+            notarization-checkpoint.json "$SUBMISSION_ID"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Staple and verify the notarization ticket
+        run: |
+          set -euo pipefail
+          APP_PATH="$GITHUB_WORKSPACE/build/macos/Build/Products/Release/Pleazyng.app"
+          xcrun stapler staple "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+
+      - name: Assess Gatekeeper acceptance
+        run: |
+          set -euo pipefail
+          APP_PATH="$GITHUB_WORKSPACE/build/macos/Build/Products/Release/Pleazyng.app"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+
+      - name: Create separate notarized release DMG
+        run: |
+          set -euo pipefail
+          bash scripts/apple/create_release_dmg.sh
+          mv pleazyng-macos.dmg pleazyng-macos-notarized.dmg
+          python3 scripts/recover_macos_dmg_for_homebrew_direct.py finalize \
+            --version "$RELEASE_VERSION" \
+            --prepared-receipt "$PLEAZYNG_HOME_BREW_RECOVERY/prepared-receipt.json" \
+            --asset "$GITHUB_WORKSPACE/pleazyng-macos-notarized.dmg" \
+            --output-receipt "$GITHUB_WORKSPACE/pleazyng-homebrew-recovery.json" \
+            --checksums "$GITHUB_WORKSPACE/pleazyng-homebrew-SHA256SUMS.txt" \
+            --notary-status "${{ steps.notarization-status.outputs.status }}" \
+            --stapled --gatekeeper-assessed
+          python3 scripts/generate_homebrew_cask.py \
+            --version "$RELEASE_VERSION" \
+            --checksums "$GITHUB_WORKSPACE/pleazyng-homebrew-SHA256SUMS.txt" \
+            --asset-name pleazyng-macos-notarized.dmg \
+            --output "$GITHUB_WORKSPACE/snapetech-pleazyng.rb"
+
+      - name: Verify packaged DMG payload
+        run: |
+          set -euo pipefail
+          MOUNTPOINT="$RUNNER_TEMP/pleazyng-homebrew-verify"
+          mkdir -p "$MOUNTPOINT"
+          trap 'hdiutil detach "$MOUNTPOINT" || true' EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNTPOINT" pleazyng-macos-notarized.dmg
+          APP_PATH="$MOUNTPOINT/Pleazyng.app"
+          test -d "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 \
+            --test-requirement='=identifier "org.snapetech.pleazyng" and anchor apple generic and certificate leaf[subject.OU] = "DM9A59DC85"' "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose "$APP_PATH"
+
+      - name: Attest versioned Homebrew recovery assets
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: |
+            pleazyng-macos-notarized.dmg
+            pleazyng-homebrew-SHA256SUMS.txt
+            pleazyng-homebrew-recovery.json
+            snapetech-pleazyng.rb
+
+      - name: Preserve exact Homebrew upload bundle for recovery
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pleazyng-homebrew-recovery-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pleazyng-macos-notarized.dmg
+            pleazyng-homebrew-SHA256SUMS.txt
+            pleazyng-homebrew-recovery.json
+            snapetech-pleazyng.rb
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Append Homebrew assets to the immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/recover_macos_dmg_for_homebrew_direct.py upload \
+            --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --directory "$GITHUB_WORKSPACE"
+
+      - name: Remove temporary signing credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          if [[ -f "$RUNNER_TEMP/macos-original-keychains.json" ]]; then
+            python3 - "$KEYCHAIN_PATH" "$RUNNER_TEMP/macos-original-keychains.json" <<'PYCHAIN'
+          import json, shlex, subprocess, sys
+          with open(sys.argv[2]) as source:
+              original = json.load(source)
+          current = shlex.split(subprocess.check_output(['security', 'list-keychains', '-d', 'user'], text=True))
+          restored = list(dict.fromkeys([*original, *(path for path in current if path != sys.argv[1])]))
+          subprocess.run(['security', 'list-keychains', '-d', 'user', '-s', *restored], check=True)
+          PYCHAIN
+          fi
+          if [[ -e "$KEYCHAIN_PATH" || -L "$KEYCHAIN_PATH" ]]; then security delete-keychain "$KEYCHAIN_PATH"; fi
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/pleazyng-macos-notary-api-key.p8"
+          rm -f "$RUNNER_TEMP/macos-release-entitlements.plist" "$RUNNER_TEMP/macos-entitlements.plist"
+          rm -f "$RUNNER_TEMP/macos-original-keychains.json" "$RUNNER_TEMP/DeveloperIDG2CA.cer" "$RUNNER_TEMP/macos-signing-probe"

@@ -24,11 +24,17 @@ class UpdatePackagesWorkflowTest(unittest.TestCase):
                             workflow_dir / "recover-homebrew-cask-v3051.yml")
             shutil.copyfile(WORKFLOW.parent / "resume-homebrew-cask-v3051.yml",
                             workflow_dir / "resume-homebrew-cask-v3051.yml")
+            shutil.copyfile(WORKFLOW.parent / "recover-homebrew-cask.yml",
+                            workflow_dir / "recover-homebrew-cask.yml")
+            shutil.copyfile(WORKFLOW.parent / "resume-homebrew-cask.yml",
+                            workflow_dir / "resume-homebrew-cask.yml")
             (root / "scripts").mkdir()
             for name in (
                 "recover_macos_dmg_for_homebrew.py",
+                "recover_macos_dmg_for_homebrew_direct.py",
                 "upload_homebrew_recovery_assets.py",
                 "resume_homebrew_recovery_upload.py",
+                "resume_homebrew_recovery_upload_direct.py",
             ):
                 shutil.copyfile(ROOT / "scripts" / name, root / "scripts" / name)
             scripts = root / "scripts/checks"
