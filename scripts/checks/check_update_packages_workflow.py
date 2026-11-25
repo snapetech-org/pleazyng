@@ -161,6 +161,7 @@ require(
     and "macos-compiled-app-45421474803-2" in (Path(__file__).resolve().parents[2] / "scripts/recover_macos_dmg_for_homebrew.py").read_text()
     and "--test-requirement='=identifier \"org.snapetech.pleazyng\"" in recovery
     and "notarization_checkpoint.py verify" in recovery
+    and recovery.count('${preserve[@]+"${preserve[@]}"}') == 2
     and "xcrun stapler validate" in recovery
     and "spctl --assess --type execute" in recovery,
     "v3.0.51 recovery must verify the published payload, native compile checkpoint, signature and notarization",

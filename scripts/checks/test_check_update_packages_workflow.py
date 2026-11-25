@@ -44,6 +44,10 @@ class UpdatePackagesWorkflowTest(unittest.TestCase):
         result = self.run_guard(WORKFLOW.read_text())
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_recovery_signing_uses_bash_three_safe_optional_flags(self) -> None:
+        recovery = (WORKFLOW.parent / "recover-homebrew-cask-v3051.yml").read_text()
+        self.assertEqual(recovery.count('${preserve[@]+"${preserve[@]}"}'), 2)
+
     def test_legacy_appcast_writer_cannot_be_restored(self) -> None:
         result = self.run_guard(WORKFLOW.read_text() + "\n  update-appcast-branch:\n    runs-on: ubuntu-24.04\n")
         self.assertNotEqual(result.returncode, 0)

@@ -2957,7 +2957,7 @@ jobs:
               if [[ "$kind" != *"Mach-O"* || "$kind" == *"ar archive"* || "$kind" == *" object"* ]]; then continue; fi
               preserve=()
               if codesign -d "$exe" >/dev/null 2>&1; then preserve=(--preserve-metadata=entitlements); fi
-              codesign --force --sign "$IDENTITY" --timestamp --options runtime "${preserve[@]}" "$exe"
+              codesign --force --sign "$IDENTITY" --timestamp --options runtime ${preserve[@]+"${preserve[@]}"} "$exe"
             done
 
           # Seal nested bundles and libraries inside-out after their children.
@@ -2967,7 +2967,7 @@ jobs:
               echo "Signing: $item"
               preserve=()
               if codesign -d "$item" >/dev/null 2>&1; then preserve=(--preserve-metadata=entitlements); fi
-              codesign --force --sign "$IDENTITY" --timestamp --options runtime "${preserve[@]}" "$item"
+              codesign --force --sign "$IDENTITY" --timestamp --options runtime ${preserve[@]+"${preserve[@]}"} "$item"
             done
 
           python3 scripts/apple/finalize_macos_runtime_receipts.py "$APP_PATH"

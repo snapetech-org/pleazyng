@@ -173,14 +173,14 @@ jobs:
               if [[ "$kind" != *'Mach-O'* || "$kind" == *'ar archive'* || "$kind" == *' object'* ]]; then continue; fi
               preserve=()
               if codesign -d "$exe" >/dev/null 2>&1; then preserve=(--preserve-metadata=entitlements); fi
-              codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime "${preserve[@]}" "$exe"
+              codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime ${preserve[@]+"${preserve[@]}"} "$exe"
             done
           find "$APP_PATH/Contents/Frameworks" \( -name '*.xpc' -o -name '*.app' -o -name '*.framework' -o -name '*.dylib' \) -print0 \
             | sort -zr \
             | while IFS= read -r -d '' item; do
               preserve=()
               if codesign -d "$item" >/dev/null 2>&1; then preserve=(--preserve-metadata=entitlements); fi
-              codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime "${preserve[@]}" "$item"
+              codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime ${preserve[@]+"${preserve[@]}"} "$item"
             done
           python3 scripts/apple/finalize_macos_runtime_receipts.py "$APP_PATH"
           codesign --force --sign "$IDENTITY" --keychain "$KEYCHAIN_PATH" --timestamp --options runtime \

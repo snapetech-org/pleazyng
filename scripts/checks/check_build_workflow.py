@@ -1613,6 +1613,10 @@ for apple_job_name, workspace_label in (
             < macos_sign_application.find('codesign --force'),
             "macOS signing must prepare read-only embedded copies before replacing their signatures",
         )
+        require(
+            macos_sign_application.count('${preserve[@]+"${preserve[@]}"}') == 2,
+            "macOS nested signing must expand optional entitlement flags safely under Bash 3 with nounset",
+        )
         macos_notary_preflight = named_step(
             apple_release_job, "Verify Apple notarization credentials before compilation"
         )

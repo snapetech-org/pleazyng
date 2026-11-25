@@ -36,6 +36,15 @@ APPLE_NATIVE_ACTION = ROOT / ".github/actions/apple-native-reliability/action.ym
 
 
 class BuildWorkflowGuardTest(unittest.TestCase):
+    def test_macos_signing_handles_empty_optional_flag_arrays_under_nounset(self):
+        workflow = yaml.safe_load(self._workflow())
+        signing = next(
+            step['run'] for step in workflow['jobs']['build-macos']['steps']
+            if step.get('name') == 'Sign Application'
+        )
+        safe_expansion = '${preserve[@]+"${preserve[@]}"}'
+        self.assertEqual(signing.count(safe_expansion), 2)
+
     def test_store_entitlement_preflight_does_not_block_unsigned_ios_build(self):
         workflow = yaml.safe_load(self._workflow())
         jobs = workflow['jobs']
