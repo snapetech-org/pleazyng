@@ -178,6 +178,24 @@ class MacAppStoreCaptureInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match the selected producer"):
             capture.validate_appstore_package_capture_receipt(capture_receipt, "macos", RUN_ID, ATTEMPT)
 
+    def test_app_executable_path_uses_info_plist_name_inside_contents_macos(self) -> None:
+        with TemporaryDirectory() as temporary:
+            app = Path(temporary) / "Pleazyng.app"
+            executable = app / "Contents" / "MacOS" / "Pleazyng"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"app executable")
+            self.assertEqual(producer.app_executable_path(app, "Pleazyng"), executable)
+
+            outside = Path(temporary) / "outside-executable"
+            outside.write_bytes(b"outside executable")
+            executable.unlink()
+            executable.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError, "escapes Contents/MacOS"):
+                producer.app_executable_path(app, "Pleazyng")
+
+            with self.assertRaisesRegex(ValueError, "unsafe CFBundleExecutable"):
+                producer.app_executable_path(app, "../outside-executable")
+
     def test_restore_package_builds_receipt_from_exact_downloaded_package(self) -> None:
         selection = self.select()
         package_bytes = b"retained signed App Store package fixture"
@@ -267,6 +285,11 @@ class MacAppStoreCaptureInputTests(unittest.TestCase):
                     Path(f"{prefix}0").write_bytes(b"certificate")
                     return ""
                 if "-archs" in arguments:
+                    self.assertEqual(
+                        Path(arguments[-1]),
+                        output_dir / "expanded-package" / "Payload" / "Applications" / "Pleazyng.app"
+                        / "Contents" / "MacOS" / "Pleazyng",
+                    )
                     return "arm64 x86_64"
                 if "-dv" in arguments:
                     return "Identifier=org.snapetech.pleazyng\nTeamIdentifier=DM9A59DC85"

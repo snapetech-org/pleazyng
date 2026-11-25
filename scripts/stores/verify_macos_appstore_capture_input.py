@@ -156,6 +156,26 @@ def _certificate_sha1(path: Path) -> str:
     return hashlib.sha1(path.read_bytes()).hexdigest().upper()
 
 
+def app_executable_path(app: Path, executable_name: str) -> Path:
+    app_root = app.resolve(strict=True)
+    macos_dir = (app_root / "Contents" / "MacOS").resolve(strict=True)
+    try:
+        macos_dir.relative_to(app_root)
+    except ValueError as error:
+        raise ValueError("The app executable directory escapes the Pleazyng.app bundle") from error
+    if (not executable_name or Path(executable_name).name != executable_name
+            or "\\" in executable_name):
+        raise ValueError("The app Info.plist contains an unsafe CFBundleExecutable value")
+    executable = (macos_dir / executable_name).resolve(strict=True)
+    try:
+        executable.relative_to(macos_dir)
+    except ValueError as error:
+        raise ValueError("The app executable escapes Contents/MacOS") from error
+    if not executable.is_file():
+        raise ValueError("The app CFBundleExecutable is not a regular file")
+    return executable
+
+
 def _require_signed_app(app: Path, package_receipt: dict[str, Any], output: Path) -> dict[str, Any]:
     run_checked(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], timeout=180)
     details = run_checked(["/usr/bin/codesign", "-dv", "--verbose=4", str(app)])
@@ -281,7 +301,8 @@ def restore_package(
         raise ValueError(f"The exact installer must contain one Pleazyng.app bundle; found {len(apps)}")
     app = apps[0].resolve(strict=True)
     identity = capture_tools.app_info(app)
-    architectures_text = run_checked(["/usr/bin/lipo", "-archs", str(app / identity["executable"])])
+    executable = app_executable_path(app, identity["executable"])
+    architectures_text = run_checked(["/usr/bin/lipo", "-archs", str(executable)])
     architectures = sorted(set(architectures_text.split()))
     if architectures != sorted(package_receipt.get("application", {}).get("architectures", [])):
         raise ValueError("The extracted app's architectures differ from the verified package receipt")
