@@ -207,7 +207,7 @@ def verify_direct_source(
         core_run = api(f"actions/runs/{assembly_run_id}/attempts/{assembly_attempt}")
         expected_assembly_title = f"{RELEASE_TITLE_PREFIX}{tag}:assembly:source:{source_run_id}"
         title_pattern = re.escape(expected_assembly_title) + (
-            r"(?::(?:qualification:[1-9][0-9]*(?::rebuild-tvos)?|macos:[1-9][0-9]*))?"
+            r"(?::(?:qualification:[1-9][0-9]*(?::(?:rebuild-tvos|assembly:[1-9][0-9]*))?|macos:[1-9][0-9]*))?"
         )
         if (
             core_run.get("head_repository", {}).get("full_name", "").lower() != REPOSITORY

@@ -328,10 +328,12 @@ def parse_repaired_run_reference(value):
     match = re.fullmatch(r"assembly-tvos:([1-9][0-9]*)", value)
     if match:
         return f"assembly-tvos:{int(match.group(1))}"
-    match = re.fullmatch(r"(ios-developer|qualification):([1-9][0-9]*)", value)
-    if match:
-        return f"{match.group(1)}:{int(match.group(2))}"
-    raise ReleaseError("Repaired run must be a positive ID, assembly-tvos:<ID>, ios-developer:<ID>, or qualification:<ID>.")
+    if re.fullmatch(r"ios-developer:[1-9][0-9]*|qualification:[1-9][0-9]*(?::assembly:[1-9][0-9]*)?", value):
+        return value
+    raise ReleaseError(
+        "Use a positive run ID, assembly-tvos:<ID>, ios-developer:<ID>, "
+        "qualification:<ID>, or qualification:<ID>:assembly:<ID>."
+    )
 
 
 def assembly_tvos_run_id(value) -> int | None:
@@ -343,7 +345,15 @@ def assembly_tvos_run_id(value) -> int | None:
 
 def supplemental_qualification_run_id(value) -> int | None:
     if isinstance(value, str) and value.startswith("qualification:"):
-        return int(value.split(":", 1)[1])
+        return int(value.split(":", 2)[1])
+    return None
+
+
+def supplemental_assembly_run_id(value) -> int | None:
+    if isinstance(value, str):
+        match = re.fullmatch(r"qualification:[1-9][0-9]*:assembly:([1-9][0-9]*)", value)
+        if match:
+            return int(match.group(1))
     return None
 
 
@@ -1817,6 +1827,7 @@ def ensure_release(
 ) -> dict:
     reuse_repaired_run_id = parse_repaired_run_reference(reuse_repaired_run_id)
     qualification_run = supplemental_qualification_run_id(reuse_repaired_run_id)
+    qualification_assembly_run = supplemental_assembly_run_id(reuse_repaired_run_id)
     if rebuild_tizen and not reuse_platform_run_id:
         raise ReleaseError("Tizen rebuilding requires ordinary verified platform recovery.")
     if reuse_platform_run_id and reuse_android_run_id is None:
@@ -1872,14 +1883,21 @@ def ensure_release(
                 or any((rebuild_ios, rebuild_macos, rebuild_linux, rebuild_tizen,
                         rebuild_webos, reuse_macos_run_id, reuse_tvos_run_id, reuse_ios_run_id,
                         reuse_ios_developer_run_id, private_apple_signing_unavailable))
+                or (qualification_assembly_run and (rebuild_tvos
+                    or qualification_assembly_run in {reuse_platform_run_id, qualification_run}))
                 or (rebuild_tvos and (not reuse_platform_run_id
                                       or reuse_android_run_id != reuse_platform_run_id
                                       or reuse_webos_run_id != reuse_platform_run_id))):
-            raise ReleaseError("Supplemental qualification requires original unsigned artifacts and only permits a verified tvOS acquisition rebuild.")
+            raise ReleaseError(
+                "Supplemental qualification requires original unsigned artifacts and only permits "
+                "a verified tvOS acquisition rebuild or a prior assembly continuation."
+            )
         run_title += f":assembly:source:{reuse_platform_run_id}:qualification:{qualification_run}"
         if rebuild_tvos:
             run_title += ":rebuild-tvos"
             tvos_runner_pool = macos_runner_pool = ios_runner_pool = "hosted"
+        elif qualification_assembly_run:
+            run_title += f":assembly:{qualification_assembly_run}"
     if runner_acquisition_retry_of is not None:
         if (repair or reuse_platform_run_id or reuse_repaired_run_id is not None
                 or type(runner_acquisition_retry_of) is not int or runner_acquisition_retry_of < 1):
@@ -2027,6 +2045,8 @@ def ensure_release(
             options["built_tvos_run"] = built_tvos_run_id
         elif qualification_run is not None:
             options["qualification_run"] = qualification_run
+            if qualification_assembly_run:
+                options["qualification_assembly_run"] = qualification_assembly_run
         elif reuse_repaired_run_id and not (isinstance(reuse_repaired_run_id, str) and reuse_repaired_run_id.startswith("ios-developer:")):
             options["repaired_run"] = reuse_repaired_run_id
         if reuse_tvos_run_id:
@@ -2058,6 +2078,11 @@ def ensure_release(
         elif qualification_run is not None:
             if (proof.get("source_sha") != commit_sha or f"v{proof.get('version')}" != tag
                     or proof.get("qualification_run_id") != qualification_run
+                    or (qualification_assembly_run
+                        and (proof.get("qualification_assembly_run_id") != qualification_assembly_run
+                             or {"tvos-ipa", "windows-x64-portable", "windows-installer", "windows-chocolatey"}
+                             - {item.get("name") for item in proof.get("artifact_preflight", [])
+                                if item.get("source_run_id") == qualification_assembly_run}))
                     or proof.get("platforms_complete") is not True or proof.get("pending_jobs")
                     or not proof.get("artifact_preflight")
                     or (rebuild_tvos and (
@@ -2267,7 +2292,8 @@ def verify_platform_recovery(run_id: int, commit_sha: str, version: str, *,
                              android_run=None, macos_run=None, webos_run=None, include_webos_build=True, wait_complete=False,
                              rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False,
                              packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None,
-                             ios_developer_run=None, built_tvos_run=None, qualification_run=None) -> dict:
+                             ios_developer_run=None, built_tvos_run=None, qualification_run=None,
+                             qualification_assembly_run=None) -> dict:
     from recover_release_platforms import RecoveryError, compose_proof, verify_source_run, wait_for_source_run, verify_macos_packaging_recovery
 
     if (rebuild_tvos or rebuild_ios or rebuild_tizen) and (macos_run or repaired_run):
@@ -2285,6 +2311,11 @@ def verify_platform_recovery(run_id: int, commit_sha: str, version: str, *,
         options = {}
     if qualification_run is not None:
         options.update(qualification_run=qualification_run, freeze=True)
+    if qualification_assembly_run is not None:
+        if (qualification_run is None or rebuild_tvos
+                or qualification_assembly_run in {run_id, qualification_run}):
+            raise ReleaseError("Assembly continuation requires distinct verified runs and no tvOS rebuild")
+        options["qualification_assembly_run"] = qualification_assembly_run
     if tvos_run:
         if not packaging_source_sha or rebuild_tvos or repaired_run or macos_run:
             raise ReleaseError('Signed TV reuse requires approved frozen packaging recovery.')
@@ -3329,7 +3360,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reuse-webos-run", type=int, help="Reuse a verified webOS package and wait locally for completed source outputs before assembly")
     parser.add_argument("--reuse-repaired-run", type=str,
                         help="Reuse repaired Linux/Mac outputs by ID, a signed tvOS package as assembly-tvos:<ID>, "
-                             "or supplemental Apple CI as qualification:<ID>")
+                             "or supplemental Apple CI as qualification:<ID>. To reuse the completed tvOS and "
+                             "Windows packages from its earlier assembly, append :assembly:<RUN_ID>.")
     parser.add_argument('--reuse-tvos-run', type=int, help='Reuse successful signed TV output from an approved sibling Apple packaging repair')
     parser.add_argument('--reuse-ios-run', type=int, help='Reuse successful signed iOS output from an approved sibling Apple packaging repair')
     parser.add_argument('--reuse-ios-developer-run', type=int, help='Reuse an attested unsigned developer IPA from a successful recovery run')
@@ -3400,6 +3432,7 @@ def main() -> int:
     args.reuse_repaired_run = parse_repaired_run_reference(args.reuse_repaired_run)
     built_tvos_run = assembly_tvos_run_id(args.reuse_repaired_run)
     qualification_run = supplemental_qualification_run_id(args.reuse_repaired_run)
+    qualification_assembly_run = supplemental_assembly_run_id(args.reuse_repaired_run)
     repaired_platform_run = (args.reuse_repaired_run
                              if type(args.reuse_repaired_run) is int else None)
     if not re.fullmatch(r"\d+\.\d+\.\d+", args.version):
@@ -3419,8 +3452,10 @@ def main() -> int:
                 or any((args.include_apple_store_build, args.prepare_homebrew_cask, args.rebuild_ios,
                         args.rebuild_macos, args.rebuild_linux, args.rebuild_tizen,
                         args.rebuild_webos, args.reuse_macos_run, args.reuse_tvos_run,
-                        args.reuse_ios_run, args.reuse_ios_developer_run))):
-            raise ReleaseError("Supply the original platform run and exact source; supplemental qualification only permits the guarded tvOS acquisition rebuild.")
+                        args.reuse_ios_run, args.reuse_ios_developer_run))
+                or (qualification_assembly_run and (args.rebuild_tvos
+                    or qualification_assembly_run in {args.reuse_platform_run, qualification_run}))):
+            raise ReleaseError("Supplemental qualification requires the exact original run, source, and verified recovery route.")
         if (args.rebuild_tvos and (args.reuse_webos_run not in (None, args.reuse_platform_run)
                                    or args.reuse_android_run not in (None, args.reuse_platform_run))):
             raise ReleaseError("Supplemental tvOS recovery must reuse Android and WebOS from the original platform run.")
@@ -3548,6 +3583,8 @@ def main() -> int:
         validate_source_metadata(worktree, args.version)
         existing_tag_commit = existing_release_tag_commit(worktree, tag)
         tag_reused = existing_tag_commit is not None
+        if qualification_assembly_run and not tag_reused:
+            raise ReleaseError("Assembly continuation requires the existing immutable release tag")
         if args.reuse_platform_run and not tag_reused and qualification_run is None:
             raise ReleaseError("Platform recovery requires an existing immutable release tag.")
         native_sha = None
@@ -3620,6 +3657,8 @@ def main() -> int:
                 **({"rebuild_ios": True} if args.rebuild_ios else {}),
                 **({"repaired_run": repaired_platform_run} if repaired_platform_run else {}),
                 **({"qualification_run": qualification_run} if qualification_run else {}),
+                **({"qualification_assembly_run": qualification_assembly_run}
+                   if qualification_assembly_run else {}),
                 **({"built_tvos_run": built_tvos_run} if built_tvos_run is not None else {}),
                 **({'tvos_run': args.reuse_tvos_run} if args.reuse_tvos_run else {}),
                 **({'ios_run': args.reuse_ios_run} if args.reuse_ios_run else {}),

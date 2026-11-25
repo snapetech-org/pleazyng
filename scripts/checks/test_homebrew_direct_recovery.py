@@ -205,10 +205,15 @@ class DirectHomebrewRecoveryTests(unittest.TestCase):
         with patch.object(recovery, "api", side_effect=fake_api), patch.dict(
             os.environ, {"GITHUB_SHA": source}, clear=False
         ):
-            facts = recovery.verify_direct_source(
-                "v3.0.52", source_run_id, source_attempt,
-                assembly_run_id=assembly_run_id, assembly_attempt=assembly_attempt,
-            )
+            assembly_title = assembly_run["display_title"].removesuffix(":rebuild-tvos")
+            for suffix in (":rebuild-tvos", ":assembly:888"):
+                with self.subTest(suffix=suffix):
+                    assembly_run["display_title"] = assembly_title + suffix
+                    facts = recovery.verify_direct_source(
+                        "v3.0.52", source_run_id, source_attempt,
+                        assembly_run_id=assembly_run_id, assembly_attempt=assembly_attempt,
+                    )
+                    self.assertEqual(facts["core_run"]["id"], assembly_run_id)
             self.assertEqual(facts["run"]["conclusion"], "failure")
             self.assertEqual(facts["macos_job"]["id"], 2101)
             self.assertEqual(facts["core_run"]["id"], assembly_run_id)

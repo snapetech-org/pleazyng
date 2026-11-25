@@ -56,6 +56,23 @@ class SigningOptionsTests(unittest.TestCase):
         command.assert_called_once_with(["gh", "auth", "status", "--hostname", "github.com"],
                                         capture=True, quiet=True)
 
+    def test_cli_accepts_distinct_continuation_without_rebuilding(self):
+        for prior, extra, accepted in ((97, [], True), (84, [], False), (97, ["--rebuild-tvos"], False)):
+            argv = ["release", "--version", "3.0.52", "--source-commit", "a" * 40,
+                    "--reuse-platform-run", "42", "--reuse-repaired-run",
+                    f"qualification:84:assembly:{prior}", "--publish", *extra]
+            with self.subTest(prior=prior, extra=extra), patch.object(sys, "argv", argv), patch.object(
+                release, "command", side_effect=SystemExit
+            ) as command:
+                if accepted:
+                    with self.assertRaises(SystemExit):
+                        release.main()
+                    command.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(release.ReleaseError, "Supplemental qualification"):
+                        release.main()
+                    command.assert_not_called()
+
     def test_dispatch_and_reuse_require_every_requested_step(self):
         mac = [("build-macos", "Notarize Application"),
                ("build-macos", "Wait for notarization acceptance"),
