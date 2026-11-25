@@ -169,6 +169,12 @@ final class PleazyngMacAppInUseCaptureTests: XCTestCase {
     func testCaptureFilesAndBooksScreen() throws {
         let app = XCUIApplication(url: URL(fileURLWithPath: __PLEAZYNG_CAPTURE_APP_PATH__))
         app.launch()
+        Thread.sleep(forTimeInterval: 2)
+
+        let launchScreenshot = XCTAttachment(screenshot: app.screenshot())
+        launchScreenshot.name = "pleazyng-macos-launch-screen"
+        launchScreenshot.lifetime = .keepAlways
+        add(launchScreenshot)
 
         let useFiles = app.buttons.matching(
             NSPredicate(format: "label CONTAINS[c] %@", "Use files and books")
@@ -2372,6 +2378,23 @@ def run_macos_app_in_use_ui_test(app: Path, output: Path) -> tuple[Path, dict[st
             failed_result_bundle = output / "macos-01-files-and-books.failed.xcresult"
             if result_bundle.is_dir():
                 shutil.copytree(result_bundle, failed_result_bundle)
+                failed_attachment_dir = output / "macos-01-files-and-books.failed-attachments"
+                export_result = subprocess.run(
+                    [
+                        "xcrun", "xcresulttool", "export", "attachments",
+                        "--path", str(result_bundle),
+                        "--output-path", str(failed_attachment_dir),
+                    ],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=180,
+                )
+                if export_result.returncode != 0:
+                    (output / "macos-01-files-and-books.failed-attachment-export.log").write_text(
+                        export_result.stdout, encoding="utf-8"
+                    )
             tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-100:]
             raise RuntimeError(
                 f"The Mac app-in-use UI test failed with exit code {result.returncode}; "
