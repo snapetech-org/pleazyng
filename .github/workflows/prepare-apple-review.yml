@@ -1,0 +1,94 @@
+# ng-runner-policy: hosted-default-v2
+name: Prepare an Apple review draft
+run-name: prepare-apple-review:${{ inputs.release_tag }}:${{ inputs.platform }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published stable release tag
+        type: string
+        required: true
+      platform:
+        description: App Store Connect platform
+        type: choice
+        options: [IOS, MAC_OS, TV_OS]
+        required: true
+      processing_run:
+        description: Successful run that delivered the selected platform and verified Apple processing
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: apple-review-draft-${{ inputs.platform }}
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    if: github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate the published release and exact processing run
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PLATFORM: ${{ inputs.platform }}
+          PROCESSING_RUN: ${{ inputs.processing_run }}
+          PYTHONPATH: scripts
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$PROCESSING_RUN" =~ ^[1-9][0-9]*$ ]]
+          case "$PLATFORM" in
+            MAC_OS)
+              workflow=macos-app-store-signed.yml
+              title="macos-app-store:signed-upload:$RELEASE_TAG"
+              ;;
+            IOS|TV_OS)
+              workflow=publish-app-stores.yml
+              channel=app-store-ios
+              if [[ "$PLATFORM" == TV_OS ]]; then channel=app-store-tvos; fi
+              title="action:publish-app-stores:pool:public:tag:$RELEASE_TAG:channel:$channel"
+              ;;
+            *) exit 1 ;;
+          esac
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROCESSING_RUN" |
+            jq -e --arg repo "$GITHUB_REPOSITORY" --arg title "$title" --arg path ".github/workflows/$workflow" \
+              '.display_title == $title and .path == $path and .head_branch == "main" and
+               .repository.full_name == $repo and .head_repository.full_name == $repo and
+               .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"' >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" |
+            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false and .published_at != null' >/dev/null
+          source="$(python3 -c 'import sys; from refresh_release_facts import tag_commit; print(tag_commit(sys.argv[1]))' "$RELEASE_TAG")"
+          spec="$(gh api "repos/$GITHUB_REPOSITORY/contents/pubspec.yaml?ref=$source" --jq .content | base64 -d)"
+          version_build="$(printf '%s\n' "$spec" | python3 scripts/pubspec_version.py /dev/stdin)"
+          [[ "$version_build" == "${RELEASE_TAG#v}"+* ]]
+          printf 'version=%s\nbuild_number=%s\n' "${RELEASE_TAG#v}" "${version_build##*+}" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the processed build to the existing draft
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          PLATFORM: ${{ inputs.platform }}
+          VERSION: ${{ steps.release.outputs.version }}
+          BUILD_NUMBER: ${{ steps.release.outputs.build_number }}
+          PYTHONPATH: scripts
+        run: |
+          python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \
+            --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: apple-review-draft-${{ inputs.platform }}-${{ inputs.release_tag }}
+          path: ${{ runner.temp }}/apple-review-draft.json
+          if-no-files-found: error

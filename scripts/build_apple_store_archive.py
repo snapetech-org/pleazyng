@@ -362,15 +362,18 @@ class AppleProfileAPI:
         self.token = token
         self.opener = urllib.request.build_opener(_NoAppleRedirect())
 
-    def request(self, path: str, body: dict | None = None) -> dict:
+    def request(self, path: str, body: dict | None = None, *, method: str | None = None) -> dict:
         url = path if path.startswith('https://') else self.origin + path
         parsed = urllib.parse.urlsplit(url)
         if (parsed.scheme, parsed.netloc) != ('https', 'api.appstoreconnect.apple.com') or not parsed.path.startswith('/v1/'):
             raise ValueError('Refusing a non-Apple provisioning API destination')
         request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + self.token,
-            'Content-Type': 'application/json'}, data=json.dumps(body).encode() if body is not None else None)
+            'Content-Type': 'application/json'}, data=json.dumps(body).encode() if body is not None else None,
+            method=method)
         try:
             with self.opener.open(request, timeout=60) as response:
+                if method == 'PATCH' and response.status == 204:
+                    return {}
                 data = response.read(4 * 1024 * 1024 + 1)
         except urllib.error.HTTPError as error:
             # Even API error bodies can contain profile/credential material.
