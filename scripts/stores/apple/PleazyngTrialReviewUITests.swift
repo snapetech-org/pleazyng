@@ -151,7 +151,10 @@ private extension PleazyngTrialReviewUITests {
         let lifetimeTile = app.descendants(matching: .any).matching(
             NSPredicate(format: "label CONTAINS %@", "Pleazyng lifetime access")
         ).firstMatch
-        XCTAssertTrue(lifetimeTile.waitForExistence(timeout: 60), "The actual lifetime-access Settings row was not available")
+        XCTAssertTrue(
+            lifetimeTile.waitForExistence(timeout: 60),
+            "The actual lifetime-access Settings row was not available"
+        )
         tapWhenHittable(lifetimeTile, in: app, failureMessage: "The lifetime-access Settings row was not reachable")
     }
 
@@ -245,14 +248,27 @@ private extension PleazyngTrialReviewUITests {
 
 private extension PleazyngTrialReviewUITests {
     func captureOpenMediaForm(in app: XCUIApplication, appBehavior: inout [String: Any]) {
-        let openMediaAction = app.buttons["Open media"]
+        let openMediaAction = app.staticTexts.matching(
+            NSPredicate(
+                format: "label CONTAINS[c] %@ AND label CONTAINS[c] %@",
+                "Open media",
+                "Play a link, playlist, or file for this session."
+            )
+        ).firstMatch
         XCTAssertTrue(
             openMediaAction.waitForExistence(timeout: 60),
-            "The local source screen did not expose the actual Open media action"
+            "The local source screen did not expose the Open media title and subtitle"
         )
-        tapWhenHittable(openMediaAction, in: app, failureMessage: "The actual Open media action was not reachable")
+        openMediaAction.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let mediaAddressField = app.textFields["Media address"]
+        let openChoiceLabel = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "What would you like to open?")
+        ).firstMatch
         XCTAssertTrue(mediaAddressField.waitForExistence(timeout: 30), "The real Open media form did not open")
+        XCTAssertTrue(
+            openChoiceLabel.waitForExistence(timeout: 30),
+            "The real Open media choice label was not visible"
+        )
         XCTAssertTrue(app.staticTexts["Open media"].exists, "The actual Open media form title was not visible")
         XCTAssertTrue(
             app.textFields["Display name (optional)"].exists,
@@ -265,8 +281,10 @@ private extension PleazyngTrialReviewUITests {
         XCTAssertFalse(app.alerts.firstMatch.exists, "The Open media form must not contain an XCTest or system alert")
         appBehavior["openMediaFormOpenedAfterTrial"] = mediaAddressField.exists
         appBehavior["openMediaAddressFieldVisible"] = mediaAddressField.exists
+        appBehavior["openMediaChoiceLabelVisible"] = openChoiceLabel.exists
         appBehavior["openMediaFormKeychainWarningVisible"] = keychainWarning.exists
         appBehavior["openMediaFormSystemAlertVisible"] = app.alerts.firstMatch.exists
+        attachAccessibilityHierarchy(of: app, named: "trial-open-media-form-accessibility-localtest")
         attachScreenshot(of: app, named: "pleazyng-open-media-form-localtest")
     }
 
@@ -279,7 +297,8 @@ private extension PleazyngTrialReviewUITests {
     ) throws {
         let record: [String: Any] = [
             "environment": "LOCALTEST",
-            "qualification": "Xcode StoreKitTest local configuration only; not App Store Connect or App Store Sandbox evidence.",
+            "qualification": "Xcode StoreKitTest local configuration only; not App Store Connect or " +
+                "App Store Sandbox evidence.",
             "productQueries": productQueries,
             "trialTransaction": [
                 "productID": transaction.productIdentifier,
@@ -334,7 +353,10 @@ private extension PleazyngTrialReviewUITests {
     }
 
     func attachAccessibilityHierarchy(of app: XCUIApplication, named name: String) {
-        let attachment = XCTAttachment(data: Data(app.debugDescription.utf8), uniformTypeIdentifier: "public.plain-text")
+        let attachment = XCTAttachment(
+            data: Data(app.debugDescription.utf8),
+            uniformTypeIdentifier: "public.plain-text"
+        )
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

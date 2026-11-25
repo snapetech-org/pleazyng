@@ -3419,6 +3419,7 @@ def capture_ios_in_use_with_localtest_trial(
             or app_behavior.get("lifetimeTransactionCreated") is not False
             or app_behavior.get("openMediaFormOpenedAfterTrial") is not True
             or app_behavior.get("openMediaAddressFieldVisible") is not True
+            or app_behavior.get("openMediaChoiceLabelVisible") is not True
             or app_behavior.get("openMediaFormKeychainWarningVisible") is not False
             or app_behavior.get("openMediaFormSystemAlertVisible") is not False):
         raise ValueError("The retained iPad app did not produce exactly one verified LOCALTEST trial transaction")
@@ -3595,6 +3596,7 @@ def capture_ios_in_use_with_localtest_trial(
         "open_media_form_evidence": {
             "after_verified_trial_relaunch": True,
             "media_address_field_visible": app_behavior.get("openMediaAddressFieldVisible"),
+            "open_choice_label_visible": app_behavior.get("openMediaChoiceLabelVisible"),
             "saved_streaming_keychain_warning_visible": app_behavior.get("openMediaFormKeychainWarningVisible"),
             "system_alert_visible": app_behavior.get("openMediaFormSystemAlertVisible"),
         },

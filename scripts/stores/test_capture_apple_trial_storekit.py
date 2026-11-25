@@ -34,8 +34,14 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
             capture.SCREENSHOTS["pleazyng-open-media-form-localtest"],
             "open-media-form-localtest.png",
         )
-        self.assertIn('app.buttons["Open media"]', UI_TEST)
+        self.assertIn('app.staticTexts.matching(', UI_TEST)
+        self.assertIn('label CONTAINS[c] %@ AND label CONTAINS[c] %@', UI_TEST)
+        self.assertIn('"Play a link, playlist, or file for this session."', UI_TEST)
+        self.assertIn('openMediaAction.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()', UI_TEST)
         self.assertIn('app.textFields["Media address"]', UI_TEST)
+        self.assertIn('"What would you like to open?"', UI_TEST)
+        self.assertIn('appBehavior["openMediaChoiceLabelVisible"] = openChoiceLabel.exists', UI_TEST)
+        self.assertIn('"trial-open-media-form-accessibility-localtest"', UI_TEST)
         self.assertIn('XCTAssertFalse(keychainWarning.exists,', UI_TEST)
         self.assertIn('appBehavior["openMediaFormKeychainWarningVisible"] = keychainWarning.exists', UI_TEST)
         self.assertIn('attachScreenshot(of: app, named: "pleazyng-open-media-form-localtest")', UI_TEST)

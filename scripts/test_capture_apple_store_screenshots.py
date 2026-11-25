@@ -707,6 +707,8 @@ class ListingCaptureMetadataTests(unittest.TestCase):
         self.assertIn('simulator_signing.get("status") != "not-applied"', source)
         self.assertIn('installed_app_receipt.get("installed_app_bundle_sha256") != app_digest', source)
         self.assertIn('app_signature_before != {"status": "unsigned"}', source)
+        self.assertIn('app_behavior.get("openMediaChoiceLabelVisible") is not True', source)
+        self.assertIn('"open_choice_label_visible"', source)
         self.assertIn('"simulator_signing_applied": False', source)
         self.assertNotIn("simulator_signed_app_bundle_sha256", source)
 
