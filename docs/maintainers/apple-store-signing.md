@@ -111,9 +111,8 @@ project file afterward, verifies the app and installer signatures, uploads the
 package to App Store Connect app `6826955231`, and waits for the exact version
 and build to reach `VALID`. It does not update listing metadata, create or edit
 in-app purchase products, change `pleazyng_lifetime_unlock`, set prices, or
-submit App Review. A processed upload does not qualify sandbox/JIT runtime,
-StoreKit purchase and restore, screenshots, or Apple review. The first signed
-run remains an external signing and account qualification gate.
+submit App Review. Sandbox/JIT runtime, StoreKit purchase and restore,
+screenshots, and Apple review have separate qualification steps.
 
 Apple's decoded `MAC_APP_STORE` profile payload uses the exact platform token
 `OSX`; the profile validator requires that one-element platform list alongside
@@ -153,6 +152,13 @@ does not expose an IPA hash for an already existing build, so that receipt
 marks reused builds as a version/build identity match. Upload success and
 processing do not create a matching draft version, invite TestFlight users,
 or submit App Review.
+
+After Apple processes a build, run **Prepare an Apple review draft** on `main`
+with its published tag, platform (`IOS`, `MAC_OS`, or `TV_OS`), and successful
+processing run ID. The workflow resolves the build number from the tag and
+attaches the exact valid build to its existing App Store version. It rechecks
+the attachment and retains a receipt. Submit any first in-app purchases with
+the intended version in the [App Store Connect review screen](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase).
 
 ### v3.0.36 signed-store processing result
 
