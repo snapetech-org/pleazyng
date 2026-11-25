@@ -2759,6 +2759,85 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     (output / "macos-01-files-and-books.initial-window-geometry.json").write_text(
         json.dumps(initial_window_geometry, indent=2) + "\n", encoding="utf-8"
     )
+
+    # Prove the native listing-size window independently of onboarding or
+    # StoreKit state. Preserve the unmodified startup window first, then ask
+    # WindowServer to resize the actual app window and capture it by ID.
+    geometry_probe: dict[str, Any] = {
+        "requested_bounds_points": [0, 0, 1280, 800],
+        "initial_window_geometry": initial_window_geometry,
+        "frame_preference": window_preference,
+    }
+    startup_window = output / "macos-00-native-window-before-resize.png"
+    run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(initial_window_id), str(startup_window)], timeout=120)
+    geometry_probe["startup_window_capture"] = {
+        "filename": startup_window.name,
+        "dimensions": list(png_dimensions(startup_window)),
+        "sha256": sha256_file(startup_window),
+    }
+    initial_bounds = initial_window_geometry.get("bounds_points")
+    if (not isinstance(initial_bounds, list) or len(initial_bounds) != 4
+            or initial_window_geometry.get("on_screen") is not True):
+        raise ValueError(f"The real Pleazyng window is unavailable for native geometry probing: {initial_window_geometry}")
+    resized_window = output / "macos-00-native-window-1280x800-probe.png"
+    try:
+        if initial_bounds[2:] != [1280.0, 800.0]:
+            geometry_probe["window_level_resize_fallback"] = resize_macos_app_window(
+                app_pid,
+                width=1280,
+                height=800,
+                x=int(round(initial_bounds[0])),
+                y=int(round(initial_bounds[1])),
+            )
+        resized_geometry = run_macos_swift_json(
+            MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)]
+        )
+        geometry_probe["resized_window_geometry"] = resized_geometry
+        run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(initial_window_id), str(resized_window)], timeout=120)
+        capture_dimensions = list(png_dimensions(resized_window))
+        geometry_probe["resized_window_capture"] = {
+            "filename": resized_window.name,
+            "dimensions": capture_dimensions,
+            "sha256": sha256_file(resized_window),
+        }
+        resized_bounds = resized_geometry.get("bounds_points")
+        if (resized_geometry.get("window_id") != int(initial_window_id)
+                or resized_geometry.get("on_screen") is not True
+                or not isinstance(resized_bounds, list) or len(resized_bounds) != 4
+                or resized_bounds[2:] != [1280.0, 800.0]
+                or tuple(capture_dimensions) not in ((1280, 800), (2560, 1600))):
+            raise ValueError(
+                "The hosted Mac did not produce an unmodified 1280x800 native app-window capture: "
+                f"geometry={resized_geometry}, capture_dimensions={capture_dimensions}"
+            )
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        geometry_probe["status"] = "failed"
+        geometry_probe["error"] = f"{type(error).__name__}: {error}"
+        try:
+            geometry_probe["window_geometry_after_attempt"] = run_macos_swift_json(
+                MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)]
+            )
+            run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(initial_window_id), str(resized_window)], timeout=120)
+            geometry_probe["window_capture_after_attempt"] = {
+                "filename": resized_window.name,
+                "dimensions": list(png_dimensions(resized_window)),
+                "sha256": sha256_file(resized_window),
+            }
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as capture_error:
+            geometry_probe["post_attempt_diagnostic_error"] = f"{type(capture_error).__name__}: {capture_error}"
+        (output / "macos-00-native-window-geometry-probe.json").write_text(
+            json.dumps(geometry_probe, indent=2) + "\n", encoding="utf-8"
+        )
+        raise ValueError(
+            "The hosted Mac could not produce an unmodified 1280x800 native app-window capture; "
+            f"geometry evidence remains in {output}: {geometry_probe}"
+        ) from error
+    geometry_probe["status"] = "passed"
+    geometry_probe["screenshot_resized_or_padded"] = False
+    (output / "macos-00-native-window-geometry-probe.json").write_text(
+        json.dumps(geometry_probe, indent=2) + "\n", encoding="utf-8"
+    )
+
     live_display_state = run_macos_swift_json(MACOS_LIVE_DISPLAY_STATE_SWIFT, [])
     (output / "macos-01-files-and-books.live-display-state.json").write_text(
         json.dumps(live_display_state, indent=2) + "\n", encoding="utf-8"
