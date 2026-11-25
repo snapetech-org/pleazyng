@@ -22,6 +22,111 @@ WORKFLOW = (ROOT / ".github/workflows/apple-store-screenshots.yml").read_text(en
 
 
 class StoreKitReviewCaptureTests(unittest.TestCase):
+    @staticmethod
+    def write_png_header(path: Path, width: int, height: int) -> None:
+        path.write_bytes(
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+            + struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+            + b"\x00" * 16_000
+        )
+
+    def test_macos_screenshot_resampling_preserves_raw_and_records_uniform_scale(self) -> None:
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            for filename in capture.SCREENSHOTS["macos"].values():
+                self.write_png_header(output / filename, 912, 570)
+
+            def fake_sips(args: list[str], **_: object) -> object:
+                self.assertEqual(args[:7], [
+                    "/usr/bin/sips", "-s", "format", "png", "-z", "800", "1280",
+                ])
+                self.write_png_header(Path(args[-1]), 1280, 800)
+                return type("Result", (), {"returncode": 0, "stderr": "", "stdout": ""})()
+
+            geometry = {
+                "window_frame_points": [56, 80, 912, 570],
+                "output_window_image_pixels": [912, 570],
+            }
+
+            with (
+                patch.object(capture.subprocess, "run", side_effect=fake_sips) as run_sips,
+                patch.object(capture.capture_tools, "normalize_opaque_rgb_png", return_value={
+                    "source_color_type": 2, "output_color_type": 2,
+                    "alpha_was_opaque": None, "rgb_samples_modified": False,
+                }),
+                patch.object(capture.capture_tools, "png_color_type", return_value=2),
+                patch.object(capture.capture_tools, "require_visible_screen_content", return_value={"visible": True}),
+            ):
+                records = capture.resample_macos_listing_screenshots(
+                    output, app_hash="a" * 64, capture_tools_sha="b" * 40,
+                    window_geometries={name: geometry for name in capture.SCREENSHOTS["macos"]},
+                    build_defines=["SUPPORTER_MODE=iap"],
+                )
+
+            self.assertEqual(run_sips.call_count, 3)
+            self.assertEqual([record["filename"] for record in records], list(capture.MACOS_LISTING_OUTPUTS.values()))
+            self.assertEqual(records[1]["dimensions"], [1280, 800])
+            self.assertEqual(records[1]["raw_capture"]["dimensions"], [912, 570])
+            self.assertEqual(records[1]["resampling"]["scale_x"], records[1]["resampling"]["scale_y"])
+            self.assertFalse(records[1]["resampling"]["cropped"])
+            self.assertFalse(records[1]["resampling"]["padded"])
+            self.assertEqual(records[1]["png_color_type"], 2)
+            self.assertEqual(records[1]["app_bundle_sha256"], "a" * 64)
+            self.assertEqual(records[1]["build_defines"], ["SUPPORTER_MODE=iap"])
+            self.assertEqual(records[1]["native_window_geometry"]["window_frame_points"], [56, 80, 912, 570])
+            self.assertTrue((output / "macos-01-files-and-books-localtest.raw.png").is_file())
+            self.assertTrue((output / "macos-01-files-and-books.png").is_file())
+
+    def test_macos_screenshot_resampling_rejects_a_window_outside_16_10(self) -> None:
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            self.write_png_header(output / "macos-00-trial-offer-localtest.png", 900, 570)
+            geometry = {
+                "window_frame_points": [56, 80, 900, 570],
+                "output_window_image_pixels": [900, 570],
+            }
+            with patch.object(capture.subprocess, "run") as run_sips:
+                with self.assertRaisesRegex(ValueError, "requested live 912x570"):
+                    capture.resample_macos_listing_screenshots(
+                        output, app_hash="a" * 64, capture_tools_sha="b" * 40,
+                        window_geometries={"pleazyng-localtest-trial-offer-macos": geometry},
+                        build_defines=["SUPPORTER_MODE=iap"],
+                    )
+            run_sips.assert_not_called()
+            self.assertTrue((output / "macos-00-trial-offer-localtest.png").is_file())
+
+    def test_macos_listing_manifest_has_uploader_compatible_capture_provenance(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build_receipt = root / "build-provenance.json"
+            build_receipt.write_text("verified retained build\n", encoding="utf-8")
+            args = type("CaptureArgs", (), {
+                "capture_tools_sha": "a" * 40,
+                "producer_run_id": "45505729459",
+                "producer_run_attempt": "1",
+                "run_id": "45599999999",
+                "run_attempt": "1",
+            })()
+            screenshot = {
+                "filename": "macos-01-files-and-books.png",
+                "capture_scene": "Post-onboarding local Files and Books screen. Genuine app content.",
+                "capture_sha256": "c" * 64,
+                "dimensions": [1280, 800],
+                "app_bundle_sha256": "d" * 64,
+            }
+            with patch.object(capture, "command", return_value="verified"):
+                manifest = capture.listing_capture_manifest(
+                    [screenshot], receipt={"build_defines": ["SUPPORTER_MODE=iap"]},
+                    app_hash="d" * 64, args=args, build_receipt_path=build_receipt,
+                )
+            self.assertEqual(manifest["product_version"], capture.VERSION)
+            self.assertEqual(manifest["product_build"], capture.BUILD_NUMBER)
+            self.assertEqual(manifest["source_sha"], capture.SOURCE_SHA)
+            self.assertEqual(manifest["capture_tools_sha"], "a" * 40)
+            self.assertEqual(manifest["platform"], "macOS")
+            self.assertEqual(manifest["build_configuration"], "Release Archive")
+            self.assertEqual(manifest["captures"], [screenshot])
+
     def test_capture_tools_helper_references_exist(self) -> None:
         tree = ast.parse(Path(capture.__file__).read_text(encoding="utf-8"))
         names = {
@@ -771,7 +876,7 @@ class StoreKitReviewCaptureTests(unittest.TestCase):
             WORKFLOW,
         )
         self.assertIn(
-            "(inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27'",
+            "inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26'",
             WORKFLOW,
         )
 

@@ -166,7 +166,7 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
     def test_mac_listing_capture_probes_public_arm_display_before_restoring_the_app(self) -> None:
         macos = job_text("macos", "package")
         self.assertIn(
-            "runs-on: ${{ (inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel' }}",
+            "runs-on: ${{ inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26' || ((inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel') }}",
             macos,
         )
         probe = named_step_text(macos, "Probe and select native Mac display mode before downloading the app")
@@ -182,6 +182,52 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         self.assertIn("/Applications/Xcode_27.2.app/Contents/Developer", named_step_text(
             macos, "Select supported Xcode for Mac OCR capture"
         ))
+
+    def test_macos26_localtest_capture_uses_retained_app_and_isolated_storekit_flow(self) -> None:
+        target = "macos-in-use-capture-macos26-only"
+        macos = job_text("macos", "package")
+        ios = job_text("ios", "tvos")
+        tvos = job_text("tvos", "macos")
+        package = job_text("package", None)
+
+        self.assertIn(f"- {target}", WORKFLOW)
+        self.assertIn(target, macos.split("\n", 2)[1])
+        self.assertNotIn(target, ios)
+        self.assertNotIn(target, tvos)
+        self.assertNotIn(target, package)
+        self.assertIn("&& 'macos-26'", macos)
+        self.assertIn("Select public macOS 26 Xcode for retained-app LOCALTEST", macos)
+        xcode = named_step_text(macos, "Select public macOS 26 Xcode for retained-app LOCALTEST")
+        self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", xcode)
+        self.assertIn("== 'Xcode 26.6'", xcode)
+        self.assertIn("== '26.6'", xcode)
+
+        for step_name in (
+            "Verify the prior build artifact producer",
+            "Download prior macOS build",
+            "Validate and restore prior macOS build",
+        ):
+            self.assertIn(target, named_step_condition(macos, step_name), step_name)
+        for step_name in (
+            "Build the unsigned Mac App Store candidate",
+            "Preserve the compiled unsigned Mac app before capture",
+            "Capture the actual macOS app window",
+        ):
+            self.assertIn(f"inputs.target != '{target}'", named_step_condition(macos, step_name), step_name)
+
+        capture = named_step_text(macos, "Capture Mac app with native LOCALTEST trial history")
+        self.assertIn(target, named_step_condition(macos, "Capture Mac app with native LOCALTEST trial history"))
+        self.assertIn("--producer-run-attempt", capture)
+        self.assertIn("capture_apple_macos_tvos_storekit.py capture", capture)
+        self.assertIn(target, named_step_condition(macos, "Install XcodeGen for native Mac UI capture"))
+        self.assertIn(target, named_step_condition(macos, "Select public macOS 26 Xcode for retained-app LOCALTEST"))
+        self.assertIn(target, macos[macos.index("Verify the prior build artifact producer"):])
+        in_use_artifact = re.search(
+            r"- uses: actions/upload-artifact@[^\n]+\n\s+if: ([^\n]+)\n\s+with:\n\s+name: apple-store-in-use-captures-macos-",
+            macos,
+        )
+        self.assertIsNotNone(in_use_artifact)
+        self.assertIn(target, in_use_artifact.group(1))
 
     def test_pinned_macos_tvos_producer_builds_only_those_platforms_and_retains_evidence(self) -> None:
         target = "macos-tvos-in-use-producer-only"

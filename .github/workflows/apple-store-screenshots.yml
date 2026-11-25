@@ -20,6 +20,7 @@ on:
           - ipad-in-use-capture-only
           - ipad-listing-producer-only
           - macos-in-use-capture-only
+          - macos-in-use-capture-macos26-only
           - macos-listing-capture-only
           - macos-in-use-diagnostic-only
           - tvos-listing-only
@@ -718,12 +719,12 @@ jobs:
           retention-days: 7
 
   macos:
-    if: github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && (inputs.target == 'all' || inputs.target == 'ios-macos-only' || inputs.target == 'macos-only' || inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only' || inputs.target == 'macos-tvos-in-use-producer-only')
+    if: github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && (inputs.target == 'all' || inputs.target == 'ios-macos-only' || inputs.target == 'macos-only' || inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only' || inputs.target == 'macos-tvos-in-use-producer-only')
     concurrency:
       group: pleazyng-apple-store-screenshots-macos
       cancel-in-progress: false
       queue: max
-    runs-on: ${{ (inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel' }}
+    runs-on: ${{ inputs.target == 'macos-in-use-capture-macos26-only' && 'macos-26' || ((inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only') && 'xcode-27' || 'macos-26-intel') }}
     timeout-minutes: 210
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -842,10 +843,10 @@ jobs:
 
       - name: Verify the prior build artifact producer
         id: producer
-        if: inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only'
+        if: inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only'
         env:
           GH_TOKEN: ${{ github.token }}
-          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
+          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
           PRODUCER_RUN_ATTEMPT_INPUT: ${{ inputs.macos_artifact_run_attempt }}
           CAPTURE_TARGET: ${{ inputs.target }}
         run: |
@@ -855,7 +856,7 @@ jobs:
           [[ "$workflow_id" =~ ^[0-9]+$ ]]
           if [[ -n "$PRODUCER_RUN_ATTEMPT_INPUT" ]]; then
             case "$CAPTURE_TARGET" in
-              app-in-use-capture-only|macos-in-use-capture-only|macos-listing-capture-only|macos-in-use-diagnostic-only) ;;
+              app-in-use-capture-only|macos-in-use-capture-only|macos-in-use-capture-macos26-only|macos-listing-capture-only|macos-in-use-diagnostic-only) ;;
               *) echo "An explicit Mac producer attempt is unsupported for target $CAPTURE_TARGET" >&2; exit 1 ;;
             esac
             [[ "$PRODUCER_RUN_ATTEMPT_INPUT" =~ ^[1-9][0-9]*$ ]]
@@ -894,18 +895,18 @@ jobs:
           fi
 
       - name: Download prior macOS build
-        if: inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only'
+        if: inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: apple-store-build-macos-${{ inputs.product_version || '3.0.37' }}
-          run-id: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
+          run-id: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/apple-store-build-macos-input
 
       - name: Validate and restore prior macOS build
-        if: inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only'
+        if: inputs.target == 'capture-only' || inputs.target == 'macos-paywall-capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only'
         env:
-          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
+          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-in-use-diagnostic-only') && inputs.macos_artifact_run_id || inputs.artifact_run_id }}
           PRODUCER_RUN_ATTEMPT: ${{ steps.producer.outputs.run_attempt }}
           PRODUCER_TOOLS_SHA: ${{ steps.producer.outputs.tool_sha }}
         run: |
@@ -928,6 +929,14 @@ jobs:
           [[ "$(xcodebuild -version | sed -n '1p')" == 'Xcode 27.2' ]]
           [[ "$(xcrun --sdk macosx --show-sdk-version)" == '27.2' ]]
 
+      - name: Select public macOS 26 Xcode for retained-app LOCALTEST
+        if: inputs.target == 'macos-in-use-capture-macos26-only'
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
+          [[ "$(xcodebuild -version | sed -n '1p')" == 'Xcode 26.6' ]]
+          [[ "$(xcrun --sdk macosx --show-sdk-version)" == '26.6' ]]
+
       - name: Select supported Xcode for Mac OCR capture
         if: inputs.target == 'macos-listing-capture-only'
         run: |
@@ -937,11 +946,11 @@ jobs:
           [[ "$(xcrun --sdk macosx --show-sdk-version)" == '27.2' ]]
 
       - name: Load pinned Flutter SDK
-        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         run: python3 scripts/flutter/load_sdk_pin.py --github-env
 
       - name: Install XcodeGen for native Mac UI capture
-        if: inputs.target == 'macos-in-use-capture-only'
+        if: inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -949,21 +958,21 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
 
       - name: Setup Flutter
-        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         uses: ./.github/actions/setup-flutter-apple
         with:
           hosted-xcode-version: '26.5'
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
       - name: Cache Pub dependencies
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.PUB_CACHE }}
           key: apple-store-macos-v${{ inputs.product_version || '3.0.37' }}-${{ runner.os }}-${{ runner.arch }}-pub-${{ hashFiles('pubspec.yaml', 'pubspec.lock') }}
 
       - name: Install native build tools
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -972,7 +981,7 @@ jobs:
           command -v git-lfs >/dev/null || brew install git-lfs
 
       - name: Install CocoaPods
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:$PATH"
@@ -987,25 +996,25 @@ jobs:
           echo "$RUNNER_TEMP/cocoapods-bin" >> "$GITHUB_PATH"
 
       - name: Install locked Flutter dependencies
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         run: flutter pub get --enforce-lockfile --no-example
 
       - name: Prefetch checksum-pinned macOS native downloads
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         run: python3 scripts/prepare_native_downloads.py --sqlite-platform macos
 
       - name: Prepare run-local Swift package checkout
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         run: mkdir -p build/macos/SourcePackages
 
       - name: Refresh pinned macOS Swift packages
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         env:
           PLEAZYNG_APPLE_SOURCE_ROOT: ${{ github.workspace }}
         run: capture-tools/scripts/refresh_apple_spm.sh macos
 
       - name: Build the unsigned Mac App Store candidate
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         env:
           PLEAZYNG_APPLE_SOURCE_ROOT: ${{ github.workspace }}
         run: |
@@ -1016,7 +1025,7 @@ jobs:
             --derived-data-dir "$RUNNER_TEMP/apple-store-macos-derived-data"
 
       - name: Preserve the compiled unsigned Mac app before capture
-        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
         run: |
@@ -1030,7 +1039,7 @@ jobs:
           echo "APPLE_STORE_BUILD_RECEIPT=$RUNNER_TEMP/apple-store-build-macos/build-provenance.json" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always() && inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
+        if: always() && inputs.target != 'capture-only' && inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only'
         with:
           name: apple-store-build-macos-${{ inputs.product_version || '3.0.37' }}
           path: |
@@ -1040,7 +1049,7 @@ jobs:
           retention-days: 7
 
       - name: Capture the actual macOS app window
-        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only' && inputs.target != 'macos-tvos-in-use-producer-only'
+        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only' && inputs.target != 'macos-tvos-in-use-producer-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
         run: |
@@ -1083,7 +1092,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/apple-store-in-use-captures-macos"
 
       - name: Capture Mac app with native LOCALTEST trial history
-        if: inputs.target == 'macos-in-use-capture-only'
+        if: inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
           PRODUCER_RUN_ID: ${{ inputs.macos_artifact_run_id }}
@@ -1128,7 +1137,7 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only' && inputs.target != 'macos-tvos-in-use-producer-only'
+        if: inputs.target != 'macos-paywall-capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'macos-in-use-capture-only' && inputs.target != 'macos-in-use-capture-macos26-only' && inputs.target != 'macos-listing-capture-only' && inputs.target != 'macos-in-use-diagnostic-only' && inputs.target != 'macos-tvos-in-use-producer-only'
         with:
           name: apple-store-captures-macos-${{ inputs.product_version || '3.0.37' }}
           path: ${{ runner.temp }}/apple-store-captures-macos/
@@ -1136,7 +1145,7 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always() && (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-tvos-in-use-producer-only')
+        if: always() && (inputs.target == 'app-in-use-capture-only' || inputs.target == 'macos-in-use-capture-only' || inputs.target == 'macos-in-use-capture-macos26-only' || inputs.target == 'macos-listing-capture-only' || inputs.target == 'macos-tvos-in-use-producer-only')
         with:
           name: apple-store-in-use-captures-macos-${{ inputs.product_version || '3.0.37' }}
           path: ${{ runner.temp }}/apple-store-in-use-captures-macos/

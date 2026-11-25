@@ -16,6 +16,7 @@ WORKFLOW_PATH = ".github/workflows/apple-store-screenshots.yml"
 MACOS_CAPTURE_TARGETS = {
     "app-in-use-capture-only",
     "macos-in-use-capture-only",
+    "macos-in-use-capture-macos26-only",
     "macos-in-use-diagnostic-only",
 }
 SUCCESSFUL_MAC_BUILD_STEPS = (

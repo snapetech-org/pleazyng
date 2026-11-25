@@ -55,7 +55,13 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     // through the actual product app and its native StoreKit integration.
     let app = XCUIApplication(bundleIdentifier: appBundleID)
     app.launch()
+#if os(macOS)
+    let initialMacCapture = try captureMacWindowScreenshot(of: app)
+    try assertMacListingWindowGeometry(initialMacCapture)
+    attachMacScreenshot(initialMacCapture, named: "pleazyng-diagnostic-after-launch-macos")
+#else
     try attachScreenshot(of: app, named: "pleazyng-diagnostic-after-launch-\(platformName())")
+#endif
     attachText(app.debugDescription, named: "pleazyng-diagnostic-accessibility-after-launch-\(platformName())")
 
     #if os(macOS)
@@ -586,6 +592,17 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
       XCTAssertEqual(retinaMapping.scaleX, 2)
       XCTAssertEqual(retinaMapping.scaleY, 2)
 
+      let listingWindow = CGRect(x: 56, y: 80, width: 912, height: 570)
+      let listingMapping = try resolveMacScreenshotMapping(
+        rawImageSize: CGSize(width: 1024, height: 768), screenFrame: screen, windowFrame: listingWindow)
+      XCTAssertEqual(listingMapping.cropRectInPixels, listingWindow)
+      XCTAssertEqual(listingWindow.width * 5, listingWindow.height * 8)
+      let listingRetinaMapping = try resolveMacScreenshotMapping(
+        rawImageSize: CGSize(width: 2048, height: 1536), screenFrame: screen, windowFrame: listingWindow)
+      XCTAssertEqual(listingRetinaMapping.cropRectInPixels, CGRect(x: 112, y: 160, width: 1824, height: 1140))
+      XCTAssertEqual(listingRetinaMapping.scaleX, 2)
+      XCTAssertEqual(listingRetinaMapping.scaleY, 2)
+
       let upperScreenText = CGRect(x: 0.1, y: 0.7, width: 0.2, height: 0.2)
       let lowerScreenText = CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2)
       let geometry = fixtureGeometry(window)
@@ -614,15 +631,36 @@ final class PleazyngStoreKitLocalTrialReviewUITests: XCTestCase {
     private func fixtureGeometry(_ window: CGRect) -> MacScreenshotGeometry {
       MacScreenshotGeometry(
         basisNames: ["window"],
-        rawImageSize: CGSize(width: 800, height: 632),
+        rawImageSize: window.size,
         screenFrame: CGRect(x: 0, y: 0, width: 1024, height: 768),
         applicationFrame: window,
         windowFrame: window,
         selectedSourceFrame: window,
-        cropRectInPixels: CGRect(x: 0, y: 0, width: 800, height: 632),
-        outputImageSize: CGSize(width: 800, height: 632),
+        cropRectInPixels: CGRect(origin: .zero, size: window.size),
+        outputImageSize: window.size,
         scaleX: 1,
         scaleY: 1)
+    }
+
+    private func assertMacListingWindowGeometry(_ capture: MacWindowScreenshot) throws {
+      let frame = capture.geometry.windowFrame
+      let expectedWidth: CGFloat = 912
+      let expectedHeight: CGFloat = 570
+      let raw = capture.geometry.outputImageSize
+      let scaleX = raw.width / frame.width
+      let scaleY = raw.height / frame.height
+      guard abs(frame.width - expectedWidth) <= 0.5,
+            abs(frame.height - expectedHeight) <= 0.5,
+            abs(frame.width * 5 - frame.height * 8) <= 0.01,
+            raw.width * 5 == raw.height * 8,
+            scaleX.isFinite, scaleY.isFinite, scaleX > 0,
+            abs(scaleX - scaleY) <= 0.02 else {
+        throw NSError(
+          domain: "PleazyngStoreKitReviewCapture", code: 15,
+          userInfo: [NSLocalizedDescriptionKey:
+            "The complete captured Mac app window is not the requested native 912x570 16:10 window: " +
+            capture.geometry.json(name: "macos-native-listing-window")])
+      }
     }
 
     private func resolveMacScreenshotMapping(

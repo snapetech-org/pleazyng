@@ -63,6 +63,13 @@ SCREENSHOTS = {
         "pleazyng-localtest-supporter-tvos": "tvos-02-supporter-localtest.png",
     },
 }
+MACOS_LISTING_OUTPUTS = {
+    "pleazyng-localtest-trial-offer-macos": "macos-00-trial-offer-localtest.png",
+    "pleazyng-localtest-files-books-macos": "macos-01-files-and-books.png",
+    "pleazyng-localtest-supporter-macos": "macos-02-supporter-localtest.png",
+}
+MACOS_CAPTURE_WINDOW_POINTS = (912, 570)
+MACOS_LISTING_OUTPUT_PIXELS = (1280, 800)
 PLATFORM = {
     "macos": {
         "xcode_platform": "macOS",
@@ -100,6 +107,158 @@ def build_screenshot_receipt(*, attachment_name: str, path: Path) -> dict[str, A
         "size_bytes": path.stat().st_size,
         "dimensions": [width, height],
         "visible_content_validation": content,
+    }
+
+
+def resample_macos_listing_screenshots(
+    output: Path, *, app_hash: str, capture_tools_sha: str,
+    window_geometries: dict[str, dict[str, Any]], build_defines: list[str],
+) -> list[dict[str, Any]]:
+    """Uniformly resample complete native app-window captures to Apple's Mac size."""
+    captures: list[dict[str, Any]] = []
+    output_width, output_height = MACOS_LISTING_OUTPUT_PIXELS
+    for attachment_name, source_name in SCREENSHOTS["macos"].items():
+        source = output / source_name
+        raw = output / f"{Path(source_name).stem}.raw.png"
+        target_name = MACOS_LISTING_OUTPUTS[attachment_name]
+        target = output / target_name
+        geometry = window_geometries.get(attachment_name)
+        if not isinstance(geometry, dict):
+            raise ValueError(f"XCTest did not retain native app-window geometry for {attachment_name}")
+        window_frame = geometry.get("window_frame_points")
+        if (not isinstance(window_frame, list) or len(window_frame) != 4
+                or window_frame[2:] != list(MACOS_CAPTURE_WINDOW_POINTS)):
+            raise ValueError(f"XCTest screenshot did not come from the requested live 912x570 Mac window: {geometry}")
+        source.rename(raw)
+        raw_width, raw_height = capture_tools.png_dimensions(raw)
+        if raw_width * 5 != raw_height * 8:
+            raise ValueError(
+                f"The native Mac app-window capture must be a complete 16:10 image before resampling: "
+                f"{raw_width}x{raw_height} ({raw})"
+            )
+        scale_x = output_width / raw_width
+        scale_y = output_height / raw_height
+        if abs(scale_x - scale_y) > 1e-12:
+            raise ValueError(f"The Apple Mac output dimensions would distort the genuine window: {scale_x} vs {scale_y}")
+        geometry_pixels = geometry.get("output_window_image_pixels")
+        if geometry_pixels != [raw_width, raw_height]:
+            raise ValueError(f"Raw app-window screenshot pixels do not match XCTest's recorded geometry: {geometry}")
+        result = subprocess.run(
+            ["/usr/bin/sips", "-s", "format", "png", "-z", str(output_height), str(output_width),
+             str(raw), "--out", str(target)],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Apple sips could not uniformly resample the complete native window: "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+        actual_dimensions = capture_tools.png_dimensions(target)
+        if actual_dimensions != MACOS_LISTING_OUTPUT_PIXELS:
+            raise ValueError(f"Apple sips returned unexpected Mac screenshot dimensions: {actual_dimensions}")
+        if target.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError(f"Apple Mac screenshot exceeds the App Store Connect 16 MiB image limit: {target}")
+        png_encoding = capture_tools.normalize_opaque_rgb_png(target)
+        if capture_tools.png_color_type(target) != 2 or png_encoding["alpha_was_opaque"] is False:
+            raise ValueError(f"Apple App Store screenshots must be opaque RGB PNGs: {target}")
+        raw_content = capture_tools.require_visible_screen_content(raw)
+        final_content = capture_tools.require_visible_screen_content(target)
+        captures.append({
+            "filename": target_name,
+            "platform": "macOS",
+            "build_configuration": "Release Archive",
+            "capture_scene": (
+                "Post-onboarding local Files and Books screen. The actual Pleazyng app was navigated through its "
+                "local library after the UI initiated the isolated LOCALTEST free trial. No media server or account was configured."
+                if attachment_name == "pleazyng-localtest-files-books-macos" else
+                "Actual Pleazyng app screen captured during the isolated LOCALTEST trial review flow. "
+                "This diagnostic screen is retained to document the observed app UI."
+            ),
+            "capture_method": [
+                "XCTest XCUIScreen screenshot cropped to the actual native Pleazyng app window",
+                "/usr/bin/sips resampled the complete 16:10 window uniformly to 1280x800; no crop, padding, overlays, or added material",
+            ],
+            "source_tag": SOURCE_TAG,
+            "source_sha": SOURCE_SHA,
+            "capture_tools_sha": capture_tools_sha,
+            "bundle_id": BUNDLE_ID,
+            "app_version": VERSION,
+            "app_build": BUILD_NUMBER,
+            "app_bundle_sha256": app_hash,
+            "capture_sha256": sha256_file(target),
+            "dimensions": list(actual_dimensions),
+            "png_color_type": capture_tools.png_color_type(target),
+            "png_alpha_channel": False,
+            "png_encoding": png_encoding,
+            "raw_capture": {
+                "filename": raw.name,
+                "sha256": sha256_file(raw),
+                "size_bytes": raw.stat().st_size,
+                "dimensions": [raw_width, raw_height],
+                "png_color_type": capture_tools.png_color_type(raw),
+                "visible_content_validation": raw_content,
+            },
+            "native_window_geometry": geometry,
+            "resampling": {
+                "tool": "/usr/bin/sips",
+                "method": "uniform scale of the complete app-window PNG",
+                "source_pixels": [raw_width, raw_height],
+                "output_pixels": [output_width, output_height],
+                "scale_x": scale_x,
+                "scale_y": scale_y,
+                "cropped": False,
+                "padded": False,
+                "overlays_added": False,
+                "material_added": False,
+                "hidden_ui": False,
+            },
+            "visible_content_validation": final_content,
+            "build_defines": list(build_defines),
+            "qualification": (
+                "Exact retained Pleazyng App Store IAP macOS bundle, shown in the actual native app window after the observed "
+                "isolated StoreKit LOCALTEST trial flow. LOCALTEST is not App Store Connect, App Store Sandbox, or a live purchase. "
+                "The complete 16:10 app window was uniformly resampled to an Apple-accepted Mac screenshot size."
+            ),
+        })
+    return captures
+
+
+def listing_capture_manifest(
+    captures: list[dict[str, Any]], *, receipt: dict[str, Any], app_hash: str,
+    args: argparse.Namespace, build_receipt_path: Path,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "product": "Pleazyng",
+        "product_version": VERSION,
+        "product_build": BUILD_NUMBER,
+        "bundle_id": BUNDLE_ID,
+        "source_tag": SOURCE_TAG,
+        "source_sha": SOURCE_SHA,
+        "capture_tools_sha": args.capture_tools_sha,
+        "platform": "macOS",
+        "build_mode": "App Store IAP",
+        "build_configuration": "Release Archive",
+        "build_defines": list(receipt["build_defines"]),
+        "app_bundle_sha256": app_hash,
+        "producer_build_receipt_sha256": sha256_file(build_receipt_path),
+        "producer_run_id": args.producer_run_id,
+        "producer_run_attempt": args.producer_run_attempt,
+        "capture_run_id": args.run_id,
+        "capture_run_attempt": args.run_attempt,
+        "capture_os_version": command(["sw_vers", "-productVersion"], capture=True, timeout=30),
+        "capture_architecture": command(["uname", "-m"], capture=True, timeout=30),
+        "capture_xcode_version": command(["xcodebuild", "-version"], capture=True, timeout=60),
+        "capture_window_points": list(MACOS_CAPTURE_WINDOW_POINTS),
+        "captures": captures,
+        "qualification": (
+            "Authentic app-in-use screenshots from the exact retained macOS App Store IAP app bundle. "
+            "The UI was navigated through the isolated StoreKit LOCALTEST free-trial flow; this does not claim "
+            "App Store Connect, App Store Sandbox, live purchase, media server, account, or playback verification."
+        ),
     }
 
 
@@ -705,6 +864,20 @@ def export_attachments(result_bundle: Path, output: Path, platform: str) -> tupl
         destination = output / filename
         shutil.copyfile(source, destination)
         exported[name] = destination
+        if platform == "macos":
+            geometry_attachment = unique_attachment(attachments, f"{name}-capture-geometry")
+            geometry_filename = geometry_attachment.get("exportedFileName", "")
+            if not geometry_filename or Path(geometry_filename).name != geometry_filename:
+                raise ValueError(f"Invalid exported app-window geometry for screenshot {name!r}")
+            geometry_source = export_dir / geometry_filename
+            if not geometry_source.is_file():
+                raise FileNotFoundError(f"Missing XCTest native window geometry: {geometry_source}")
+            geometry_path = output / f"{Path(filename).stem}.window-geometry.json"
+            shutil.copyfile(geometry_source, geometry_path)
+            geometry = json.loads(geometry_path.read_text(encoding="utf-8"))
+            if not isinstance(geometry, dict):
+                raise ValueError(f"XCTest app-window geometry is not a JSON object: {geometry_path}")
+            exported[f"geometry:{name}"] = geometry_path
 
     record_name = "pleazyng-storekit-macos-tvos-localtest-record"
     record_attachment = unique_attachment(attachments, record_name)
@@ -1114,6 +1287,7 @@ def capture(args: argparse.Namespace) -> None:
     failure: str | None = None
     scheme_evidence: dict[str, str] | None = None
     pre_xctest_app_diagnostic: dict[str, Any] | None = None
+    macos_frame_preference: dict[str, Any] | None = None
     try:
         simulator_id = None
         if platform == "tvos":
@@ -1239,6 +1413,12 @@ def capture(args: argparse.Namespace) -> None:
             installed_app_evidence = install_tvos_app(simulator, app_staged, receipt)
             write_json(output / "simulator-installed-app.json", installed_app_evidence)
 
+        if platform == "macos":
+            macos_frame_preference = capture_tools.write_macos_main_window_frame_preference(
+                width=MACOS_CAPTURE_WINDOW_POINTS[0], height=MACOS_CAPTURE_WINDOW_POINTS[1], x=56, y=80
+            )
+            write_json(output / "macos-window-frame-preference.json", macos_frame_preference)
+
         result_bundle = output / f"pleazyng-{platform}-storekit-localtest.xcresult"
         test_log = output / "storekit-ui-test.log"
         test_result = run_logged(
@@ -1271,7 +1451,7 @@ def capture(args: argparse.Namespace) -> None:
             screenshot_receipts[path.name] = build_screenshot_receipt(
                 attachment_name=attachment_name, path=path
             )
-        write_json(output / "capture-provenance.json", {
+        storekit_provenance = {
             "schema_version": 1,
             "environment": "LOCALTEST",
             "qualification": "The actual product UI created a native free-trial transaction using the exact scheme-associated Apple StoreKitTest catalog. This is LOCALTEST only, not App Store Connect, App Store Sandbox, or a live purchase.",
@@ -1303,6 +1483,7 @@ def capture(args: argparse.Namespace) -> None:
                 "xcode_version": command(["xcodebuild", "-version"], capture=True, timeout=60),
                 "host_os_version": command(["sw_vers", "-productVersion"], capture=True, timeout=30),
                 "host_architecture": command(["uname", "-m"], capture=True, timeout=30),
+                "macos_window_frame_preference": macos_frame_preference,
                 "simulator": simulator,
                 "simulator_readiness_before_app_install": simulator_readiness,
                 "pre_xctest_app_diagnostic": pre_xctest_app_diagnostic,
@@ -1346,7 +1527,35 @@ def capture(args: argparse.Namespace) -> None:
                 if static_dependency_receipt is not None else None
             ),
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if platform == "macos":
+            window_geometries = {
+                name.removeprefix("geometry:"): json.loads(path.read_text(encoding="utf-8"))
+                for name, path in exported.items() if name.startswith("geometry:")
+            }
+            listing_captures = resample_macos_listing_screenshots(
+                output, app_hash=app_hash, capture_tools_sha=args.capture_tools_sha,
+                window_geometries=window_geometries, build_defines=receipt["build_defines"],
+            )
+            raw_screenshot_receipts = {}
+            for capture_record in listing_captures:
+                raw_name = capture_record["raw_capture"]["filename"]
+                source_name = Path(raw_name).name.removesuffix(".raw.png") + ".png"
+                raw_receipt = dict(screenshot_receipts[source_name])
+                raw_receipt["filename"] = raw_name
+                raw_receipt["dimensions"] = capture_record["raw_capture"]["dimensions"]
+                raw_receipt["sha256"] = capture_record["raw_capture"]["sha256"]
+                raw_receipt["size_bytes"] = capture_record["raw_capture"]["size_bytes"]
+                raw_screenshot_receipts[raw_name] = raw_receipt
+            storekit_provenance["screenshots"] = raw_screenshot_receipts
+            write_json(output / "storekit-localtest-provenance.json", storekit_provenance)
+            write_json(output / "capture-provenance.json", listing_capture_manifest(
+                listing_captures, receipt=receipt, app_hash=app_hash, args=args,
+                build_receipt_path=build_receipt_path,
+            ))
+        else:
+            write_json(output / "storekit-localtest-provenance.json", storekit_provenance)
+            write_json(output / "capture-provenance.json", storekit_provenance)
         print(f"Captured authentic {platform} LOCALTEST trial-backed app screens in {output}")
     except Exception as error:
         failure = f"{type(error).__name__}: {error}"
@@ -1365,6 +1574,7 @@ def capture(args: argparse.Namespace) -> None:
             "producer_run_attempt": args.producer_run_attempt,
             "error": failure,
             "scheme_configuration": scheme_evidence,
+            "macos_window_frame_preference": macos_frame_preference,
             "simulator_readiness_before_app_install": simulator_readiness,
             "pre_xctest_app_diagnostic": pre_xctest_app_diagnostic,
             "pre_xctest_app_diagnostic_receipt_sha256": (
