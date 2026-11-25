@@ -1,6 +1,6 @@
 # ng-runner-policy: hosted-default-v2
 name: Prepare an Apple review draft
-run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || (inputs.capture_run != '' || inputs.tvos_capture_run != '') && 'stage-apple-screenshot' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
+run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || inputs.add_for_review && 'add-apple-version-for-review' || (inputs.capture_run != '' || inputs.tvos_capture_run != '') && 'stage-apple-screenshot' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
 
 on:
   workflow_dispatch:
@@ -20,6 +20,10 @@ on:
         required: true
       inspect_only:
         description: Read the draft, screenshot placements, and purchase states without editing
+        type: boolean
+        default: false
+      add_for_review:
+        description: Add the exact attached app version to an editable App Review submission
         type: boolean
         default: false
       capture_run:
@@ -95,10 +99,11 @@ jobs:
           TVOS_CAPTURE_RUN: ${{ inputs.tvos_capture_run }}
           PLATFORM: ${{ inputs.platform }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
+          ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          [[ "$CAPTURE_RUN" =~ ^[1-9][0-9]*$ && "$INSPECT_ONLY" != true ]]
+          [[ "$CAPTURE_RUN" =~ ^[1-9][0-9]*$ && "$INSPECT_ONLY" != true && "$ADD_FOR_REVIEW" != true ]]
           [[ -z "$TVOS_CAPTURE_RUN" || ( "$PLATFORM" == TV_OS && "$TVOS_CAPTURE_RUN" == "$CAPTURE_RUN" ) ]]
           case "$PLATFORM" in
             IOS) lane=ios ;;
@@ -132,7 +137,7 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/apple-listing-capture
 
-      - name: Inspect or attach the processed build to the existing draft
+      - name: Inspect the draft or prepare the processed build for review
         if: inputs.capture_run == '' && inputs.tvos_capture_run == ''
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -142,10 +147,12 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build_number }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
+          ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           PYTHONPATH: scripts
         run: |
           args=()
           if [[ "$INSPECT_ONLY" == true ]]; then args+=(--inspect-only); fi
+          if [[ "$ADD_FOR_REVIEW" == true ]]; then args+=(--add-for-review); fi
           python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \
             --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json" "${args[@]}"
 

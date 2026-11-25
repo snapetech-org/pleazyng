@@ -169,8 +169,10 @@ and digest. It places the image in the existing en-US listing and checks for
 an `ACTIVE` placement. The `IOS` lane places the 13-inch iPad image alongside
 the separately managed iPhone screenshots. Check the receipt before continuing.
 
-Add the first in-app purchases and the intended app version to the same draft,
-then submit it in the App Store Connect review screen.
+Once the required screenshots and review details are present, set
+`add_for_review=true` to add the app version to an editable review submission.
+Add the first in-app purchases to that draft and submit it in the App Store
+Connect review screen.
 [Apple's first-purchase review steps](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase)
 
 The iOS archive uses an isolated, time-bounded signing keychain. Flutter's

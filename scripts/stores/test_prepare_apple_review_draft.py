@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stores import prepare_apple_review_draft as review
@@ -85,3 +85,46 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
 
     def assert_no_patch(self):
         self.assertFalse(any(call.kwargs.get('method') == 'PATCH' for call in self.api.request.call_args_list))
+
+
+class AddVersionForReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.api = Mock()
+        self.version_link = {'type': 'appStoreVersions', 'id': 'tv-version'}
+        self.item = {'type': 'reviewSubmissionItems', 'id': 'review-item',
+                     'attributes': {'state': 'READY_FOR_REVIEW'},
+                     'relationships': {'appStoreVersion': {'data': self.version_link}}}
+        self.submission = {'type': 'reviewSubmissions', 'id': 'review-id',
+                           'attributes': {'platform': 'TV_OS', 'state': 'READY_FOR_REVIEW', 'submittedDate': None}}
+        self.listing = {'locale': 'en-US', 'description_present': True, 'support_url_present': True,
+                        'screenshots': [{'group': 'TV_PROFILE', 'state': 'ACTIVE'}]}
+        self.receipt = {'exact_build_attached': True, 'observed_draft_state': 'PREPARE_FOR_SUBMISSION',
+                        'app_store_version_id': 'tv-version', 'localizations': [self.listing],
+                        'app_review_detail': {'contact_complete': True}}
+
+    def test_add_exact_version_to_editable_review_without_submitting(self):
+        self.api.items.side_effect = [[], [], [self.item]]
+        self.api.request.side_effect = [{'data': self.submission}, {'data': self.item}]
+        with patch.object(review, 'prepare', return_value=self.receipt):
+            receipt = review.add_version_for_review(self.api, 'TV_OS', '3.0.51', '210')
+        self.assertEqual(receipt['review_item_state'], 'READY_FOR_REVIEW')
+        creation, addition = self.api.request.call_args_list
+        self.assertEqual(creation.args[0], '/v1/reviewSubmissions')
+        self.assertEqual(addition.args[0], '/v1/reviewSubmissionItems')
+        self.assertEqual(addition.args[1]['data']['relationships']['appStoreVersion']['data'], self.version_link)
+
+    def test_existing_exact_review_item_is_reused(self):
+        self.receipt['observed_draft_state'] = 'READY_FOR_REVIEW'
+        self.api.items.side_effect = [[self.submission], [self.item]]
+        with patch.object(review, 'prepare', return_value=self.receipt):
+            receipt = review.add_version_for_review(self.api, 'TV_OS', '3.0.51', '210')
+        self.assertEqual(receipt['review_item_id'], 'review-item')
+        self.api.request.assert_not_called()
+
+    def test_stop_before_creating_a_draft_when_screenshot_missing(self):
+        self.listing['screenshots'] = []
+        with patch.object(review, 'prepare', return_value=self.receipt):
+            with self.assertRaisesRegex(ValueError, 'requires active screenshots'):
+                review.add_version_for_review(self.api, 'TV_OS', '3.0.51', '210')
+        self.api.items.assert_not_called()
+        self.api.request.assert_not_called()

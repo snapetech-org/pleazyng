@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect or attach one valid, already uploaded build to its matching store version."""
+"""Prepare one valid, already uploaded App Store build for review."""
 
 import argparse
 import json
@@ -13,6 +13,11 @@ from build_apple_store_archive import AppleProfileAPI, BUNDLE, _apple_api_token
 
 APP_ID = '6826955231'
 PLATFORMS = ('IOS', 'MAC_OS', 'TV_OS')
+REQUIRED_SCREENSHOT_GROUPS = {
+    'IOS': {'IPHONE_DYNAMIC_ISLAND_MEDIUM_PROFILE', 'IPAD_13_PROFILE'},
+    'MAC_OS': {'MAC_PROFILE'},
+    'TV_OS': {'TV_PROFILE'},
+}
 
 
 def exact_record(records, kind, matches):
@@ -108,21 +113,78 @@ def inspect_review(api, draft_id, platform):
     ]}
 
 
+def add_version_for_review(api, platform, version, build_number):
+    receipt = prepare(api, platform, version, build_number, inspect_only=True)
+    if (not receipt['exact_build_attached']
+            or receipt['observed_draft_state'] not in {'PREPARE_FOR_SUBMISSION', 'READY_FOR_REVIEW'}):
+        raise ValueError('The exact attached build must be available for a new review draft')
+    listing = [locale for locale in receipt['localizations'] if locale['locale'] == 'en-US']
+    if (len(listing) != 1 or not listing[0]['description_present'] or not listing[0]['support_url_present']
+            or not receipt['app_review_detail']['contact_complete']):
+        raise ValueError('Review contact, description and support URL are required')
+    present_groups = {item['group'] for item in listing[0]['screenshots'] if item['state'] == 'ACTIVE'}
+    missing_groups = REQUIRED_SCREENSHOT_GROUPS[platform] - present_groups
+    if missing_groups:
+        raise ValueError(f'Review requires active screenshots for {", ".join(sorted(missing_groups))}')
+
+    filters = urlencode({'filter[platform]': platform, 'filter[state]': 'READY_FOR_REVIEW'})
+    submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions?{filters}')
+    if not submissions:
+        if receipt['observed_draft_state'] == 'READY_FOR_REVIEW':
+            raise ValueError('The version already belongs to a review submission that could not be identified')
+        submissions = [api.request('/v1/reviewSubmissions', {'data': {
+            'type': 'reviewSubmissions', 'attributes': {'platform': platform},
+            'relationships': {'app': {'data': {'type': 'apps', 'id': APP_ID}}},
+        }})['data']]
+    submission = exact_record(submissions, 'reviewSubmissions', lambda attrs:
+                              attrs['platform'] == platform and attrs['state'] == 'READY_FOR_REVIEW'
+                              and attrs.get('submittedDate') is None)
+
+    version_link = {'type': 'appStoreVersions', 'id': receipt['app_store_version_id']}
+    items_path = f'/v1/reviewSubmissions/{submission["id"]}/items?include=appStoreVersion'
+    items = api.items(items_path)
+    version_links = [item.get('relationships', {}).get('appStoreVersion', {}).get('data') for item in items]
+    if any(link and link != version_link for link in version_links):
+        raise ValueError('The editable review submission already contains a different version')
+    if version_link not in version_links:
+        if receipt['observed_draft_state'] == 'READY_FOR_REVIEW':
+            raise ValueError('The version is already assigned to a different review submission')
+        api.request('/v1/reviewSubmissionItems', {'data': {
+            'type': 'reviewSubmissionItems',
+            'relationships': {'reviewSubmission': {'data': {'type': submission['type'], 'id': submission['id']}},
+                              'appStoreVersion': {'data': version_link}},
+        }})
+        items = api.items(items_path)
+    matches = [entry for entry in items if entry.get('relationships', {}).get('appStoreVersion', {}).get('data')
+               == version_link]
+    item = exact_record(matches, 'reviewSubmissionItems', lambda attrs: attrs['state'] == 'READY_FOR_REVIEW')
+    return {**receipt, 'review_submission_id': submission['id'], 'review_item_id': item['id'],
+            'review_item_state': item['attributes']['state']}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--platform', required=True, choices=PLATFORMS)
     parser.add_argument('--version', required=True)
     parser.add_argument('--build-number', required=True)
     parser.add_argument('--receipt', type=Path, required=True)
-    parser.add_argument('--inspect-only', action='store_true')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--inspect-only', action='store_true')
+    modes.add_argument('--add-for-review', action='store_true')
     args = parser.parse_args()
     if not re.fullmatch(r'\d+\.\d+\.\d+', args.version) or not re.fullmatch(r'[1-9]\d*', args.build_number):
         parser.error('Expected a stable release version and positive numeric build')
     with tempfile.TemporaryDirectory(prefix='pleazyng-apple-review-') as directory:
         api = AppleProfileAPI(_apple_api_token(Path(directory)))
-        receipt = prepare(api, args.platform, args.version, args.build_number, inspect_only=args.inspect_only)
+        if args.add_for_review:
+            receipt = add_version_for_review(api, args.platform, args.version, args.build_number)
+        else:
+            receipt = prepare(api, args.platform, args.version, args.build_number, inspect_only=args.inspect_only)
     args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')
-    action = 'Inspected the review draft for' if args.inspect_only else 'Verified the attached App Store build for'
+    if args.add_for_review:
+        action = 'Verified the app version in its draft review submission for'
+    else:
+        action = 'Inspected the review draft for' if args.inspect_only else 'Verified the attached App Store build for'
     print(f'{action} {args.platform} {args.version} ({args.build_number})')
 
 
