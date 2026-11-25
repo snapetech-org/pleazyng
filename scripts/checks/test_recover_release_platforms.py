@@ -384,7 +384,7 @@ class QualifiedAssemblyReuseTests(unittest.TestCase):
             'windows_repackaging': {'artifact_id': 900, 'artifact_digest': 'sha256:' + '9' * 64},
         }
 
-    def verify(self, *, local=False):
+    def verify(self, *, local=False, current_main_sha=None, release_event=False):
         def api(path):
             if path.endswith(f'/actions/runs/{self.assembly_run}'):
                 return self.run
@@ -403,14 +403,15 @@ class QualifiedAssemblyReuseTests(unittest.TestCase):
                 return self.artifacts
             return self.jobs
 
-        environment = {'GITHUB_REF': 'refs/heads/main'}
+        environment = {'GITHUB_REF': 'refs/tags/v3.0.52' if release_event else 'refs/heads/main'}
         if not local:
             environment['GITHUB_SHA'] = self.current_sha
         with patch.dict('os.environ', environment, clear=local), \
                 patch.object(recovery, 'api', side_effect=api), \
                 patch.object(recovery, 'collection', side_effect=collection), \
                 patch('verify_embedded_release_ci.latest_attempt_jobs', side_effect=lambda attempts: attempts[0]):
-            return recovery.verify_qualification_assembly_reuse(self.proof, self.assembly_run)
+            return recovery.verify_qualification_assembly_reuse(
+                self.proof, self.assembly_run, current_main_sha=current_main_sha)
 
     def test_reuses_exact_failed_assembly_outputs_after_prepublication_gate(self):
         proof = self.verify()
@@ -426,6 +427,11 @@ class QualifiedAssemblyReuseTests(unittest.TestCase):
 
     def test_local_controller_uses_canonical_main_sha_when_github_sha_is_unavailable(self):
         proof = self.verify(local=True)
+        self.assertEqual(proof['qualification_assembly_run_id'], self.assembly_run)
+
+    def test_release_event_can_revalidate_prior_assembly_against_canonical_main(self):
+        captured_main = 'f' * 40
+        proof = self.verify(current_main_sha=captured_main, release_event=True)
         self.assertEqual(proof['qualification_assembly_run_id'], self.assembly_run)
 
     def test_publication_side_effects_wrong_runner_or_artifact_identity_reject(self):

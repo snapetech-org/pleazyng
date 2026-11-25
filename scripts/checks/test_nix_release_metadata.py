@@ -225,6 +225,116 @@ class NixMetadataTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "IDs or digests"):
                 nix.verify_supplemental_recovery(receipt, self.commit, "v3.0.33")
 
+    def test_supplemental_recovery_reauthenticates_qualified_assembly_continuation(self):
+        source_run, qualification_run = 99, 100
+        prior_assembly, final_assembly = 101, 102
+        prior_workflow, final_workflow, current_main = "f" * 40, "b" * 40, "c" * 40
+        names = {
+            "pleazyng-tvos-unsigned.ipa": "1" * 64,
+            "pleazyng-windows-x64-portable.7z": "2" * 64,
+            "pleazyng-windows-installer.exe": "3" * 64,
+            "pleazyng.3.0.33.nupkg": "4" * 64,
+        }
+        windows_artifacts = {
+            "windows-chocolatey": {"artifact_id": 201, "digest": "sha256:" + "a" * 64},
+            "windows-installer": {"artifact_id": 202, "digest": "sha256:" + "b" * 64},
+            "windows-x64-portable": {"artifact_id": 203, "digest": "sha256:" + "c" * 64},
+        }
+        proof = {
+            "source_run_id": source_run, "source_sha": self.commit, "head_sha": self.commit,
+            "version": "3.0.33", "qualification_run_id": qualification_run,
+            "platforms_complete": True,
+            "qualification_assembly_run_id": prior_assembly, "repackage_windows": False,
+            "windows_repackaging": {"assembly_artifacts": windows_artifacts},
+            "qualification_assembly_source": {
+                "source_run_id": prior_assembly, "source_sha": self.commit,
+                "workflow_source_sha": prior_workflow, "run_attempt": 1,
+                "version": "3.0.33", "assembly_artifacts": windows_artifacts,
+            },
+            "tvos_source": {
+                "source_run_id": prior_assembly, "source_sha": self.commit,
+                "workflow_source_sha": prior_workflow, "run_attempt": 1,
+                "version": "3.0.33", "include_apple_store_build": False,
+                "runtime_dependency_receipt_required": True,
+                "artifact_id": 204, "artifact_digest": "sha256:" + "d" * 64,
+            },
+        }
+        artifacts = [
+            {"name": "linux-x64", "artifact_id": 205, "source_run_id": source_run,
+             "source_sha": self.commit, "digest": "sha256:" + "e" * 64},
+            {"name": "tvos-ipa", "artifact_id": 204, "source_run_id": prior_assembly,
+             "source_sha": self.commit, "digest": "sha256:" + "d" * 64},
+            *[{
+                "name": name, "artifact_id": record["artifact_id"],
+                "source_run_id": prior_assembly, "source_sha": self.commit,
+                "digest": record["digest"],
+            } for name, record in windows_artifacts.items()],
+        ]
+        receipt_artifacts = [
+            {**item, "workflow_source_sha": (
+                prior_workflow if item["name"] in {"tvos-ipa", *windows_artifacts} else self.commit)}
+            for item in artifacts
+        ]
+        receipt = {
+            **proof,
+            "tvos_source": {**proof["tvos_source"], "package_sha256": {
+                "pleazyng-tvos-unsigned.ipa": names["pleazyng-tvos-unsigned.ipa"],
+            }},
+            "qualification_assembly_source": {
+                **proof["qualification_assembly_source"],
+                "package_sha256": {name: digest for name, digest in names.items()
+                                   if name.startswith("pleazyng-windows-") or name.endswith(".nupkg")},
+            },
+            "assembly_run_id": final_assembly, "actual_checkout_sha": final_workflow,
+            "assembly_scope": "qualified-assembly-continuation", "artifacts": receipt_artifacts,
+        }
+        manifest = "".join(f"{digest}  {name}\n" for name, digest in names.items())
+        branch = {"commit": {"sha": current_main}}
+        with patch("recover_release_platforms.verify_source_run", return_value=proof) as verify, \
+             patch("recover_release_platforms.compose_proof", return_value=proof), \
+             patch("recover_release_platforms.preflight_platform_artifacts", return_value=artifacts):
+            title = nix.verify_supplemental_recovery(
+                receipt, self.commit, "v3.0.33", manifest=manifest,
+                github=lambda path: branch if path == "branches/main" else None,
+            )
+        verify.assert_called_once_with(
+            source_run, self.commit, "3.0.33", nix.REPOSITORY,
+            qualification_run=qualification_run,
+            qualification_assembly_run=prior_assembly, current_main_sha=current_main,
+        )
+        self.assertEqual(
+            title,
+            f"action:release:pool:public:tag:v3.0.33:assembly:source:{source_run}:"
+            f"qualification:{qualification_run}:assembly:{prior_assembly}",
+        )
+        nix.verify_supplemental_assembly_identity(receipt, final_assembly, final_workflow)
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            nix.verify_supplemental_assembly_identity(receipt, final_assembly + 1, final_workflow)
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            nix.verify_supplemental_assembly_identity(receipt, final_assembly, "a" * 40)
+
+        bad_package_hashes = copy.deepcopy(receipt)
+        bad_package_hashes["tvos_source"]["package_sha256"]["pleazyng-tvos-unsigned.ipa"] = "9" * 64
+        with patch("recover_release_platforms.verify_source_run", return_value=proof), \
+             patch("recover_release_platforms.compose_proof", return_value=proof), \
+             patch("recover_release_platforms.preflight_platform_artifacts", return_value=artifacts), \
+             self.assertRaisesRegex(ValueError, "package hashes differ"):
+            nix.verify_supplemental_recovery(
+                bad_package_hashes, self.commit, "v3.0.33", manifest=manifest,
+                github=lambda path: branch if path == "branches/main" else None,
+            )
+
+        bad_workflow = copy.deepcopy(receipt)
+        bad_workflow["artifacts"][1]["workflow_source_sha"] = self.commit
+        with patch("recover_release_platforms.verify_source_run", return_value=proof), \
+             patch("recover_release_platforms.compose_proof", return_value=proof), \
+             patch("recover_release_platforms.preflight_platform_artifacts", return_value=artifacts), \
+             self.assertRaisesRegex(ValueError, "artifact IDs or digests"):
+            nix.verify_supplemental_recovery(
+                bad_workflow, self.commit, "v3.0.33", manifest=manifest,
+                github=lambda path: branch if path == "branches/main" else None,
+            )
+
     def test_ordinary_recovery_rejects_receipt_source_run_ci_and_artifact_mismatches(self):
         original, source_proof, inventory, workflow = self.ordinary_recovery()
         cases = []

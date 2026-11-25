@@ -1002,7 +1002,7 @@ def original_tvos_execution_attempt(repository, run_id, job):
     return original_attempt
 
 
-def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False, qualification_run=None, qualification_assembly_run=None, freeze=False):
+def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False, qualification_run=None, qualification_assembly_run=None, current_main_sha=None, freeze=False):
     if qualification_run is not None and any((
             rebuild_linux, rebuild_macos, rebuild_ios, rebuild_tizen, repaired_run,
             require_homebrew_cask, packaging_source_sha, workflow_source_sha, include_apple_store_build,
@@ -1014,6 +1014,8 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
             or workflow_source_sha or include_apple_store_build or tvos_run or ios_run
             or ios_developer_run or built_tvos_run or append_apple_only):
         raise RecoveryError('Prior qualified assembly reuse is limited to an unsigned assembly-only continuation')
+    if current_main_sha is not None and qualification_assembly_run is None:
+        raise RecoveryError('An explicit canonical-main revision is only valid for qualified assembly continuation')
     if ios_run and not tvos_run:
         raise RecoveryError('Signed iOS sibling reuse requires a distinct signed TV sibling')
     if built_tvos_run is not None:
@@ -1255,7 +1257,7 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
         qualified_assembly = verify_qualification_assembly_reuse(
             {'source_run_id': int(run_id), 'source_sha': source_sha, 'version': version,
              'qualification_run_id': qualification_run, 'windows_repackaging': windows_repackaging},
-            qualification_assembly_run, repository)
+            qualification_assembly_run, repository, current_main_sha=current_main_sha)
     macos = next(job for job in jobs if job.get("name") == "build-macos")
     cask_qualified = all(any(step.get("name") == name and step.get("status") == "completed" and step.get("conclusion") == "success" for step in macos.get("steps", []))
                          for name in ("Notarize Application", "Wait for notarization acceptance",
@@ -2194,7 +2196,7 @@ def verify_windows_repackaging_assembly(proof, assembly_run_id, repository=REPOS
     }
 
 
-def verify_qualification_assembly_reuse(proof, assembly_run_id, repository=REPOSITORY):
+def verify_qualification_assembly_reuse(proof, assembly_run_id, repository=REPOSITORY, *, current_main_sha=None):
     """Reuse a failed qualified assembly only when all requested outputs are durable."""
     if (repository != REPOSITORY or not str(assembly_run_id).isdigit()
             or int(assembly_run_id) in {int(proof.get('source_run_id', 0)),
@@ -2218,9 +2220,22 @@ def verify_qualification_assembly_reuse(proof, assembly_run_id, repository=REPOS
             or type(attempt) is not int or not 1 <= attempt <= 100
             or not re.fullmatch(r'[0-9a-f]{40}', assembly_sha)):
         raise RecoveryError('Prior qualified assembly must be an exact completed trusted-main workflow failure')
-    current_sha = os.environ.get('GITHUB_SHA', '')
-    if current_sha and os.environ.get('GITHUB_REF') != 'refs/heads/main':
-        raise RecoveryError('Hosted qualified assembly verification must run from canonical main')
+    if current_main_sha is not None:
+        branch = api(f'repos/{repository}/branches/main')
+        observed_main_sha = (branch.get('commit') or {}).get('sha', '')
+        if (not re.fullmatch(r'[0-9a-f]{40}', str(current_main_sha))
+                or not re.fullmatch(r'[0-9a-f]{40}', str(observed_main_sha))):
+            raise RecoveryError('Explicit current revision or canonical main SHA is invalid')
+        if observed_main_sha != current_main_sha:
+            advance = api(f'repos/{repository}/compare/{current_main_sha}...{observed_main_sha}')
+            if (advance.get('status') != 'ahead'
+                    or advance.get('merge_base_commit', {}).get('sha') != current_main_sha):
+                raise RecoveryError('Canonical main diverged from the explicitly captured revision')
+        current_sha = observed_main_sha
+    else:
+        current_sha = os.environ.get('GITHUB_SHA', '')
+        if current_sha and os.environ.get('GITHUB_REF') != 'refs/heads/main':
+            raise RecoveryError('Hosted qualified assembly verification must run from canonical main')
     if not current_sha:
         main = api(f'repos/{repository}/branches/main')
         current_sha = (main.get('commit') or {}).get('sha', '')

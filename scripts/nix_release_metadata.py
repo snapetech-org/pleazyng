@@ -263,7 +263,43 @@ def verify_macos_packaging_recovery(receipt: dict, product_commit: str, tag: str
     return head_sha
 
 
-def verify_supplemental_recovery(receipt: dict, product_commit: str, tag: str) -> str:
+def verify_continuation_package_hashes(receipt: dict, manifest: str, tag: str) -> None:
+    """Bind package hashes recorded by an assembly continuation to the public manifest."""
+    expected = {
+        "tvos_source": {"pleazyng-tvos-unsigned.ipa"},
+        "qualification_assembly_source": {
+            "pleazyng-windows-x64-portable.7z", "pleazyng-windows-installer.exe",
+            f"pleazyng.{tag[1:]}.nupkg",
+        },
+    }
+    manifest_hashes = {}
+    for line in manifest.splitlines():
+        fields = line.split(None, 1)
+        if len(fields) != 2:
+            continue
+        digest, name = fields
+        name = name.strip()
+        if name.startswith("*"):
+            name = name[1:]
+        if name not in set().union(*expected.values()):
+            continue
+        if re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None or name in manifest_hashes:
+            raise ValueError("Continuation package checksum manifest has an invalid or duplicate entry")
+        manifest_hashes[name] = digest.lower()
+    required = set().union(*expected.values())
+    if set(manifest_hashes) != required:
+        raise ValueError("Continuation package checksums are missing from the public manifest")
+    for key, names in expected.items():
+        source = receipt.get(key)
+        hashes = source.get("package_sha256") if isinstance(source, dict) else None
+        if not isinstance(hashes, dict) or set(hashes) != names:
+            raise ValueError("Continuation receipt has an incomplete verified package hash set: " + key)
+        if any(hashes[name] != manifest_hashes[name] for name in names):
+            raise ValueError("Continuation package hashes differ from the public checksum manifest: " + key)
+
+
+def verify_supplemental_recovery(receipt: dict, product_commit: str, tag: str, *,
+                                 manifest: str | None = None, github=None) -> str:
     """Bind every reused package to the same candidate and exact Apple qualification."""
     import recover_release_platforms as recovery
 
@@ -274,17 +310,66 @@ def verify_supplemental_recovery(receipt: dict, product_commit: str, tag: str) -
             or receipt.get("head_sha") != product_commit or receipt.get("source_sha") != product_commit
             or receipt.get("version") != tag[1:] or receipt.get("platforms_complete") is not True):
         raise ValueError("Invalid supplemental recovery source, version, or qualification")
+    continuation = "qualification_assembly_run_id" in receipt
+    continuation_fields = {"assembly_run_id", "actual_checkout_sha", "assembly_scope"}
+    qualification_assembly = receipt.get("qualification_assembly_run_id")
+    current_main_sha = None
+    if continuation:
+        assembly_run = receipt.get("assembly_run_id")
+        actual_checkout = receipt.get("actual_checkout_sha")
+        if (type(qualification_assembly) is not int or qualification_assembly < 1
+                or qualification_assembly in {source_run, qualification}
+                or type(assembly_run) is not int or assembly_run < 1
+                or assembly_run in {source_run, qualification, qualification_assembly}
+                or receipt.get("assembly_scope") != "qualified-assembly-continuation"
+                or not isinstance(actual_checkout, str)
+                or re.fullmatch(r"[0-9a-f]{40}", actual_checkout) is None
+                or manifest is None):
+            raise ValueError("Qualified continuation receipt has invalid assembly, workflow, or checksum identities")
+        branch = (github("branches/main") if github else
+                  recovery.api(f"repos/{REPOSITORY}/branches/main"))
+        current_main_sha = (branch.get("commit") or {}).get("sha") if isinstance(branch, dict) else None
+        if not isinstance(current_main_sha, str) or re.fullmatch(r"[0-9a-f]{40}", current_main_sha) is None:
+            raise ValueError("Cannot resolve canonical main for qualified assembly continuation")
+    elif continuation_fields.intersection(receipt):
+        raise ValueError("Supplemental receipt contains unbound continuation assembly metadata")
+
+    source_options = {"qualification_run": qualification}
+    if continuation:
+        source_options.update(qualification_assembly_run=qualification_assembly,
+                              current_main_sha=current_main_sha)
     proof = recovery.verify_source_run(source_run, product_commit, tag[1:], REPOSITORY,
-                                       qualification_run=qualification)
+                                       **source_options)
     proof = recovery.compose_proof(proof, source_run, True, source_run)
-    if (any(receipt.get(key) != value for key, value in proof.items())
-            or set(receipt) != set(proof) | {"artifacts"}):
+    accepted_receipt_fields = set(proof) | {"artifacts"}
+    if continuation:
+        accepted_receipt_fields |= continuation_fields
+    receipt_proof = dict(receipt)
+    for key in ("tvos_source", "qualification_assembly_source"):
+        source = receipt_proof.get(key)
+        if isinstance(source, dict) and "package_sha256" in source:
+            receipt_proof[key] = {name: value for name, value in source.items()
+                                  if name != "package_sha256"}
+    if (any(receipt_proof.get(key) != value for key, value in proof.items())
+            or set(receipt) != accepted_receipt_fields):
         raise ValueError("Supplemental recovery receipt differs from the independently verified candidate")
+    if continuation:
+        verify_continuation_package_hashes(receipt, manifest, tag)
     artifacts = recovery.preflight_platform_artifacts(proof, REPOSITORY)
-    expected = [dict(item, workflow_source_sha=product_commit) for item in artifacts]
+    expected = []
+    for item in artifacts:
+        name = item["name"]
+        source = (proof.get("tvos_source") if name == "tvos-ipa" else
+                  proof.get("qualification_assembly_source")
+                  if name in recovery.WINDOWS_REPACKAGED_ARTIFACTS else None)
+        expected.append(dict(item, workflow_source_sha=(
+            source.get("workflow_source_sha") if source else product_commit)))
     if receipt["artifacts"] != expected:
         raise ValueError("Supplemental recovery artifact IDs or digests differ from GitHub evidence")
-    return f"action:release:pool:public:tag:{tag}:assembly:source:{source_run}:qualification:{qualification}"
+    title = f"action:release:pool:public:tag:{tag}:assembly:source:{source_run}:qualification:{qualification}"
+    if continuation:
+        title += f":assembly:{qualification_assembly}"
+    return title
 
 
 def recovery_source(directory: str, assets: dict, manifest: str, product_commit: str,
@@ -323,6 +408,17 @@ def recovery_source(directory: str, assets: dict, manifest: str, product_commit:
         return workflow_commit, receipt
     workflow_commit = verify_ordinary_recovery(receipt, product_commit, tag, github)
     return workflow_commit, receipt
+
+
+def verify_supplemental_assembly_identity(receipt: dict, assembly_run: int,
+                                         workflow_commit: str) -> None:
+    """Bind a continued supplemental receipt to its final manifest assembly."""
+    if "qualification_assembly_run_id" not in receipt:
+        return
+    if (receipt.get("assembly_scope") != "qualified-assembly-continuation"
+            or receipt.get("assembly_run_id") != assembly_run
+            or receipt.get("actual_checkout_sha") != workflow_commit):
+        raise ValueError("Qualified continuation receipt does not bind the attested final assembly")
 
 
 def prepare(root: Path, metadata: dict, commit: str, github) -> tuple[str | None, dict]:
@@ -369,7 +465,9 @@ def prepare(root: Path, metadata: dict, commit: str, github) -> tuple[str | None
         verified = json.loads(result.stdout)
         supplemental = workflow_commit is None
         if supplemental:
-            title = verify_supplemental_recovery(recovery, commit, tag)
+            title = verify_supplemental_recovery(
+                recovery, commit, tag, manifest=raw.decode("utf-8"), github=github,
+            )
             matches = []
             for sha, run_id, attempt in manifest_invocations(verified, digest):
                 run = github(f"actions/runs/{run_id}/attempts/{attempt}")
@@ -413,6 +511,8 @@ def prepare(root: Path, metadata: dict, commit: str, github) -> tuple[str | None
                         or recovery.get("source_sha") != commit
                         or recovery.get("actual_checkout_sha") != recovery.get("packaging_source_sha")):
                     raise ValueError("Recovery receipt differs from its independently approved repair")
+        if supplemental and recovery is not None:
+            verify_supplemental_assembly_identity(recovery, run_id, workflow_commit)
         hashes = release_hashes(raw.decode("utf-8"))
         for name, expected in hashes.items():
             if assets[name].get("digest") != f"sha256:{expected}":
