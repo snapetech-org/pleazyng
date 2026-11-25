@@ -121,6 +121,16 @@ class AddVersionForReviewTests(unittest.TestCase):
         self.assertEqual(receipt['review_item_id'], 'review-item')
         self.api.request.assert_not_called()
 
+    def test_existing_empty_draft_without_platform_is_reused(self):
+        self.submission['attributes']['platform'] = None
+        self.api.items.side_effect = [[self.submission], [], [self.item]]
+        self.api.request.return_value = {'data': self.item}
+        with patch.object(review, 'prepare', return_value=self.receipt):
+            receipt = review.add_version_for_review(self.api, 'TV_OS', '3.0.51', '210')
+        self.assertEqual(receipt['review_submission_id'], 'review-id')
+        self.assertEqual(self.api.request.call_args.args[0], '/v1/reviewSubmissionItems')
+        self.api.request.assert_called_once()
+
     def test_stop_before_creating_a_draft_when_screenshot_missing(self):
         self.listing['screenshots'] = []
         with patch.object(review, 'prepare', return_value=self.receipt):

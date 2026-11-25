@@ -105,11 +105,11 @@ def inspect_review(api, draft_id, platform):
         for product in purchases
         if product['attributes'].get('productId') in {'pleazyng_7_day_trial', 'pleazyng_lifetime_unlock'}
     ]
-    submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions?' + urlencode({'filter[platform]': platform}))
+    submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions')
     return {'localizations': localizations, 'app_review_detail': review_detail,
             'purchases': purchase_states, 'review_submissions': [
-        {key: submission['attributes'].get(key) for key in ('state', 'submittedDate')}
-        for submission in submissions if submission['attributes'].get('platform') == platform
+        {key: submission['attributes'].get(key) for key in ('platform', 'state', 'submittedDate')}
+        for submission in submissions if submission['attributes'].get('platform') in {None, platform}
     ]}
 
 
@@ -127,8 +127,10 @@ def add_version_for_review(api, platform, version, build_number):
     if missing_groups:
         raise ValueError(f'Review requires active screenshots for {", ".join(sorted(missing_groups))}')
 
-    filters = urlencode({'filter[platform]': platform, 'filter[state]': 'READY_FOR_REVIEW'})
-    submissions = api.items(f'/v1/apps/{APP_ID}/reviewSubmissions?{filters}')
+    # Apple can leave a newly created draft's platform unset until its first item is added.
+    filters = urlencode({'filter[state]': 'READY_FOR_REVIEW'})
+    submissions = [item for item in api.items(f'/v1/apps/{APP_ID}/reviewSubmissions?{filters}')
+                   if item['attributes'].get('platform') in {None, platform}]
     if not submissions:
         if receipt['observed_draft_state'] == 'READY_FOR_REVIEW':
             raise ValueError('The version already belongs to a review submission that could not be identified')
@@ -137,7 +139,7 @@ def add_version_for_review(api, platform, version, build_number):
             'relationships': {'app': {'data': {'type': 'apps', 'id': APP_ID}}},
         }})['data']]
     submission = exact_record(submissions, 'reviewSubmissions', lambda attrs:
-                              attrs['platform'] == platform and attrs['state'] == 'READY_FOR_REVIEW'
+                              attrs.get('platform') in {None, platform} and attrs['state'] == 'READY_FOR_REVIEW'
                               and attrs.get('submittedDate') is None)
 
     version_link = {'type': 'appStoreVersions', 'id': receipt['app_store_version_id']}
@@ -147,6 +149,8 @@ def add_version_for_review(api, platform, version, build_number):
     if any(link and link != version_link for link in version_links):
         raise ValueError('The editable review submission already contains a different version')
     if version_link not in version_links:
+        if not submission['attributes'].get('platform') and items:
+            raise ValueError('A review submission with existing items has no assigned platform')
         if receipt['observed_draft_state'] == 'READY_FOR_REVIEW':
             raise ValueError('The version is already assigned to a different review submission')
         api.request('/v1/reviewSubmissionItems', {'data': {
