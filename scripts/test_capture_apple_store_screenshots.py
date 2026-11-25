@@ -931,6 +931,8 @@ class MacListingCaptureTests(unittest.TestCase):
     def test_mac_listing_export_keeps_accepted_dimensions_and_rgb_provenance(self) -> None:
         self.assertIn("normalize_opaque_rgb_png", capture.run_macos_listing_window_capture.__code__.co_names)
         self.assertIn("screenshot_resized_or_padded", capture.run_macos_listing_window_capture.__code__.co_consts)
+        self.assertIn("unobstructed", capture.run_macos_listing_window_capture.__code__.co_consts)
+        self.assertIn("-R", capture.run_macos_listing_window_capture.__code__.co_consts)
         self.assertIn(
             ((1280, 800), (1440, 900), (2560, 1600), (2880, 1800)),
             capture.capture_macos_listing_window.__code__.co_consts,

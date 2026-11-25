@@ -248,10 +248,25 @@ guard let window = windows.first(where: {
     && (($0[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0.9
 }) else { exit(3) }
 let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+let frame = CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0,
+                   width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0)
+let foregroundWindows = windows.prefix(while: {
+  ($0[kCGWindowNumber as String] as? NSNumber)?.intValue != targetWindowID
+})
+let unobstructed = !foregroundWindows.contains { foreground in
+  guard ((foreground[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+        let foregroundBounds = foreground[kCGWindowBounds as String] as? [String: CGFloat] else {
+    return false
+  }
+  let foregroundFrame = CGRect(x: foregroundBounds["X"] ?? 0, y: foregroundBounds["Y"] ?? 0,
+                               width: foregroundBounds["Width"] ?? 0, height: foregroundBounds["Height"] ?? 0)
+  return frame.intersects(foregroundFrame)
+}
 let result: [String: Any] = [
   "window_id": targetWindowID,
   "owner_pid": targetPID,
   "on_screen": window[kCGWindowIsOnscreen as String] as? Bool ?? false,
+  "unobstructed": unobstructed,
   "bounds_points": [
     Double(bounds["X"] ?? 0), Double(bounds["Y"] ?? 0),
     Double(bounds["Width"] ?? 0), Double(bounds["Height"] ?? 0),
@@ -3015,9 +3030,17 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         and bounds[0] + bounds[2] <= desktop_points[0]
         and bounds[1] + bounds[3] <= desktop_points[1]
     )
+    if not fully_visible_on_desktop or geometry.get("unobstructed") is not True:
+        raise ValueError(f"The complete Pleazyng window must be visible for store capture: {geometry}")
+    if any(value != round(value) for value in bounds):
+        raise ValueError(f"The native window bounds must align with display pixels: {bounds}")
 
     screenshot = output / "macos-01-files-and-books.png"
-    run(["/usr/sbin/screencapture", "-x", "-o", "-l", str(window_id), str(screenshot)], timeout=120)
+    # Capture WindowServer's real desktop pixels, including the rounded corners.
+    # A window-ID-only PNG has transparent corners the App Store cannot accept.
+    rectangle = ",".join(str(round(value)) for value in bounds)
+    screenshot_command = ["/usr/sbin/screencapture", "-x", f"-R{rectangle}"]
+    run([*screenshot_command, str(screenshot)], timeout=120)
     width, height = png_dimensions(screenshot)
     scale_x = width / bounds[2]
     scale_y = height / bounds[3]
@@ -3066,10 +3089,11 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         "navigation_input_method": "CoreGraphics CGEvent clicks centered on Vision OCR bounds of visible Start fresh and Use files and books text",
         "final_window_ocr_file": "macos-01-files-and-books.final-window-ocr.json",
         "screenshot_dimensions": [width, height],
+        "screenshot_capture_command": screenshot_command,
         "screenshot_png_encoding": png_encoding,
         "screenshot_capture_sha256": sha256_file(screenshot),
         "screenshot_resized_or_padded": False,
-        "screenshot_crop_scope": "The complete native Pleazyng app window selected by its live CoreGraphics window ID; no crop or resampling was applied.",
+        "screenshot_crop_scope": "The complete unobstructed app window's verified rectangle on the live desktop, captured at native pixels.",
         "purchase_actions_performed": False,
     }
     return screenshot, metadata
@@ -4092,8 +4116,8 @@ def capture_macos_listing_window(args: argparse.Namespace) -> None:
         "capture_method": [
             "Vision OCR located the visible Start fresh and Use files and books actions; CoreGraphics CGEvent clicks navigated the real app; "
             "the AppKit saved-frame preference requested a real 1280x800-point window before launch and CoreGraphics verified its actual bounds; "
-            "the complete native app window was captured by window ID with "
-            "/usr/sbin/screencapture -x -o -l <app-window-id>"
+            "the complete unobstructed native app rectangle was captured directly from the live desktop with "
+            "/usr/sbin/screencapture -x -R<x,y,width,height>"
         ],
         "capture_run_id": os.environ.get("GITHUB_RUN_ID", ""),
         "capture_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
