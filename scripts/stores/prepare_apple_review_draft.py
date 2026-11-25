@@ -27,15 +27,40 @@ def exact_record(records, kind, matches):
     return selected[0]
 
 
-def prepare(api, platform, version, build_number, *, inspect_only=False):
+def version_records(api, platform, version):
+    filters = urlencode({'filter[platform]': platform, 'filter[versionString]': version})
+    return api.items(f'/v1/apps/{APP_ID}/appStoreVersions?{filters}')
+
+
+def exact_version(records, platform, version):
+    return exact_record(records, 'appStoreVersions',
+                        lambda attrs: attrs.get('platform') == platform and attrs.get('versionString') == version)
+
+
+def version_state(draft):
+    return draft['attributes'].get('appVersionState') or draft['attributes'].get('appStoreState')
+
+
+def prepare(api, platform, version, build_number, *, inspect_only=False, previous_draft=None):
+    if previous_draft is not None and (
+        inspect_only or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', previous_draft)
+        or tuple(map(int, previous_draft.split('.'))) >= tuple(map(int, version.split('.')))
+    ):
+        raise ValueError('The previous draft must name an earlier stable version and request an attachment')
+
     app = api.request(f'/v1/apps/{APP_ID}').get('data', {})
     if (app.get('type') != 'apps' or app.get('id') != APP_ID
             or app.get('attributes', {}).get('bundleId') != BUNDLE):
         raise ValueError('App Store Connect returned an unexpected app')
 
-    version_filters = urlencode({'filter[platform]': platform, 'filter[versionString]': version})
-    draft = exact_record(api.items(f'/v1/apps/{APP_ID}/appStoreVersions?{version_filters}'), 'appStoreVersions',
-                         lambda data: data.get('platform') == platform and data.get('versionString') == version)
+    drafts = version_records(api, platform, version)
+    replace_draft = not drafts and previous_draft is not None
+    if replace_draft:
+        draft = exact_version(version_records(api, platform, previous_draft), platform, previous_draft)
+        if version_state(draft) != 'PREPARE_FOR_SUBMISSION':
+            raise ValueError('Only a previous draft in Prepare for Submission can be updated')
+    else:
+        draft = exact_version(drafts, platform, version)
     build_filters = urlencode({'filter[app]': APP_ID, 'filter[version]': build_number,
                                'filter[preReleaseVersion.version]': version})
     builds = []
@@ -51,10 +76,22 @@ def prepare(api, platform, version, build_number, *, inspect_only=False):
     if build['attributes'].get('processingState') != 'VALID' or build['attributes'].get('expired') is not False:
         raise ValueError('The exact uploaded build must be VALID and unexpired')
 
-    relationship = f'/v1/appStoreVersions/{draft["id"]}/relationships/build'
     expected = {'type': 'builds', 'id': build['id']}
+    draft_path = f'/v1/appStoreVersions/{draft["id"]}'
+    relationship = f'{draft_path}/relationships/build'
+    if replace_draft:
+        api.request(draft_path, {'data': {
+            'type': 'appStoreVersions', 'id': draft['id'], 'attributes': {'versionString': version},
+            'relationships': {'build': {'data': expected}},
+        }}, method='PATCH')
+        updated = exact_version([api.request(draft_path)['data']], platform, version)
+        if updated['id'] != draft['id']:
+            raise ValueError('Apple did not retain the updated version on the same draft')
+        draft = updated
     attached = api.request(relationship)['data']
-    state = draft['attributes'].get('appVersionState') or draft['attributes'].get('appStoreState')
+    if replace_draft and attached != expected:
+        raise ValueError('Apple did not retain the exact build on the updated draft')
+    state = version_state(draft)
     changed = attached != expected
     if changed and not inspect_only:
         if state not in {'PREPARE_FOR_SUBMISSION', 'READY_FOR_REVIEW'}:
@@ -64,7 +101,9 @@ def prepare(api, platform, version, build_number, *, inspect_only=False):
             raise ValueError('Apple did not retain the exact draft build attachment')
     receipt = {'app_id': APP_ID, 'platform': platform, 'version': version, 'build_number': build_number,
                'app_store_version_id': draft['id'], 'asc_build_id': build['id'],
-               'observed_draft_state': state, 'changed': changed and not inspect_only}
+               'observed_draft_state': state, 'changed': (changed or replace_draft) and not inspect_only}
+    if replace_draft:
+        receipt['previous_draft_version'] = previous_draft
     if inspect_only:
         receipt['exact_build_attached'] = not changed
         receipt.update(inspect_review(api, draft['id'], platform))
@@ -187,18 +226,22 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--build-number', required=True)
     parser.add_argument('--receipt', type=Path, required=True)
+    parser.add_argument('--previous-draft', help='Earlier editable draft to update if the target version does not exist')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--inspect-only', action='store_true')
     modes.add_argument('--add-for-review', action='store_true')
     args = parser.parse_args()
     if not re.fullmatch(r'\d+\.\d+\.\d+', args.version) or not re.fullmatch(r'[1-9]\d*', args.build_number):
         parser.error('Expected a stable release version and positive numeric build')
+    if args.previous_draft and (args.inspect_only or args.add_for_review):
+        parser.error('Updating a previous draft requires attachment mode')
     with tempfile.TemporaryDirectory(prefix='pleazyng-apple-review-') as directory:
         api = AppleProfileAPI(_apple_api_token(Path(directory)))
         if args.add_for_review:
             receipt = add_version_for_review(api, args.platform, args.version, args.build_number)
         else:
-            receipt = prepare(api, args.platform, args.version, args.build_number, inspect_only=args.inspect_only)
+            receipt = prepare(api, args.platform, args.version, args.build_number,
+                              inspect_only=args.inspect_only, previous_draft=args.previous_draft)
     args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')
     if args.add_for_review:
         action = 'Verified the app version in its draft review submission for'

@@ -18,6 +18,10 @@ on:
         description: Successful run that delivered the selected platform and verified Apple processing
         type: string
         required: true
+      previous_draft_tag:
+        description: Earlier Prepare for Submission draft to update if the target version does not exist
+        type: string
+        required: false
       inspect_only:
         description: Read the draft, screenshot placements, and purchase states without editing
         type: boolean
@@ -64,13 +68,21 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           PLATFORM: ${{ inputs.platform }}
           PROCESSING_RUN: ${{ inputs.processing_run }}
+          PREVIOUS_DRAFT_TAG: ${{ inputs.previous_draft_tag }}
           CAPTURE_RUN: ${{ inputs.capture_run }}
+          TVOS_CAPTURE_RUN: ${{ inputs.tvos_capture_run }}
           IPAD_OPEN_MEDIA: ${{ inputs.ipad_open_media }}
+          INSPECT_ONLY: ${{ inputs.inspect_only }}
+          ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           PYTHONPATH: scripts
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$PROCESSING_RUN" =~ ^[1-9][0-9]*$ ]]
           [[ "$IPAD_OPEN_MEDIA" != true || ( "$PLATFORM" == IOS && -n "$CAPTURE_RUN" ) ]]
+          if [[ -n "$PREVIOUS_DRAFT_TAG" ]]; then
+            [[ "$PREVIOUS_DRAFT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -z "$CAPTURE_RUN" && -z "$TVOS_CAPTURE_RUN" &&
+               "$INSPECT_ONLY" != true && "$ADD_FOR_REVIEW" != true ]]
+          fi
           case "$PLATFORM" in
             MAC_OS)
               workflow=macos-app-store-signed.yml
@@ -153,11 +165,13 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           VERSION: ${{ steps.release.outputs.version }}
           BUILD_NUMBER: ${{ steps.release.outputs.build_number }}
+          PREVIOUS_DRAFT_TAG: ${{ inputs.previous_draft_tag }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           PYTHONPATH: scripts
         run: |
           args=()
+          if [[ -n "$PREVIOUS_DRAFT_TAG" ]]; then args+=(--previous-draft "${PREVIOUS_DRAFT_TAG#v}"); fi
           if [[ "$INSPECT_ONLY" == true ]]; then args+=(--inspect-only); fi
           if [[ "$ADD_FOR_REVIEW" == true ]]; then args+=(--add-for-review); fi
           python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \

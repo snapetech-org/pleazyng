@@ -46,6 +46,55 @@ class PrepareAppleReviewDraftTests(unittest.TestCase):
         self.assertTrue(receipt['changed'])
         self.api.request.assert_called_with(self.relationship)
 
+    def previous_draft(self, state='PREPARE_FOR_SUBMISSION'):
+        record = {'type': 'appStoreVersions', 'id': 'draft', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.50', 'appVersionState': state,
+        }}
+        self.api.items.side_effect = [[], [record], [{**self.exact, 'attributes': self.build}]]
+
+    def test_update_previous_draft_and_attach_build_in_one_request(self):
+        self.previous_draft()
+        draft_path = '/v1/appStoreVersions/draft'
+
+        def request(path, body=None, *, method=None):
+            if path != draft_path:
+                return self.request(path, body, method=method)
+            if method == 'PATCH':
+                self.assertEqual(body, {'data': {
+                    'type': 'appStoreVersions', 'id': 'draft', 'attributes': {'versionString': '3.0.51'},
+                    'relationships': {'build': {'data': self.exact}},
+                }})
+                self.relationships = {'data': self.exact}
+            return {'data': {'type': 'appStoreVersions', 'id': 'draft', 'attributes': self.draft}}
+
+        self.api.request.side_effect = request
+        receipt = review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertEqual(receipt['app_store_version_id'], 'draft')
+        self.assertEqual(receipt['previous_draft_version'], '3.0.50')
+        self.assertTrue(receipt['changed'])
+        patches = [call for call in self.api.request.call_args_list if call.kwargs.get('method') == 'PATCH']
+        self.assertEqual([call.args[0] for call in patches], [draft_path])
+
+    def test_previous_draft_in_review_is_preserved(self):
+        self.previous_draft(state='WAITING_FOR_REVIEW')
+        with self.assertRaisesRegex(ValueError, 'Prepare for Submission'):
+            review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assert_no_patch()
+
+    def test_previous_draft_is_preserved_until_new_build_is_valid(self):
+        self.previous_draft()
+        self.build['processingState'] = 'PROCESSING'
+        with self.assertRaisesRegex(ValueError, 'VALID and unexpired'):
+            review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assert_no_patch()
+
+    def test_existing_target_draft_takes_priority(self):
+        self.relationships = {'data': self.exact}
+        receipt = review.prepare(self.api, 'TV_OS', '3.0.51', '210', previous_draft='3.0.50')
+        self.assertFalse(receipt['changed'])
+        self.assertNotIn('previous_draft_version', receipt)
+        self.assert_no_patch()
+
     def test_preserve_in_review_draft(self):
         self.draft['appVersionState'] = 'WAITING_FOR_REVIEW'
         with self.assertRaisesRegex(ValueError, 'no longer an editable review draft'):

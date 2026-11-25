@@ -161,6 +161,12 @@ the attachment and retains a receipt. Set `inspect_only=true` to read the
 attachment, screenshot placement, purchase and review states. The review
 receipt records whether contact details and notes are present.
 
+If the target version does not exist, supply `previous_draft_tag` to update an
+explicitly selected earlier version in Prepare for Submission. After validating
+the new build, the workflow changes the version and its build in one App Store
+Connect request and checks both values on the same draft. This preserves the
+draft's listing assets and review details.
+
 To place the Open media listing screenshot, run the same workflow with
 `capture_run` set to the Apple Store Screenshots run for that release and
 platform. The workflow checks the successful platform job and its artifact,
