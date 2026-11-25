@@ -31,6 +31,7 @@ env:
 
 permissions:
   contents: read
+  attestations: read
 
 concurrency:
   group: winget-pleazyng-${{ inputs.release_tag }}
@@ -80,6 +81,14 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: |
+            scripts/submit_winget_manifest_pr.py
+            scripts/verify_release_attestation.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Download the release manifest bundle and installer evidence
         shell: pwsh
         env:
@@ -97,6 +106,7 @@ jobs:
       - name: Validate checksums and manifest installer hashes
         shell: pwsh
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
@@ -104,6 +114,8 @@ jobs:
           $manifestZip = Get-Item "release-assets\pleazyng-winget-manifests-$env:RELEASE_VERSION.zip"
           $installer = Get-Item 'release-assets\pleazyng-windows-installer.exe'
           $checksums = 'release-assets\SHA256SUMS.txt'
+          python scripts/verify_release_attestation.py $checksums --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet release attestation verification failed.' }
           foreach ($asset in @($manifestZip, $installer)) {
             $line = @(Select-String -Path $checksums -Pattern ("^([0-9a-f]{64})\s+" + [regex]::Escape($asset.Name) + '$'))
             if ($line.Count -ne 1) { throw "SHA256SUMS.txt has no unique entry for $($asset.Name)" }
@@ -156,5 +168,14 @@ jobs:
           foreach ($name in @('SnapeTech.Pleazyng.yaml', 'SnapeTech.Pleazyng.installer.yaml', 'SnapeTech.Pleazyng.locale.en-US.yaml')) {
             if (-not (Test-Path (Join-Path $manifestRoot $name))) { throw "Required manifest is missing: $name" }
           }
-          & .\wingetcreate.exe submit --prtitle "SnapeTech.Pleazyng $env:RELEASE_VERSION" --no-open $manifestRoot
-          if ($LASTEXITCODE -ne 0) { throw "wingetcreate submit failed with exit code $LASTEXITCODE" }
+          $submission = & .\wingetcreate.exe submit --prtitle "SnapeTech.Pleazyng $env:RELEASE_VERSION" --no-open $manifestRoot
+          $submitCode = $LASTEXITCODE
+          $submission | ForEach-Object { Write-Host $_ }
+          if ($submitCode -eq 0) { exit 0 }
+          if (($submission -join "`n") -notmatch 'forked repository could not be synced') {
+            throw "wingetcreate submit failed with exit code $submitCode"
+          }
+          Write-Host 'Submitting the validated manifests on a dedicated branch based on the WinGet catalogue.'
+          $env:GH_TOKEN = $env:WINGET_CREATE_GITHUB_TOKEN
+          python scripts/submit_winget_manifest_pr.py $manifestRoot $env:RELEASE_VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'WinGet submission from the dedicated branch failed.' }
