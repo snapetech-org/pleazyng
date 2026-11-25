@@ -1,0 +1,48 @@
+name: Resume v3.0.51 Homebrew asset upload
+run-name: action:homebrew:resume:source:${{ inputs.source_run_id }}:${{ inputs.source_attempt }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Recovery workflow run that preserved the exact notarized bundle
+        required: true
+        type: string
+      source_attempt:
+        description: Attempt number that produced the preserved bundle
+        required: true
+        type: string
+
+concurrency:
+  group: homebrew-cask-recovery-v3.0.51
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  resume-homebrew:
+    if: ${{ github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Verify preserved recovery bundle and append missing assets
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/resume_homebrew_recovery_upload.py \
+            --source-run-id "$SOURCE_RUN_ID" \
+            --source-attempt "$SOURCE_ATTEMPT" \
+            --asset-directory "$RUNNER_TEMP/homebrew-recovery-assets" \
+            --release-directory "$RUNNER_TEMP/homebrew-recovery-release"

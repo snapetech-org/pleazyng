@@ -10,8 +10,14 @@ from workflow_yaml import job_block
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/update-packages.yml"
 RECOVERY_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/recover-homebrew-cask-v3051.yml"
+RESUME_WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/resume-homebrew-cask-v3051.yml"
 text = WORKFLOW.read_text(encoding="utf-8")
 recovery_text = RECOVERY_WORKFLOW.read_text(encoding="utf-8")
+resume_text = RESUME_WORKFLOW.read_text(encoding="utf-8")
+root = Path(__file__).resolve().parents[2]
+recovery_script = (root / "scripts/recover_macos_dmg_for_homebrew.py").read_text(encoding="utf-8")
+upload_script = (root / "scripts/upload_homebrew_recovery_assets.py").read_text(encoding="utf-8")
+resume_script = (root / "scripts/resume_homebrew_recovery_upload.py").read_text(encoding="utf-8")
 errors: list[str] = []
 
 
@@ -165,9 +171,32 @@ require(
     and "contents: write" in recovery
     and "id-token: write" in recovery
     and "Attest versioned Homebrew recovery assets" in recovery
-    and "gh release upload" in recovery
+    and "Preserve exact Homebrew upload bundle for recovery" in recovery
+    and "retention-days: 90" in recovery
+    and "upload_homebrew_recovery_assets.py" in recovery
+    and '"release", "upload"' in upload_script
+    and 'existing.get("digest") != digest' in upload_script
     and "--clobber" not in recovery,
-    "v3.0.51 recovery must attest and append distinct release assets without clobbering",
+    "v3.0.51 recovery must preserve its attested bundle and append only matching, missing assets",
+)
+require(
+    "MAX_API_ATTEMPTS = 4" in recovery_script
+    and "per_page=30&page={page}" in recovery_script
+    and "HTTP 5\\d\\d" in recovery_script,
+    "v3.0.51 source-job verification must page through smaller responses and retry transient API failures",
+)
+require(
+    "runs-on: ubuntu-24.04" in resume_text
+    and "github.ref == 'refs/heads/main'" in resume_text
+    and "actions: read" in resume_text
+    and "contents: write" in resume_text
+    and "source_run_id" in resume_text
+    and "source_attempt" in resume_text
+    and "resume_homebrew_recovery_upload.py" in resume_text
+    and "runInvocationURI" in resume_script
+    and "actions/runs/{source_run_id}/attempts/{source_attempt}" in resume_script
+    and "only missing matching release assets" in resume_script,
+    "v3.0.51 partial uploads must resume from a verified recovery-run artifact on a hosted runner",
 )
 
 if errors:

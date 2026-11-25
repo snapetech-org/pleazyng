@@ -25,6 +25,23 @@ runner. The signed result is published as the distinct
 `pleazyng-homebrew-recovery.json` receipt. The original
 `pleazyng-macos.dmg` and `SHA256SUMS.txt` remain unchanged.
 
+Before release upload, the workflow preserves the exact four-file bundle as a
+90-day Actions artifact. If GitHub accepts only part of the release upload,
+resume from that attempt with the **Resume v3.0.51 Homebrew asset upload**
+workflow. It verifies the source recovery run and all four asset attestations,
+then uploads only names that are absent and rejects any existing name whose
+digest differs from the preserved bytes. Dispatch it with the source run ID and
+attempt; do not rerun signing to replace a partially published bundle.
+
+```sh
+gh workflow run resume-homebrew-cask-v3051.yml \
+  --repo snapetech-org/pleazyng --ref main \
+  -f source_run_id="$RECOVERY_RUN_ID" -f source_attempt="$RECOVERY_ATTEMPT"
+```
+
+Set those variables to the recovery run and attempt that uploaded the preserved
+bundle artifact.
+
 Update the custom tap only after all supplemental assets are attached:
 
 ```sh

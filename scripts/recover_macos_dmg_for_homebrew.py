@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 
 from recover_macos_app import restore_portable_checkpoint, tree_digest
 
@@ -39,10 +40,21 @@ SUPPLEMENTAL_CHECKSUMS = "pleazyng-homebrew-SHA256SUMS.txt"
 RECOVERY_RECEIPT = "pleazyng-homebrew-recovery.json"
 BUNDLE_ID = "org.snapetech.pleazyng"
 TEAM_ID = "DM9A59DC85"
+MAX_API_ATTEMPTS = 4
 
 
 def api(path: str) -> dict:
-    return json.loads(subprocess.check_output(["gh", "api", f"repos/{REPOSITORY}/{path}"], text=True))
+    command = ["gh", "api", f"repos/{REPOSITORY}/{path}"]
+    for attempt in range(MAX_API_ATTEMPTS):
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        if attempt + 1 == MAX_API_ATTEMPTS or not re.search(r"HTTP 5\d\d", result.stderr):
+            raise subprocess.CalledProcessError(
+                result.returncode, command, output=result.stdout, stderr=result.stderr,
+            )
+        time.sleep(min(2 ** attempt, 8))
+    raise AssertionError("bounded GitHub API retry loop ended unexpectedly")
 
 
 def sha256(path: Path) -> str:
@@ -74,6 +86,36 @@ def app_version(app: Path) -> tuple[str, str]:
     return str(values.get("CFBundleShortVersionString", "")), str(values.get("CFBundleVersion", ""))
 
 
+def source_build_job() -> dict:
+    jobs: list[dict] = []
+    total_count: int | None = None
+    page = 1
+    while page <= 10:
+        inventory = api(
+            f"actions/runs/{SOURCE_RUN_ID}/attempts/{SOURCE_RUN_ATTEMPT}/jobs?per_page=30&page={page}"
+        )
+        jobs.extend(inventory.get("jobs", []))
+        total_count = int(inventory.get("total_count", len(jobs)))
+        if len(jobs) >= total_count or len(inventory.get("jobs", [])) < 30:
+            break
+        page += 1
+    if total_count is not None and len(jobs) < total_count:
+        raise ValueError("The v3.0.51 source build job inventory could not be fully read")
+    matches = [job for job in jobs if job.get("name") == "build-macos"]
+    if len(matches) != 1:
+        raise ValueError("The v3.0.51 native macOS build job is missing or ambiguous")
+    job = matches[0]
+    if (
+        job.get("status") != "completed"
+        or job.get("conclusion") != "success"
+        or job.get("run_attempt") != SOURCE_RUN_ATTEMPT
+        or not any(step.get("name") == "Build macOS" and step.get("conclusion") == "success"
+                   for step in job.get("steps", []))
+    ):
+        raise ValueError("The trusted v3.0.51 native macOS compilation did not succeed")
+    return job
+
+
 def verify_source_run() -> tuple[dict, dict, str]:
     run_info = api(f"actions/runs/{SOURCE_RUN_ID}/attempts/{SOURCE_RUN_ATTEMPT}")
     if (
@@ -87,19 +129,7 @@ def verify_source_run() -> tuple[dict, dict, str]:
     ):
         raise ValueError("The trusted v3.0.51 source build identity changed")
 
-    inventory = api(f"actions/runs/{SOURCE_RUN_ID}/attempts/{SOURCE_RUN_ATTEMPT}/jobs?per_page=100")
-    matches = [job for job in inventory.get("jobs", []) if job.get("name") == "build-macos"]
-    if len(matches) != 1:
-        raise ValueError("The v3.0.51 native macOS build job is missing or ambiguous")
-    job = matches[0]
-    if (
-        job.get("status") != "completed"
-        or job.get("conclusion") != "success"
-        or job.get("run_attempt") != SOURCE_RUN_ATTEMPT
-        or not any(step.get("name") == "Build macOS" and step.get("conclusion") == "success"
-                   for step in job.get("steps", []))
-    ):
-        raise ValueError("The trusted v3.0.51 native macOS compilation did not succeed")
+    job = source_build_job()
 
     artifacts = api(f"actions/runs/{SOURCE_RUN_ID}/artifacts?per_page=100").get("artifacts", [])
     artifact_matches = [item for item in artifacts if item.get("name") == SOURCE_BUILD_ARTIFACT]

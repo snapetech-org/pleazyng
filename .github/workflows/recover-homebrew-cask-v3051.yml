@@ -321,19 +321,25 @@ jobs:
             pleazyng-homebrew-recovery.json
             snapetech-pleazyng.rb
 
+      - name: Preserve exact Homebrew upload bundle for recovery
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: pleazyng-homebrew-recovery-assets-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            pleazyng-macos-notarized.dmg
+            pleazyng-homebrew-SHA256SUMS.txt
+            pleazyng-homebrew-recovery.json
+            snapetech-pleazyng.rb
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Append Homebrew assets to the immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          EXISTING="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | map(select(. == "pleazyng-macos-notarized.dmg" or . == "pleazyng-homebrew-SHA256SUMS.txt" or . == "pleazyng-homebrew-recovery.json" or . == "snapetech-pleazyng.rb")) | length')"
-          if [[ "$EXISTING" != 0 ]]; then
-            echo "Refusing to overwrite an existing Homebrew recovery asset." >&2
-            exit 1
-          fi
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            pleazyng-macos-notarized.dmg \
-            pleazyng-homebrew-SHA256SUMS.txt \
-            pleazyng-homebrew-recovery.json \
-            snapetech-pleazyng.rb
+          python3 scripts/upload_homebrew_recovery_assets.py \
+            --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --directory "$GITHUB_WORKSPACE"
 
       - name: Remove temporary signing credentials
         if: always()

@@ -22,9 +22,15 @@ class UpdatePackagesWorkflowTest(unittest.TestCase):
             workflow.write_text(text)
             shutil.copyfile(WORKFLOW.parent / "recover-homebrew-cask-v3051.yml",
                             workflow_dir / "recover-homebrew-cask-v3051.yml")
+            shutil.copyfile(WORKFLOW.parent / "resume-homebrew-cask-v3051.yml",
+                            workflow_dir / "resume-homebrew-cask-v3051.yml")
             (root / "scripts").mkdir()
-            shutil.copyfile(ROOT / "scripts/recover_macos_dmg_for_homebrew.py",
-                            root / "scripts/recover_macos_dmg_for_homebrew.py")
+            for name in (
+                "recover_macos_dmg_for_homebrew.py",
+                "upload_homebrew_recovery_assets.py",
+                "resume_homebrew_recovery_upload.py",
+            ):
+                shutil.copyfile(ROOT / "scripts" / name, root / "scripts" / name)
             scripts = root / "scripts/checks"
             scripts.mkdir(parents=True)
             for name in ("check_update_packages_workflow.py", "workflow_yaml.py"):
