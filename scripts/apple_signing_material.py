@@ -17,8 +17,11 @@ import tempfile
 import urllib.request
 
 
-def run(command: list[str], *, data: bytes | None = None) -> bytes:
-    result = subprocess.run(command, input=data, capture_output=True, check=False)
+def run(command: list[str], *, data: bytes | None = None, timeout: int | None = None) -> bytes:
+    try:
+        result = subprocess.run(command, input=data, capture_output=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f'{Path(command[0]).name} signing check timed out') from None
     if result.returncode:
         # Commands can include passwords. Never include argv or untrusted
         # diagnostics in logs, exception messages, reports or artifacts.
@@ -53,6 +56,22 @@ def write_private_file(path: Path, contents: bytes) -> None:
         stream.write(contents)
 
 
+def ios_native_asset_xcrun(stage: Path, keychain: Path, fingerprint: str) -> Path:
+    """Use the isolated identity for Flutter's release native-asset codesign calls."""
+    tools = stage / 'ios-native-signing-bin'
+    tools.mkdir(mode=0o700)
+    shim = tools / 'xcrun'
+    shim.write_text(f'''#!/bin/sh
+if [ "$1" = codesign ] && [ "$2" = --force ] && [ "$3" = --sign ] && [ "$4" = {shlex.quote(fingerprint)} ]; then
+  shift
+  exec /usr/bin/xcrun codesign --keychain {shlex.quote(str(keychain))} --timestamp=none "$@"
+fi
+exec /usr/bin/xcrun "$@"
+''')
+    shim.chmod(0o700)
+    return shim
+
+
 @contextmanager
 def signing_identity(report: dict):
     if sys.platform != "darwin":
@@ -81,7 +100,9 @@ def signing_identity(report: dict):
         keychain = stage / 'signing.keychain-db'
         run(['security', 'create-keychain', '-p', password, str(keychain)])
         original_search_list = shlex.split(run(['security', 'list-keychains', '-d', 'user']).decode())
+        original_path = os.environ.get('PATH', os.defpath)
         try:
+            run(['security', 'set-keychain-settings', '-lut', '21600', str(keychain)])
             run(['security', 'unlock-keychain', '-p', password, str(keychain)])
             # OpenSSL 3's default PBES2 PKCS12 encoding is not accepted by
             # every macOS Security.framework version. Re-encode the same
@@ -145,9 +166,16 @@ def signing_identity(report: dict):
             run(['codesign', '--force', '--sign', fingerprint, '--keychain', str(keychain),
                  '--timestamp=none', str(probe)])
             run(['codesign', '--verify', '--strict', str(probe)])
+            if os.environ.get('PLEAZYNG_IOS_NATIVE_ASSET_CODESIGN') == '1':
+                shim = ios_native_asset_xcrun(stage, keychain, fingerprint)
+                run([str(shim), 'codesign', '--force', '--sign', fingerprint, str(probe)], timeout=60)
+                run(['codesign', '--verify', '--strict', str(probe)])
+                os.environ['PATH'] = str(shim.parent) + os.pathsep + original_path
+                report['ios_native_asset_signing_qualified'] = True
             report['signing_qualified'] = True
             yield stage, certificate, fingerprint, team, keychain
         finally:
+            os.environ['PATH'] = original_path
             try:
                 run(['security', 'list-keychains', '-d', 'user', '-s', *original_search_list])
             finally:

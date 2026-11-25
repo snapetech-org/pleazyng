@@ -2053,6 +2053,7 @@ jobs:
           IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
           IOS_MUSIC_WIDGET_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_MUSIC_WIDGET_PROVISIONING_PROFILE_BASE64 }}
           PLEAZYNG_REQUIRED_CAR_CAPABILITIES: ${{ vars.PLEAZYNG_REQUIRED_CAR_CAPABILITIES || 'audio,siri' }}
+          PLEAZYNG_IOS_NATIVE_ASSET_CODESIGN: '1'
         working-directory: ${{ env.PLEZYNG_APPLE_WORKSPACE }}
         run: |
           set -euo pipefail
@@ -2092,10 +2093,24 @@ jobs:
                   raise RuntimeError('Less than 4 GiB free while archiving iOS. Stopping before the runner log volume fills.')
 
           with tempfile.TemporaryDirectory(prefix='ios-store-archive-', dir=volumes[2]) as work:
+              # The release source stays frozen. Load only this workflow revision's signing helper.
+              product_script = Path(sys.argv[1]).resolve()
+              workflow_sha = os.environ['GITHUB_SHA']
+              workspace = os.environ['GITHUB_WORKSPACE']
+              subprocess.run(['git', '-C', workspace, 'fetch', '--depth=1', '--no-tags', 'origin', workflow_sha],
+                             check=True, timeout=120)
+              signing_material = subprocess.check_output([
+                  'git', '-C', workspace, 'show', f'{workflow_sha}:scripts/apple_signing_material.py',
+              ])
+              (Path(work) / 'apple_signing_material.py').write_bytes(signing_material)
               log = Path(work) / 'xcode.log'
               with log.open('wb') as output:
                   report(log)
-                  with subprocess.Popen([sys.executable, *sys.argv[1:]], stdout=output,
+                  bootstrap = ('import runpy, sys; from pathlib import Path; '
+                               'tools = sys.argv.pop(1); script = sys.argv.pop(1); '
+                               'sys.path[:0] = [tools, str(Path(script).parent)]; '
+                               'runpy.run_path(script, run_name="__main__")')
+                  with subprocess.Popen([sys.executable, '-c', bootstrap, work, str(product_script), *sys.argv[2:]], stdout=output,
                                         stderr=subprocess.STDOUT, start_new_session=True) as archive:
                       try:
                           while True:

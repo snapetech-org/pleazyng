@@ -160,6 +160,12 @@ attaches the exact valid build to its existing App Store version. It rechecks
 the attachment and retains a receipt. Submit any first in-app purchases with
 the intended version in the [App Store Connect review screen](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase).
 
+The iOS archive uses an isolated, time-bounded signing keychain. Flutter's
+native-asset signing call receives that same keychain and the iOS timestamp
+setting used by the signing probe. A native probe verifies the route before
+the archive starts. The archive reports log growth and free disk periodically
+and includes a bounded excerpt on failure.
+
 ### v3.0.36 signed-store processing result
 
 The frozen v3.0.36 iOS and tvOS IPAs were signed and exported by [run
