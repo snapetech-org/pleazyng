@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.product_source_tag || 'v3.0.37-candidate.28f417ab17a4b6dc4c2e422b27662c62f62be7fb' }}
-          fetch-depth: ${{ inputs.frozen_product_source_sha != '' && 2 || 1 }}
+          fetch-depth: ${{ inputs.target == 'ipad-in-use-capture-only' && '0' || (inputs.frozen_product_source_sha != '' && '2' || '1') }}
           persist-credentials: false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

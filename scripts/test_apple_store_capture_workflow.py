@@ -95,6 +95,7 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         self.assertIn(f"- {target}", WORKFLOW)
         self.assertIn(target, ios.split("\n", 2)[1])
         self.assertIn("runs-on: ${{ (inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only') && 'xcode-27' || 'macos-26' }}", ios)
+        self.assertIn("fetch-depth: ${{ inputs.target == 'ipad-in-use-capture-only' && '0'", ios)
         self.assertIn("inputs.ios_artifact_run_id", named_step_text(ios, "Verify the prior build artifact producer"))
         self.assertIn("inputs.ios_artifact_run_id", named_step_text(ios, "Download prior iOS build"))
         self.assertIn("apple-store-build-ios-${{ inputs.product_version || '3.0.37' }}", named_step_text(ios, "Download prior iOS build"))
