@@ -1834,7 +1834,24 @@ jobs:
 
       - name: Refresh pinned mpv Swift packages
         working-directory: ${{ env.PLEZYNG_APPLE_WORKSPACE }}
-        run: scripts/refresh_apple_spm.sh ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          log=$(mktemp "$RUNNER_TEMP/ios-swiftpm.XXXXXXXX")
+          trap 'rm -f "$log"' EXIT
+          for attempt in 1 2 3; do
+            if scripts/refresh_apple_spm.sh ios > "$log" 2>&1; then
+              cat "$log"
+              exit 0
+            fi
+            cat "$log" >&2
+            if [[ "$attempt" == 3 ]] || grep -Eqi 'checksum.*(does not match|mismatch|invalid)' "$log" || ! grep -Eq \
+                'failed downloading .*downloadError\("(Could not connect to the server\.|The request timed out\.|The network connection was lost\.)' "$log"; then
+              exit 1
+            fi
+            echo "Retrying a SwiftPM binary download transport failure ($attempt/3)." >&2
+            sleep "$((attempt * 5))"
+          done
 
       - name: Remove AppleDouble sidecars before iOS Xcode build
         run: bash "$GITHUB_WORKSPACE/scripts/clean_appledouble_sidecars.sh" "$PLEZYNG_APPLE_WORKSPACE"

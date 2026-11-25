@@ -213,6 +213,41 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('iOS must prepare pinned Steam sources', result.stderr)
 
+    def test_ios_swiftpm_retries_transport_errors_without_retrying_checksum_failures(self):
+        workflow = yaml.safe_load(self._workflow())
+        step = next(step for step in workflow['jobs']['build-ios']['steps']
+                    if step.get('name') == 'Refresh pinned mpv Swift packages')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'scripts').mkdir()
+            resolver = root / 'scripts/refresh_apple_spm.sh'
+            resolver.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$*" >> "$CALLS"\n'
+                'test "$(wc -l < "$CALLS")" -gt "$FAIL_UNTIL" && exit 0\n'
+                'printf "%s\\n" "$FAILURE" >&2\n'
+                'exit 1\n'
+            )
+            resolver.chmod(0o700)
+            sleep = root / 'sleep'
+            sleep.write_text('#!/bin/sh\nexit 0\n')
+            sleep.chmod(0o700)
+            transport = 'failed downloading Libfribidi: downloadError("Could not connect to the server.")'
+            for failure, fail_until, attempts, success in (
+                (transport, 1, 2, True), (transport, 3, 3, False), ('checksum does not match', 1, 1, False),
+                (transport + '\nchecksum does not match', 1, 1, False),
+            ):
+                with self.subTest(failure=failure, fail_until=fail_until):
+                    calls = root / 'calls'
+                    calls.write_text('')
+                    env = {**os.environ, 'PATH': f'{root}{os.pathsep}{os.environ["PATH"]}',
+                           'RUNNER_TEMP': str(root), 'CALLS': str(calls), 'FAILURE': failure,
+                           'FAIL_UNTIL': str(fail_until)}
+                    result = subprocess.run(['bash', '-c', step['run']], cwd=root, env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, success, result.stderr)
+                    self.assertEqual(calls.read_text().splitlines(), ['ios'] * attempts)
+
     def test_recovery_builds_must_evaluate_after_skipped_capture_ancestors(self):
         original = self._workflow()
         for prefix in ("always() && ", "!cancelled() && ", "needs.validate-trusted-ref.result == 'success' && "):

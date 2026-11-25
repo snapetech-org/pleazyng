@@ -56,6 +56,12 @@ and their original provenance.
 
 ## Store archive path
 
+Use hosted `xcode-27` for focused iOS Store builds when the private Mac has only
+Xcode 27.0. The iOS build checks that both device and simulator SDKs are 27.1 or
+later. Choose private iOS signing when the host provides those SDKs. The focused
+iOS workflow retries transient SwiftPM binary download errors and keeps each
+artifact's checksum requirement in force.
+
 Keep `include_apple_store_build=true` for the first coordinated signed qualification run. The unsigned developer IPA remains separate. `build_apple_store_archive.py` imports the signing identity in a scoped context, validates and temporarily installs profiles, applies distinct manual Release signing settings to Runner and TopShelfExtension, archives and exports with an explicit profile map. It restores the original project bytes and removes only profiles it created. Existing installed profiles are preserved. iOS Store compilation explicitly selects trial/IAP mode and disables the direct-download update check; tvOS's native AOT build already selects IAP mode.
 
 The helper's public receipt records archive/export completion separately from purchase and application qualification. Run the exact intended release revision through the existing coordinated full build; do not dispatch a duplicate matrix just for these secrets. A signed IPA must still process in App Store Connect and pass actual device, StoreKit purchase/restore, reviewer-access and screenshot checks. Set `APPLE_IOS_STORE_UPLOAD_READY` or `APPLE_TVOS_STORE_UPLOAD_READY` only after verifying the corresponding signed build and upload path. Upload automation is separate from TestFlight tester invitations and App Review submission.
