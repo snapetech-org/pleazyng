@@ -24,6 +24,8 @@
     "pleazyng-android-x86_64.tar.gz",
     "pleazyng-automotive-music.apk",
     "pleazyng-automotive-play.aab",
+    "pleazyng-homebrew-SHA256SUMS.txt",
+    "pleazyng-homebrew-recovery.json",
     "pleazyng-ios-unsigned.ipa",
     "pleazyng-linux-arm64.deb",
     "pleazyng-linux-arm64.flatpak",
@@ -39,6 +41,7 @@
     "pleazyng-linux-x64.tar.gz",
     "pleazyng-linux-x86_64.AppImage",
     "pleazyng-linux-x86_64.AppImage.zsync",
+    "pleazyng-macos-notarized.dmg",
     "pleazyng-macos.dmg",
     "pleazyng-moonlight-android-source.tar.gz",
     "pleazyng-tizen-arm-tester-handoff.zip",
@@ -48,6 +51,7 @@
     "pleazyng-windows-x64-portable.7z",
     "pleazyng-winget-manifests-3.0.51.zip",
     "pleazyng.3.0.51.nupkg",
+    "snapetech-pleazyng.rb",
     "webos-SHA256SUMS.txt"
   ]
 }

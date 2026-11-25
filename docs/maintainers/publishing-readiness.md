@@ -46,7 +46,7 @@ store listings; use the matching TV build and screen. The channel-specific copy
 and remaining asset checks are recorded in
 [store-listing-copy.md](store-listing-copy.md).
 
-| Channel | Current setup / automation | Remaining before first Pleazyng publication |
+| Channel | Current setup / automation | Remaining publication or qualification work |
 | --- | --- | --- |
 | GitHub Releases / direct downloads | Full platform build and checksum/provenance gates; release orchestrator can publish | Exact intended main revision must pass CI and every required platform build/asset check |
 | Website | Rebrand deployed at existing URLs | Update download links only after verified release; existing access settings remain |
@@ -56,8 +56,8 @@ and remaining asset checks are recorded in
 | Snap Store | `pleazyng` registered; package-scoped upload/release credential configured | First qualified Snap, automated store checks, then listing/screenshots and channel verification |
 | Chocolatey | New `pleazyng` package recipe and API secret configured; no old/new public entry found | Qualified Windows installer/package, credential acceptance and community moderation |
 | WinGet | `SnapeTech.Pleazyng` manifests and submission token configured; no publisher namespace found | Qualified installer, valid manifest PR, upstream validation/review and merge |
-| Homebrew custom tap | Attested Cask verification and tap publishing implemented; Developer ID certificate issued and dedicated signing secrets configured; API-key notarization wired; dedicated Pleazyng tap and repository-restricted token configured | First native signing/notarization/Gatekeeper qualification, generated release Cask and live workflow validation |
-| Official Homebrew Cask | Candidate generator available | Same signing requirements, then upstream acceptance/audit/review; approval is not automated |
+| Homebrew custom tap | v3.0.51 Cask published with an attested notarized DMG; recovery and tap workflows passed | Optional full `brew install` smoke test; v3.0.51 mounted-app signature, stapling and Gatekeeper checks passed |
+| Official Homebrew Cask | Version-pinned Cask generator and signed/notarized v3.0.51 asset available | Review current upstream audit/style requirements, submit the Cask, and await Homebrew review; upstream acceptance is separate from custom-tap publication |
 | Google Play internal test | New app/package, testing-only service account access, upload workflow and review grant configured | First signed Play AAB, Play App Signing, purchase product and real-device purchase/review-access validation; internal distribution must be explicitly activated |
 | Google Play closed beta | Sign-in/review instructions, privacy, category/contact, rating and other declarations saved | Data safety, listing with three phone/two tablet images, 178 Alpha regions and existing five-member tester list are saved. Remaining: first AAB and requested permissions declarations, tester/country configuration, IAP validation and Google review |
 | Google Play production / open testing | Existing personal developer account; website verified, company display name under review, organization conversion awaits D-U-N-S | Closed-test eligibility and production-access approval. Current personal-account console requires 12 opted-in testers for 14 continuous days; this does not delay starting the closed test. Recheck eligibility after an approved organization conversion |
