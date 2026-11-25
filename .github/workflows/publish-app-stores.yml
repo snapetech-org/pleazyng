@@ -384,6 +384,12 @@ jobs:
           if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
             sudo chown "$(id -u):$(id -g)" /dev/kvm
           fi
+          # The fresh emulator imports the host key at boot, so create it before launch.
+          export ADB_VENDOR_KEYS="$ANDROID_EMULATOR_HOME/adbkey"
+          (umask 077; adb keygen "$ADB_VENDOR_KEYS")
+          test -s "$ADB_VENDOR_KEYS.pub"
+          adb kill-server || true
+          adb start-server
           "$ANDROID_HOME/emulator/emulator" -avd pleazyng-firetv-api36 -no-window -no-audio \
             -no-boot-anim -no-snapshot -gpu swiftshader_indirect -memory 4096 -cores 4 -partition-size 4096 \
             -port 5566 > "$RUNNER_TEMP/firetv-emulator.log" 2>&1 &
@@ -403,6 +409,7 @@ jobs:
             sleep 2
           done
           if [[ "$booted" != true ]]; then
+            adb devices -l
             cat "$RUNNER_TEMP/firetv-emulator.log"
             echo 'Fire TV form-factor emulator failed to boot.' >&2
             exit 1
