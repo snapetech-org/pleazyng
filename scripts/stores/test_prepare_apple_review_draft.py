@@ -191,3 +191,48 @@ class AddVersionForReviewTests(unittest.TestCase):
                 review.add_version_for_review(self.api, 'TV_OS', '3.0.51', '210')
         self.api.items.assert_not_called()
         self.api.request.assert_not_called()
+
+
+    def test_occupied_unassigned_draft_is_left_alone(self):
+        foreign = {**self.submission, 'id': 'foreign', 'attributes': {
+            **self.submission['attributes'], 'platform': None,
+        }}
+        self.api.items.side_effect = [[foreign], [{'type': 'reviewSubmissionItems'}], [], [self.item]]
+        self.api.request.side_effect = [{'data': self.submission}, {'data': self.item}]
+        with patch.object(review, 'prepare', return_value=self.receipt):
+            result = review.add_version_for_review(self.api, 'TV_OS', '3.0.51', '210')
+        self.assertEqual(result['review_submission_id'], 'review-id')
+        self.assertEqual(self.api.request.call_args_list[0].args[0], '/v1/reviewSubmissions')
+
+
+class SubmitAppleReviewTests(unittest.TestCase):
+    def test_submits_the_exact_version_and_first_purchases_together(self):
+        api = Mock()
+        purchases = [{'type': 'inAppPurchaseVersions', 'id': name} for name in ('trial', 'unlock')]
+        receipt = {'exact_build_attached': True, 'observed_draft_state': 'PREPARE_FOR_SUBMISSION',
+                   'release_type': 'AFTER_APPROVAL', 'app_store_version_id': 'ios-version',
+                   'app_review_detail': {'notes_present': True}}
+        expected = {'type': 'appStoreVersions', 'id': 'ios-version'}
+        app_item = {'attributes': {'state': 'READY_FOR_REVIEW'},
+                    'relationships': {'appStoreVersion': {'data': expected}}}
+        purchase_items = [{'attributes': {'state': 'READY_FOR_REVIEW'},
+                           'relationships': {'inAppPurchaseVersion': {'data': link}}} for link in purchases]
+        api.items.side_effect = [[app_item], [app_item, *purchase_items]]
+        api.request.side_effect = [{}, {}, {}, {'data': {'type': 'reviewSubmissions', 'id': 'review-id',
+            'attributes': {'platform': 'IOS', 'state': 'WAITING_FOR_REVIEW', 'submittedDate': 'date'}}}]
+        with patch.object(review, 'prepare', return_value=receipt), \
+             patch.object(review, 'add_version_for_review', return_value={**receipt, 'review_submission_id': 'review-id'}), \
+             patch.object(review, 'first_purchase_versions', return_value=purchases) as products:
+            result = review.submit_for_review(api, 'IOS', '3.0.51', '210', first_purchases=True)
+        products.assert_called_once_with(api, first_purchases=True)
+        self.assertEqual(result['submitted_purchase_count'], 2)
+        self.assertEqual(result['verified_review_state'], 'WAITING_FOR_REVIEW')
+        self.assertEqual(api.request.call_args_list[2].args[1]['data']['attributes'], {'submitted': True})
+
+    def test_in_review_version_is_observed_without_additional_mutations(self):
+        receipt = {'exact_build_attached': True, 'observed_draft_state': 'IN_REVIEW'}
+        api = Mock()
+        with patch.object(review, 'prepare', return_value=receipt):
+            self.assertEqual(review.submit_for_review(api, 'IOS', '3.0.51', '210')['submission_outcome'],
+                             'already_submitted')
+        api.request.assert_not_called()

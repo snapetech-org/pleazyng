@@ -1,6 +1,6 @@
 # ng-runner-policy: hosted-default-v2
 name: Prepare an Apple review draft
-run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || inputs.add_for_review && 'add-apple-version-for-review' || (inputs.capture_run != '' || inputs.tvos_capture_run != '') && 'stage-apple-screenshot' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
+run-name: ${{ inputs.inspect_only && 'inspect-apple-review' || inputs.submit_for_review && 'submit-apple-review' || inputs.add_for_review && 'add-apple-version-for-review' || (inputs.capture_run != '' || inputs.tvos_capture_run != '') && 'stage-apple-screenshot' || 'prepare-apple-review' }}:${{ inputs.release_tag }}:${{ inputs.platform }}
 
 on:
   workflow_dispatch:
@@ -28,6 +28,14 @@ on:
         default: false
       add_for_review:
         description: Add the exact attached app version to an editable App Review submission
+        type: boolean
+        default: false
+      submit_for_review:
+        description: Send the exact attached version to App Review and release after approval
+        type: boolean
+        default: false
+      first_purchases:
+        description: Include both existing first purchases with the iOS version
         type: boolean
         default: false
       capture_run:
@@ -74,14 +82,19 @@ jobs:
           IPAD_OPEN_MEDIA: ${{ inputs.ipad_open_media }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
+          SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review }}
+          FIRST_PURCHASES: ${{ inputs.first_purchases }}
           PYTHONPATH: scripts
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$PROCESSING_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$FIRST_PURCHASES" != true || ( "$PLATFORM" == IOS && "$SUBMIT_FOR_REVIEW" == true ) ]]
+          [[ "$SUBMIT_FOR_REVIEW" != true || ( "$ADD_FOR_REVIEW" != true && "$INSPECT_ONLY" != true &&
+               -z "$CAPTURE_RUN" && -z "$TVOS_CAPTURE_RUN" ) ]]
           [[ "$IPAD_OPEN_MEDIA" != true || ( "$PLATFORM" == IOS && -n "$CAPTURE_RUN" ) ]]
           if [[ -n "$PREVIOUS_DRAFT_TAG" ]]; then
             [[ "$PREVIOUS_DRAFT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && -z "$CAPTURE_RUN" && -z "$TVOS_CAPTURE_RUN" &&
-               "$INSPECT_ONLY" != true && "$ADD_FOR_REVIEW" != true ]]
+               "$INSPECT_ONLY" != true && "$ADD_FOR_REVIEW" != true && "$SUBMIT_FOR_REVIEW" != true ]]
           fi
           case "$PLATFORM" in
             MAC_OS)
@@ -119,10 +132,12 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
+          SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review }}
+          FIRST_PURCHASES: ${{ inputs.first_purchases }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          [[ "$CAPTURE_RUN" =~ ^[1-9][0-9]*$ && "$INSPECT_ONLY" != true && "$ADD_FOR_REVIEW" != true ]]
+          [[ "$CAPTURE_RUN" =~ ^[1-9][0-9]*$ && "$INSPECT_ONLY" != true && "$ADD_FOR_REVIEW" != true && "$SUBMIT_FOR_REVIEW" != true ]]
           [[ -z "$TVOS_CAPTURE_RUN" || ( "$PLATFORM" == TV_OS && "$TVOS_CAPTURE_RUN" == "$CAPTURE_RUN" ) ]]
           case "$PLATFORM" in
             IOS) lane=ios ;;
@@ -168,12 +183,16 @@ jobs:
           PREVIOUS_DRAFT_TAG: ${{ inputs.previous_draft_tag }}
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
+          SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review }}
+          FIRST_PURCHASES: ${{ inputs.first_purchases }}
           PYTHONPATH: scripts
         run: |
           args=()
           if [[ -n "$PREVIOUS_DRAFT_TAG" ]]; then args+=(--previous-draft "${PREVIOUS_DRAFT_TAG#v}"); fi
           if [[ "$INSPECT_ONLY" == true ]]; then args+=(--inspect-only); fi
           if [[ "$ADD_FOR_REVIEW" == true ]]; then args+=(--add-for-review); fi
+          if [[ "$SUBMIT_FOR_REVIEW" == true ]]; then args+=(--submit-for-review); fi
+          if [[ "$FIRST_PURCHASES" == true ]]; then args+=(--first-purchases); fi
           python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \
             --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json" "${args[@]}"
 
