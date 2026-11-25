@@ -2539,8 +2539,8 @@ def resize_macos_app_window(pid: int, *, width: int, height: int, x: int, y: int
         "    set targetProcess to first application process whose unix id is targetPid",
         "    set frontmost of targetProcess to true",
         "    set targetWindow to first window of targetProcess",
-        f"    set size of targetWindow to {{{width}, {height}}}",
         f"    set position of targetWindow to {{{x}, {y}}}",
+        f"    set size of targetWindow to {{{width}, {height}}}",
         "    delay 1",
         "    set actualSize to size of targetWindow",
         "    set actualPosition to position of targetWindow",
@@ -2756,8 +2756,9 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     if retained_mode.get("current_mode_points") != [1920.0, 1080.0]:
         raise ValueError(f"The hosted Mac display mode reverted before app launch: {retained_mode}")
 
+    window_x, window_y = display_mode["window_center_points"]
     window_preference = write_macos_main_window_frame_preference(
-        width=1280, height=800, x=0, y=0
+        width=1280, height=800, x=window_x, y=window_y
     )
     (output / "macos-01-files-and-books.window-frame-preference.json").write_text(
         json.dumps(window_preference, indent=2) + "\n", encoding="utf-8"
@@ -2789,7 +2790,7 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     # StoreKit state. Preserve the unmodified startup window first, then ask
     # WindowServer to resize the actual app window and capture it by ID.
     geometry_probe: dict[str, Any] = {
-        "requested_bounds_points": [0, 0, 1280, 800],
+        "requested_bounds_points": [window_x, window_y, 1280, 800],
         "initial_window_geometry": initial_window_geometry,
         "frame_preference": window_preference,
     }
@@ -2811,8 +2812,8 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
                 app_pid,
                 width=1280,
                 height=800,
-                x=int(round(initial_bounds[0])),
-                y=int(round(initial_bounds[1])),
+                x=window_x,
+                y=window_y,
             )
         resized_geometry = run_macos_swift_json(
             MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)]
@@ -2932,12 +2933,12 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
             app_pid,
             width=1280,
             height=800,
-            x=int(round(before_bounds[0])),
-            y=int(round(before_bounds[1])),
+            x=window_x,
+            y=window_y,
         )
         resize["window_level_resize_fallback"] = fallback_resize
         resize["accessibility_resize_used"] = True
-    resize["requested_bounds_points"] = [0, 0, 1280, 800]
+    resize["requested_bounds_points"] = [window_x, window_y, 1280, 800]
     resize["window_server_clamping"] = "verified against live CoreGraphics bounds after AppKit restored the saved window frame"
 
     geometry = run_macos_swift_json(MACOS_WINDOW_BOUNDS_SWIFT, [str(final_pid), str(window_id)])
