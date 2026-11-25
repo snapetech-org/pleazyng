@@ -268,17 +268,32 @@ import Foundation
 import ImageIO
 import Vision
 
-guard CommandLine.arguments.count == 2,
+guard [2, 6].contains(CommandLine.arguments.count),
       let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: CommandLine.arguments[1]) as CFURL, nil),
       let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
   fputs("Could not decode screenshot PNG for native Vision OCR.\n", stderr)
   exit(2)
 }
+var region = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+var input = image
+if CommandLine.arguments.count == 6 {
+  let coordinates = CommandLine.arguments.dropFirst(2).compactMap(Int.init)
+  guard coordinates.count == 4, coordinates[2] > 0, coordinates[3] > 0 else { exit(5) }
+  let crop = CGRect(x: coordinates[0], y: coordinates[1], width: coordinates[2], height: coordinates[3])
+  guard region.contains(crop), let imageCrop = image.cropping(to: crop),
+        let context = CGContext(data: nil, width: imageCrop.width * 3, height: imageCrop.height * 3,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { exit(6) }
+  context.interpolationQuality = .high
+  context.draw(imageCrop, in: CGRect(x: 0, y: 0, width: context.width, height: context.height))
+  guard let scaled = context.makeImage() else { exit(7) }
+  input = scaled
+  region = crop
+}
 let request = VNRecognizeTextRequest()
-request.usesLanguageCorrection = true
+request.usesLanguageCorrection = CommandLine.arguments.count == 6
 request.recognitionLanguages = ["en-US"]
-request.recognitionLevel = .accurate
-request.minimumTextHeight = 0.008
+request.recognitionLevel = .fast
 for (stage, devices) in try request.supportedComputeStageDevices {
   guard let cpu = devices.first(where: { if case .cpu = $0 { return true }; return false }) else {
     fputs("Vision OCR has no CPU for required stage.\n", stderr)
@@ -286,7 +301,7 @@ for (stage, devices) in try request.supportedComputeStageDevices {
   }
   request.setComputeDevice(cpu, for: stage)
 }
-try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+try VNImageRequestHandler(cgImage: input, options: [:]).perform([request])
 let observations = request.results ?? []
 let recognized = observations.compactMap { observation -> [String: Any]? in
   guard let candidate = observation.topCandidates(1).first else { return nil }
@@ -294,7 +309,12 @@ let recognized = observations.compactMap { observation -> [String: Any]? in
   return [
     "text": candidate.string,
     "confidence": Double(candidate.confidence),
-    "normalized_bounds": [Double(box.minX), Double(box.minY), Double(box.width), Double(box.height)],
+    "normalized_bounds": [
+      Double(region.minX + box.minX * region.width) / Double(image.width),
+      (Double(image.height) - Double(region.maxY) + Double(box.minY * region.height)) / Double(image.height),
+      Double(box.width * region.width) / Double(image.width),
+      Double(box.height * region.height) / Double(image.height)
+    ],
   ]
 }
 let lines = recognized.compactMap { $0["text"] as? String }
@@ -2568,8 +2588,8 @@ def resize_macos_app_window(pid: int, *, width: int, height: int, x: int, y: int
     return actual
 
 
-def macos_screen_ocr(path: Path) -> dict[str, Any]:
-    evidence = run_macos_swift_json(MACOS_LISTING_OCR_SWIFT, [str(path)], timeout=120)
+def macos_screen_ocr(path: Path, crop: tuple[int, int, int, int] | None = None) -> dict[str, Any]:
+    evidence = run_macos_swift_json(MACOS_LISTING_OCR_SWIFT, [str(path), *map(str, crop or ())], timeout=120)
     expected_size = list(png_dimensions(path))
     if evidence.get("image_pixels") != expected_size:
         raise RuntimeError(f"Vision OCR decoded a different screenshot size than the PNG header: {evidence}")
@@ -2879,26 +2899,44 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         screenshot: Path, evidence_path: Path, markers: tuple[str, ...]
     ) -> dict[str, Any]:
         decline = "Don't Allow"
+        login_marker = "Sign in with Plex"
         evidence = capture_macos_display_stage(
             screenshot, evidence_path, live_display_state,
-            accepted_text=(*markers, decline),
+            accepted_text=(*markers, decline, login_marker),
         )
         recognized = evidence["recognized_text"].casefold()
-        if decline.casefold() not in recognized:
+        if decline.casefold() in recognized:
+            if "pleazyng" not in recognized or "find devices" not in recognized:
+                raise ValueError("An unexpected macOS permission dialog covered the capture")
+            shutil.copyfile(screenshot, screenshot.with_suffix(".network-prompt.png"))
+            click_records.append(click_macos_visible_text(
+                app, app_pid, evidence, decline, display_state=live_display_state
+            ))
+            click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
+            evidence = capture_macos_display_stage(
+                screenshot, evidence_path, live_display_state, accepted_text=(*markers, login_marker)
+            )
+            recognized = evidence["recognized_text"].casefold()
+        if any(marker.casefold() in recognized for marker in markers):
             return evidence
-        if "pleazyng" not in recognized or "find devices" not in recognized:
-            raise ValueError("An unexpected macOS permission dialog covered the capture")
-        shutil.copyfile(screenshot, screenshot.with_suffix(".network-prompt.png"))
-        click_records.append(click_macos_visible_text(
-            app, app_pid, evidence, decline, display_state=live_display_state
-        ))
-        click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
-        return capture_macos_display_stage(
-            screenshot, evidence_path, live_display_state, accepted_text=markers
-        )
+        # Vision's unrestricted text pass can miss the small teal control
+        # over the login artwork. Inspect that portion of the actual screenshot
+        # at a larger OCR scale, keeping all returned bounds in display space.
+        live_window = run_macos_swift_json(MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)])
+        bounds = live_window.get("bounds_points")
+        if (not isinstance(bounds, list) or bounds[2:] != [1280.0, 800.0]
+                or png_dimensions(screenshot) != (1920, 1080)):
+            raise ValueError("The Mac login window changed geometry before OCR")
+        cropped = macos_screen_ocr(screenshot, (round(bounds[0]) + 805, round(bounds[1]) + 537, 195, 28))
+        if not any("use files and" in region["text"].casefold() for region in cropped["recognized_regions"]):
+            raise ValueError(f"The visible Mac login screen did not expose the local library button: {cropped}")
+        evidence["local_control_ocr"] = cropped
+        evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        return evidence
 
     first_ocr = capture_onboarding_stage(first_path, first_ocr_path, ("Start fresh", "Use files and books"))
-    require_macos_listing_markers(first_ocr, before_navigation=True)
+    if "local_control_ocr" not in first_ocr:
+        require_macos_listing_markers(first_ocr, before_navigation=True)
     first_text = " ".join(str(first_ocr.get("recognized_text", "")).casefold().split())
     if "start fresh" in first_text:
         click_records.append(click_macos_visible_text(
@@ -2917,8 +2955,11 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         choice_ocr_path = first_ocr_path
         choice_ocr = first_ocr
 
+    local_control_ocr = choice_ocr.get("local_control_ocr")
     click_records.append(click_macos_visible_text(
-        app, app_pid, choice_ocr, "Use files and books", display_state=live_display_state
+        app, app_pid, local_control_ocr or choice_ocr,
+        "Use files and" if local_control_ocr else "Use files and books",
+        display_state=live_display_state,
     ))
     click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
     after_path = output / "macos-03-files-and-books-empty-library.png"
