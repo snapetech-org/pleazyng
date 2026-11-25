@@ -786,8 +786,8 @@ class MacListingCaptureTests(unittest.TestCase):
         self.assertNotIn("System Events", MACOS_POST_NATIVE_CLICK_SWIFT)
         self.assertIn("CGDisplayBounds", MACOS_LIVE_DISPLAY_STATE_SWIFT)
         self.assertIn("NSWindow Frame ", capture.write_macos_main_window_frame_preference.__code__.co_consts)
-        self.assertIn("Use files and books", capture.require_macos_listing_markers.__code__.co_consts)
-        self.assertIn("Import files", capture.require_macos_listing_markers.__code__.co_consts)
+        self.assertIn("use files and books", capture.require_macos_listing_markers.__code__.co_consts)
+        self.assertIn("import files", capture.require_macos_listing_markers.__code__.co_consts)
         self.assertIn("/usr/sbin/screencapture", capture.run_macos_listing_window_capture.__code__.co_consts)
         self.assertNotIn("StoreKit", MACOS_LISTING_OCR_SWIFT)
         self.assertNotIn("XCUITest", capture.run_macos_listing_window_capture.__code__.co_consts)
@@ -799,7 +799,13 @@ class MacListingCaptureTests(unittest.TestCase):
             )
 
         self.assertEqual("{{0, 0}, {1280, 800}}", evidence["saved_frame_string"])
-        self.assertTrue(evidence["applied_before_app_launch"])
+        self.assertTrue(evidence["written_before_app_launch"])
+
+    def test_mac_listing_markers_match_normalized_vision_case_and_spacing(self) -> None:
+        capture.require_macos_listing_markers({"recognized_text": "the START\n FRESH action"}, before_navigation=True)
+        capture.require_macos_listing_markers(
+            {"recognized_text": "IMPORT FILES  Add source"}, before_navigation=False
+        )
 
     def test_mac_native_click_point_comes_from_visible_ocr_inside_product_window(self) -> None:
         evidence = {

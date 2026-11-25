@@ -2561,13 +2561,13 @@ def macos_screen_ocr(path: Path) -> dict[str, Any]:
 
 
 def require_macos_listing_markers(evidence: dict[str, Any], *, before_navigation: bool) -> None:
-    text = str(evidence.get("recognized_text", ""))
+    text = " ".join(str(evidence.get("recognized_text", "")).casefold().split())
     if before_navigation:
-        if "Start fresh" not in text and "Use files and books" not in text:
+        if "start fresh" not in text and "use files and books" not in text:
             raise ValueError(f"The fresh app screen did not visibly offer a local setup path; Vision saw: {text}")
         return
-    has_import = "Import files" in text
-    has_empty_state = "Add a source or import a book" in text or "Add source" in text
+    has_import = "import files" in text
+    has_empty_state = "add a source or import a book" in text or "add source" in text
     if not has_import or not has_empty_state:
         raise ValueError(f"The real empty Files and Books screen was not visible; Vision saw: {text}")
 
@@ -2584,7 +2584,7 @@ def write_macos_main_window_frame_preference(*, width: int, height: int, x: int,
         "preference_key": key,
         "saved_frame_string": observed,
         "requested_window_bounds_points": [x, y, width, height],
-        "applied_before_app_launch": True,
+        "written_before_app_launch": True,
     }
 
 
@@ -2619,8 +2619,9 @@ def capture_macos_display_stage(
         evidence = macos_screen_ocr(screenshot)
         evidence["live_display_state"] = display_state
         evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
-        text = str(evidence.get("recognized_text", ""))
-        if any(marker in text for marker in accepted_text):
+        text = " ".join(str(evidence.get("recognized_text", "")).casefold().split())
+        normalized_markers = (" ".join(marker.casefold().split()) for marker in accepted_text)
+        if any(marker in text for marker in normalized_markers):
             return evidence
         if time.monotonic() >= deadline:
             raise ValueError(
@@ -2752,6 +2753,12 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         raise RuntimeError(f"Could not launch the retained product app: {(open_result.stderr or open_result.stdout).strip()}")
     app_pid, initial_window_id = _launched_app_pid_and_window(app)
     run(["osascript", "-e", f'tell application id "{BUNDLE_ID}" to activate'], timeout=60)
+    initial_window_geometry = run_macos_swift_json(
+        MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)]
+    )
+    (output / "macos-01-files-and-books.initial-window-geometry.json").write_text(
+        json.dumps(initial_window_geometry, indent=2) + "\n", encoding="utf-8"
+    )
     live_display_state = run_macos_swift_json(MACOS_LIVE_DISPLAY_STATE_SWIFT, [])
     (output / "macos-01-files-and-books.live-display-state.json").write_text(
         json.dumps(live_display_state, indent=2) + "\n", encoding="utf-8"
@@ -2767,11 +2774,13 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     )
     require_macos_listing_markers(first_ocr, before_navigation=True)
     click_records: list[dict[str, Any]] = []
-    first_text = str(first_ocr.get("recognized_text", ""))
-    if "Start fresh" in first_text:
+    click_records_path = output / "macos-01-files-and-books.native-clicks.json"
+    first_text = " ".join(str(first_ocr.get("recognized_text", "")).casefold().split())
+    if "start fresh" in first_text:
         click_records.append(click_macos_visible_text(
             app, app_pid, first_ocr, "Start fresh", display_state=live_display_state
         ))
+        click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
         choice_path = output / "macos-02-files-and-books-choice.png"
         choice_ocr_path = output / "macos-02-files-and-books-choice-ocr.json"
         choice_ocr = capture_macos_display_stage(
@@ -2788,9 +2797,7 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     click_records.append(click_macos_visible_text(
         app, app_pid, choice_ocr, "Use files and books", display_state=live_display_state
     ))
-    (output / "macos-01-files-and-books.native-clicks.json").write_text(
-        json.dumps(click_records, indent=2) + "\n", encoding="utf-8"
-    )
+    click_records_path.write_text(json.dumps(click_records, indent=2) + "\n", encoding="utf-8")
     after_path = output / "macos-03-files-and-books-empty-library.png"
     after_ocr = capture_macos_display_stage(
         after_path,
@@ -2877,12 +2884,14 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         "xcode_version": run(["xcodebuild", "-version"], capture=True, timeout=60),
         "display_mode": display_mode,
         "live_display_state": live_display_state,
+        "initial_window_geometry": initial_window_geometry,
         "window_resize": resize,
         "window_geometry": geometry,
         "window_fully_visible_on_host_desktop": fully_visible_on_desktop,
         "window_frame_preference_file": "macos-01-files-and-books.window-frame-preference.json",
         "initial_screen_file": first_path.name,
         "initial_screen_ocr_file": first_ocr_path.name,
+        "initial_window_geometry_file": "macos-01-files-and-books.initial-window-geometry.json",
         "files_books_choice_screen_file": choice_path.name,
         "files_books_choice_ocr_file": choice_ocr_path.name,
         "post_navigation_screen_file": after_path.name,
