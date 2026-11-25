@@ -200,7 +200,9 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
         xcode = named_step_text(macos, "Select public macOS 26 Xcode for retained-app LOCALTEST")
         self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", xcode)
         self.assertIn("== 'Xcode 26.6'", xcode)
-        self.assertIn("== '26.6'", xcode)
+        self.assertIn("echo \"Selected Xcode: $xcode_version\"", xcode)
+        self.assertIn("echo \"Selected macOS SDK: $macos_sdk_version\"", xcode)
+        self.assertIn("== '26.5'", xcode)
 
         for step_name in (
             "Verify the prior build artifact producer",

@@ -965,8 +965,12 @@ jobs:
         run: |
           set -euo pipefail
           sudo xcode-select --switch /Applications/Xcode_26.6.app/Contents/Developer
-          [[ "$(xcodebuild -version | sed -n '1p')" == 'Xcode 26.6' ]]
-          [[ "$(xcrun --sdk macosx --show-sdk-version)" == '26.6' ]]
+          xcode_version="$(xcodebuild -version | sed -n '1p')"
+          macos_sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+          echo "Selected Xcode: $xcode_version"
+          echo "Selected macOS SDK: $macos_sdk_version"
+          [[ "$xcode_version" == 'Xcode 26.6' ]]
+          [[ "$macos_sdk_version" == '26.5' ]]
 
       - name: Select supported Xcode for Mac OCR capture
         if: inputs.target == 'macos-listing-capture-only'
