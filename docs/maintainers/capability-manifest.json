@@ -34,7 +34,8 @@
       "Server checks"
     ],
     "optionalCiJobs": [
-      "Linux package smoke build"
+      "Linux package smoke build",
+      "iOS compatibility launch"
     ],
     "releaseGate": {
       "workflowFile": ".github/workflows/ci.yml",

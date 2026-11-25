@@ -506,28 +506,15 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PYTHONPATH: scripts
           WORKFLOW_RUN_ID: ${{ github.run_id }}
           WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          from verify_embedded_release_ci import APPLE_IOS_NATIVE_PRODUCER, fetch_attempt_history
-
-          jobs = fetch_attempt_history(int(os.environ["WORKFLOW_RUN_ID"]),
-                                        int(os.environ["WORKFLOW_RUN_ATTEMPT"]), os.environ["GH_TOKEN"])
-          producer = [job for job in jobs if job.get("name") == APPLE_IOS_NATIVE_PRODUCER]
-          if len(producer) != 1 or producer[0].get("status") != "completed":
-              raise SystemExit("The current run needs one completed iOS app producer.")
-          if producer[0].get("conclusion") != "success":
-              print("The iOS producer did not pass. Its failed job remains the qualification result.")
-          else:
-              with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-                  output.write(f"attempt={producer[0]['run_attempt']}\n")
-          PY
+          python3 scripts/apple/verify_ios_compatibility_checkpoint.py producer \
+            --run-id "$WORKFLOW_RUN_ID" \
+            --run-attempt "$WORKFLOW_RUN_ATTEMPT" \
+            --job-name 'Build and test candidate iOS app' \
+            --allow-nonpassing
 
       - name: Download candidate iOS app artifact
         if: steps.ios-producer.outputs.attempt != ''
@@ -547,99 +534,11 @@ jobs:
           WORKFLOW_PRODUCER_ATTEMPT: ${{ steps.ios-producer.outputs.attempt }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import os
-          import posixpath
-          import re
-          import stat
-          import zipfile
-          from pathlib import Path, PurePosixPath
-
-          artifact_dir = Path(os.environ["ARTIFACT_DIR"])
-          archive_path = artifact_dir / "ios-simulator-app.zip"
-          receipt_path = artifact_dir / "ios-simulator-app.json"
-          product_sha = os.environ["PRODUCT_SOURCE_SHA"]
-          run_id = int(os.environ["WORKFLOW_RUN_ID"])
-          expected_producer_attempt = int(os.environ["WORKFLOW_PRODUCER_ATTEMPT"])
-
-          def require(condition, message):
-              if not condition:
-                  raise SystemExit(message)
-
-          require(re.fullmatch(r"[0-9a-f]{40}", product_sha) is not None,
-                  "Candidate product SHA must be a full lowercase commit SHA.")
-          require(archive_path.is_file() and receipt_path.is_file(),
-                  "The current workflow run omitted its iOS simulator app archive or receipt.")
-          receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-          require(isinstance(receipt, dict), "The iOS simulator app receipt is malformed.")
-          require(receipt.get("product_source_sha") == product_sha,
-                  "The iOS app artifact was built from a different product source SHA.")
-          require(type(receipt.get("run_id")) is int and receipt["run_id"] == run_id,
-                  "The iOS app artifact belongs to a different workflow run.")
-          producer_attempt = receipt.get("run_attempt")
-          require(type(producer_attempt) is int and producer_attempt == expected_producer_attempt,
-                  "The iOS app receipt does not match the latest successful producer job attempt.")
-          require(receipt.get("bundle_id") == "org.snapetech.pleazyng",
-                  "The iOS simulator app artifact has an unexpected bundle ID.")
-          expected_digest = receipt.get("sha256")
-          require(isinstance(expected_digest, str)
-                  and re.fullmatch(r"[0-9a-f]{64}", expected_digest) is not None,
-                  "The iOS simulator app archive does not match its SHA-256 receipt.")
-          digest = hashlib.sha256()
-          with archive_path.open("rb") as archive_file:
-              for chunk in iter(lambda: archive_file.read(1024 * 1024), b""):
-                  digest.update(chunk)
-          require(digest.hexdigest() == expected_digest,
-                  "The iOS simulator app archive does not match its SHA-256 receipt.")
-
-          try:
-              archive = zipfile.ZipFile(archive_path)
-          except (OSError, zipfile.BadZipFile):
-              raise SystemExit("The iOS simulator app archive is not a valid ZIP file.") from None
-          with archive:
-              members = archive.infolist()
-              member_names = [member.filename for member in members]
-              require(bool(members) and len(member_names) == len(set(member_names)),
-                      "The iOS simulator app ZIP is empty or has duplicate paths.")
-              roots = set()
-              for member in members:
-                  path = PurePosixPath(member.filename)
-                  require(not path.is_absolute() and ".." not in path.parts and path.parts,
-                          "The iOS simulator app ZIP contains an unsafe path.")
-                  roots.add(path.parts[0])
-              require(roots == {"Pleazyng.app"},
-                      "The iOS simulator app ZIP must contain only the exact Pleazyng.app bundle.")
-              app_root = "Pleazyng.app"
-              info_path = f"{app_root}/Info.plist"
-              require(info_path in member_names, "Pleazyng.app has no Info.plist in the ZIP.")
-              try:
-                  import plistlib
-                  info = plistlib.loads(archive.read(info_path))
-              except (KeyError, ValueError, plistlib.InvalidFileException):
-                  raise SystemExit("Pleazyng.app has an invalid Info.plist in the ZIP.") from None
-              require(info.get("CFBundleIdentifier") == receipt["bundle_id"],
-                      "Pleazyng.app Info.plist does not match the receipt bundle ID.")
-              require(any(name.startswith(f"{app_root}/Frameworks/App.framework/")
-                          for name in member_names),
-                      "Pleazyng.app is missing Frameworks/App.framework.")
-              for member in members:
-                  mode = (member.external_attr >> 16) & 0o170000
-                  if not stat.S_ISLNK(mode):
-                      continue
-                  link_target = archive.read(member).decode("utf-8")
-                  resolved = posixpath.normpath(posixpath.join(
-                      posixpath.dirname(member.filename), link_target
-                  ))
-                  require(not posixpath.isabs(link_target)
-                          and (resolved == app_root or resolved.startswith(app_root + "/")),
-                          "Pleazyng.app contains a ZIP symlink that escapes the app bundle.")
-
-          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
-              output.write(f"app_name={app_root}\n")
-          print(f"Verified the same-run iOS app artifact from producer attempt {producer_attempt}.")
-          PY
+          python3 scripts/apple/verify_ios_compatibility_checkpoint.py checkpoint \
+            --artifact-dir "$ARTIFACT_DIR" \
+            --source-sha "$PRODUCT_SOURCE_SHA" \
+            --run-id "$WORKFLOW_RUN_ID" \
+            --producer-attempt "$WORKFLOW_PRODUCER_ATTEMPT"
 
       - name: Verify retained Apple siblings
         if: steps.ios-producer.outputs.attempt != '' && inputs.retained_run_id != ''

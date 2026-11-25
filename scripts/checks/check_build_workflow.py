@@ -1316,8 +1316,9 @@ require(
 )
 
 apple_native = job_block(ci_text, "apple-native-suite")
+apple_native_ios = job_block(ci_text, "apple-native-ios-suite")
 apple_runner = re.search(
-    r"(?m)^    runs-on: \$\{\{ (.+) && fromJSON\(format\('([^']+)', github\.run_id, matrix\.slug\)\) \|\| \(matrix\.slug == 'ios' && 'xcode-27' \|\| 'macos-26'\) \}\}$",
+    r"(?m)^    runs-on: \$\{\{ (.+) && fromJSON\(format\('([^']+)', github\.run_id, matrix\.slug\)\) \|\| 'macos-26' \}\}$",
     apple_native,
 )
 private_apple_conditions = {
@@ -1336,13 +1337,48 @@ require(
     and apple_runner[2] == private_apple_target,
     "Apple native qualification must use hosted ARM64 by default and scope the private job to its exact trusted release dispatch",
 )
+apple_ios_runner = re.search(
+    r"(?m)^    runs-on: \$\{\{ (.+) && fromJSON\(format\('([^']+)', github\.run_id, matrix\.slug\)\) \|\| \(matrix\.slug == 'ios' && 'xcode-27' \|\| 'macos-26'\) \}\}$",
+    apple_native_ios,
+)
 require(
-    "fail-fast: false" in apple_native and "matrix:" in apple_native
-    and all(f"platform: {platform}" in apple_native for platform in ("iOS", "macOS", "tvOS"))
-    and 'needs: apple-native-suite' in job_block(ci_text, "apple-native-test"),
+    apple_ios_runner is not None and set(apple_ios_runner[1].split(" && ")) == private_apple_conditions
+    and apple_ios_runner[2] == private_apple_target
+    and "fail-fast: false" in apple_native and "matrix:" in apple_native
+    and all(f"platform: {platform}" in apple_native for platform in ("macOS", "tvOS"))
+    and "platform: iOS" in apple_native_ios
+    and "steps: *apple-native-steps" in apple_native_ios
+    and '      - apple-native-suite' in job_block(ci_text, "apple-native-test")
+    and '      - apple-native-ios-suite' in job_block(ci_text, "apple-native-test")
+    and '      - apple-native-ios-compatibility' in job_block(ci_text, "apple-native-test"),
     "Apple platform suites must be independently rerunnable and feed the aggregate reliability gate",
 )
+ios_compatibility = job_block(ci_text, "apple-native-ios-compatibility")
+require(
+    "needs: apple-native-ios-suite" in ios_compatibility
+    and "needs: apple-native-suite" not in ios_compatibility
+    and "runs-on: macos-26" in ios_compatibility
+    and "needs.apple-native-ios-suite.outputs.ios-compatibility-artifact-id != ''" in ios_compatibility
+    and "scripts/apple/verify_ios_compatibility_checkpoint.py producer" in ios_compatibility
+    and "scripts/apple/verify_ios_compatibility_checkpoint.py checkpoint" in ios_compatibility
+    and "--workflow-sha \"$PRODUCT_SOURCE_SHA\"" in ios_compatibility
+    and "ios-compatibility-app-${{ github.run_id }}" in ios_compatibility
+    and "--require-installed-runtime" in ios_compatibility
+    and "test \"$IOS_COMPATIBILITY_RESULT\" = success" in job_block(ci_text, "apple-native-test")
+    and "test \"$IOS_COMPATIBILITY_RESULT\" = skipped" in job_block(ci_text, "apple-native-test"),
+    "Hosted iOS compatibility launch must verify and run only the exact tested app from its iOS producer",
+)
 apple_suite = (ROOT / ".github/actions/apple-native-reliability/action.yml").read_text(encoding="utf-8")
+ios_checkpoint = named_step(apple_suite, "Create verified iOS compatibility app checkpoint")
+ios_checkpoint_upload = named_step(apple_suite, "Require hosted iOS compatibility checkpoint upload")
+require(
+    '[[ "$PLATFORM" == iOS ]]' in apple_suite
+    and '[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]' in apple_suite
+    and 'test "$PRODUCT_SOURCE_SHA" = "${CANDIDATE_SOURCE_SHA:-$GITHUB_SHA}"' in ios_checkpoint
+    and 'steps.compatibility-upload.outputs.artifact-id' in ios_checkpoint_upload
+    and 'test -n "$IOS_COMPATIBILITY_ARTIFACT_ID"' in ios_checkpoint_upload,
+    "Deferred iOS compatibility must bind the checkpoint to the exact tested source on hosted runs",
+)
 linux_native = job_block(ci_text, "linux-native-test")
 linux_tests = (ROOT / "linux/runner/CMakeLists.txt").read_text(encoding="utf-8")
 registered_tests = re.findall(r"add_test\(NAME\s+(\w+)\s+COMMAND\s+\1\)", linux_tests)

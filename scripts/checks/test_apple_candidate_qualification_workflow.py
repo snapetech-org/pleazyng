@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/apple-candidate-qualification.yml"
 ACTION = ROOT / ".github/actions/apple-native-reliability/action.yml"
+CHECKPOINT_VERIFIER = ROOT / "scripts/apple/verify_ios_compatibility_checkpoint.py"
 
 
 class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
@@ -92,14 +93,16 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         positions = [consumer.index(f"- name: {step}") for step in expected_steps]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("name: ios-compatibility-app-${{ github.run_id }}", consumer)
-        self.assertIn("ios-simulator-app.zip", consumer)
-        self.assertIn("ios-simulator-app.json", consumer)
-        self.assertIn("for chunk in iter(lambda: archive_file.read(1024 * 1024), b\"\")", consumer)
-        self.assertIn('receipt.get("product_source_sha") == product_sha', consumer)
-        self.assertIn('receipt["run_id"] == run_id', consumer)
-        self.assertIn('producer_attempt == expected_producer_attempt', consumer)
+        self.assertIn("scripts/apple/verify_ios_compatibility_checkpoint.py checkpoint", consumer)
+        verifier = CHECKPOINT_VERIFIER.read_text(encoding="utf-8")
+        self.assertIn('"ios-simulator-app.zip"', verifier)
+        self.assertIn('"ios-simulator-app.json"', verifier)
+        self.assertIn('receipt.get("product_source_sha") != source_sha', verifier)
+        self.assertIn('receipt["run_id"] != run_id', verifier)
+        self.assertIn('receipt["run_attempt"] != producer_attempt', verifier)
         self.assertIn('steps.ios-producer.outputs.attempt !=', consumer)
-        self.assertIn('receipt.get("bundle_id") == "org.snapetech.pleazyng"', consumer)
+        self.assertIn('receipt.get("bundle_id") != bundle_id', verifier)
+        self.assertIn('digest.hexdigest() != expected_digest', verifier)
         self.assertIn('verify_retained_apple_siblings(', consumer)
         self.assertIn('test "$RUNNER_ENVIRONMENT" = github-hosted', consumer)
         self.assertIn('test "$(uname -m)" = arm64', consumer)

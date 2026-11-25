@@ -97,17 +97,30 @@ class NativePreparationOrderTests(unittest.TestCase):
         apple = jobs['apple-native-suite']
         self.assertEqual(apple['strategy']['fail-fast'], False)
         self.assertCountEqual([row['platform'] for row in apple['strategy']['matrix']['include']],
-                              ['iOS', 'macOS', 'tvOS'])
+                              ['macOS', 'tvOS'])
         self.assertEqual(apple['name'], 'Apple native reliability (${{ matrix.platform }})')
         suite = next(s for s in apple['steps'] if s.get('uses') == './.github/actions/apple-native-reliability')
         self.assertEqual(suite['with']['platform'], '${{ matrix.platform }}')
         self.assertEqual(suite['timeout-minutes'], 110)
+        ios = jobs['apple-native-ios-suite']
+        self.assertCountEqual([row['platform'] for row in ios['strategy']['matrix']['include']], ['iOS'])
+        self.assertEqual(ios['name'], 'Apple native reliability (${{ matrix.platform }})')
+        ios_suite = next(s for s in ios['steps'] if s.get('uses') == './.github/actions/apple-native-reliability')
+        self.assertEqual(ios_suite['with']['platform'], '${{ matrix.platform }}')
+        self.assertIn("runner.environment == 'github-hosted'", ios_suite['with']['defer-older-iphone-smoke'])
+        self.assertIn('compatibility-artifact-id', ios['outputs']['ios-compatibility-artifact-id'])
+        compatibility = jobs['apple-native-ios-compatibility']
+        self.assertEqual(compatibility['needs'], 'apple-native-ios-suite')
+        self.assertEqual(compatibility['runs-on'], 'macos-26')
+        self.assertIn('needs.apple-native-ios-suite.outputs.ios-compatibility-artifact-id', compatibility['if'])
         gate = jobs['apple-native-test']
         self.assertEqual(gate['name'], 'Apple native reliability')
-        self.assertEqual(gate['needs'], 'apple-native-suite')
+        self.assertCountEqual(gate['needs'], ['apple-native-suite', 'apple-native-ios-suite', 'apple-native-ios-compatibility'])
         self.assertIn('always()', gate['if'])
         self.assertEqual(gate['steps'][0]['env']['SUITE_RESULT'], '${{ needs.apple-native-suite.result }}')
-        self.assertEqual(gate['steps'][0]['run'], 'test "$SUITE_RESULT" = success')
+        self.assertEqual(gate['steps'][0]['env']['IOS_SUITE_RESULT'], '${{ needs.apple-native-ios-suite.result }}')
+        self.assertIn('test "$IOS_COMPATIBILITY_RESULT" = success', gate['steps'][0]['run'])
+        self.assertIn('test "$IOS_COMPATIBILITY_RESULT" = skipped', gate['steps'][0]['run'])
         self.assertIn('gha-{0}-apple-native-test-{1}', apple['runs-on'])
 
     def test_motion_dispatch_uses_only_the_hosted_iphone_suite(self):

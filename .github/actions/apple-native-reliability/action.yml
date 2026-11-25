@@ -121,7 +121,7 @@ runs:
         dv_build_tool_overlay_applied=false
         [[ "$DEFER_OLDER_IPHONE_SMOKE" == true || "$DEFER_OLDER_IPHONE_SMOKE" == false ]]
         if [[ "$DEFER_OLDER_IPHONE_SMOKE" == true ]]; then
-          [[ "$PLATFORM" == iOS && -n "$CANDIDATE_SOURCE_SHA" ]]
+          [[ "$PLATFORM" == iOS ]]
           [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
           [[ "$BUILD_ONLY" == false && "$MOTION_TEST_ONLY" == false ]]
         fi
@@ -608,7 +608,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        test "$PRODUCT_SOURCE_SHA" = "$CANDIDATE_SOURCE_SHA"
+        test "$PRODUCT_SOURCE_SHA" = "${CANDIDATE_SOURCE_SHA:-$GITHUB_SHA}"
         checkpoint_dir="$RUNNER_TEMP/ios-compatibility-app-checkpoint"
         test ! -e "$checkpoint_dir" && test ! -L "$checkpoint_dir"
         mkdir -m 700 "$checkpoint_dir"
@@ -707,6 +707,13 @@ runs:
         overwrite: true
         compression-level: 0
         retention-days: 14
+
+    - name: Require hosted iOS compatibility checkpoint upload
+      if: inputs.defer-older-iphone-smoke == 'true' && inputs.platform == 'iOS' && runner.environment == 'github-hosted'
+      shell: bash
+      env:
+        IOS_COMPATIBILITY_ARTIFACT_ID: ${{ steps.compatibility-upload.outputs.artifact-id }}
+      run: test -n "$IOS_COMPATIBILITY_ARTIFACT_ID"
 
     - name: Launch the same iOS app on an older phone runtime
       if: inputs.platform == 'iOS' && inputs.build-only != 'true' && inputs.motion-test-only != 'true' && inputs.defer-older-iphone-smoke != 'true' && runner.environment == 'github-hosted'

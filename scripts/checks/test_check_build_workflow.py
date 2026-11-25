@@ -482,6 +482,53 @@ sys.exit(1 if len(calls) <= int(os.environ['FAIL_UNTIL']) else 0)
                 self.assertEqual(result.exception.code, 1)
                 self.assertIn('Apple native qualification', errors.getvalue())
 
+    def test_ios_compatibility_launch_uses_only_the_exact_tested_ios_checkpoint(self):
+        ci_path = ROOT / '.github/workflows/ci.yml'
+        original = Path.read_text
+        ci = original(ci_path, encoding='utf-8')
+        changes = [
+            ('    needs: apple-native-ios-suite\n    runs-on: macos-26',
+             '    needs: apple-native-suite\n    runs-on: macos-26'),
+            ('--workflow-sha "$PRODUCT_SOURCE_SHA"', '--workflow-sha "$GITHUB_SHA"'),
+            ('--require-installed-runtime', ''),
+            ('test "$IOS_COMPATIBILITY_RESULT" = success', 'test "$IOS_COMPATIBILITY_RESULT" = skipped'),
+        ]
+        for before, after in changes:
+            with self.subTest(before=before):
+                invalid = ci.replace(before, after, 1)
+                self.assertNotEqual(invalid, ci, 'compatibility mutation must match')
+
+                def read(path, *args, **kwargs):
+                    return invalid if path == ci_path else original(path, *args, **kwargs)
+
+                errors = io.StringIO()
+                with patch.object(Path, 'read_text', read), patch.object(sys, 'argv', [str(CHECKER)]):
+                    with redirect_stderr(errors), self.assertRaises(SystemExit) as result:
+                        runpy.run_path(str(CHECKER), run_name='__main__')
+                self.assertEqual(result.exception.code, 1)
+                self.assertIn('compatibility', errors.getvalue().lower())
+
+    def test_hosted_ios_suite_cannot_pass_without_uploading_its_checkpoint(self):
+        action_path = APPLE_NATIVE_ACTION
+        original = Path.read_text
+        action = original(action_path, encoding='utf-8')
+        invalid = action.replace(
+            '      run: test -n "$IOS_COMPATIBILITY_ARTIFACT_ID"',
+            '      run: true',
+            1,
+        )
+        self.assertNotEqual(invalid, action)
+
+        def read(path, *args, **kwargs):
+            return invalid if path == action_path else original(path, *args, **kwargs)
+
+        errors = io.StringIO()
+        with patch.object(Path, 'read_text', read), patch.object(sys, 'argv', [str(CHECKER)]):
+            with redirect_stderr(errors), self.assertRaises(SystemExit) as result:
+                runpy.run_path(str(CHECKER), run_name='__main__')
+        self.assertEqual(result.exception.code, 1)
+        self.assertIn('Deferred iOS compatibility', errors.getvalue())
+
     def test_locked_root_signer_passes(self) -> None:
         result = self._run(self._workflow())
 

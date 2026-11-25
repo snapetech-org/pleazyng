@@ -69,6 +69,7 @@ def expected_ci_jobs(workflow: str) -> tuple[set[str], set[str]]:
     )
     required = {display_name(workflow, key) for key in direct}
     required.update(matrix_job_names(workflow, "apple-native-suite", "platform"))
+    required.update(matrix_job_names(workflow, "apple-native-ios-suite", "platform"))
     for key, field in (
         ("linux-native-test", "sanitizer"),
         ("windows-native-test", "arch"),
@@ -77,6 +78,15 @@ def expected_ci_jobs(workflow: str) -> tuple[set[str], set[str]]:
     optional_block = job_block(workflow, "linux-packages")
     optional = {display_name(workflow, "linux-packages")}
     require("inputs.build_linux_packages" in optional_block, "Linux package smoke build must remain conditional")
+    compatibility = job_block(workflow, "apple-native-ios-compatibility")
+    require(
+        "needs: apple-native-ios-suite" in compatibility
+        and "needs: apple-native-suite" not in compatibility
+        and "needs.apple-native-ios-suite.outputs.ios-compatibility-artifact-id != ''" in compatibility
+        and "runs-on: macos-26" in compatibility,
+        "iOS compatibility launch must be a conditional public job bound only to its tested iOS producer",
+    )
+    optional.add(display_name(workflow, "apple-native-ios-compatibility"))
     return required, optional
 
 

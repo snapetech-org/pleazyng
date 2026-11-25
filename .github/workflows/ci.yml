@@ -782,14 +782,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: iOS
-            slug: ios
           - platform: macOS
             slug: macos
           - platform: tvOS
             slug: tvos
     # Native tests and their simulator dependencies build arm64 on every platform.
-    runs-on: ${{ inputs.apple_runner_pool == 'private' && github.event_name == 'workflow_dispatch' && github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && github.workflow_ref == 'snapetech-org/pleazyng/.github/workflows/build.yml@refs/heads/main' && fromJSON(format('{{"group":"private-apple-builds","labels":["self-hosted","macOS","ARM64","private-apple","ng-shared-main-pleazyng","ng-main-run-{0}","gha-{0}-apple-native-test-{1}"]}}', github.run_id, matrix.slug)) || (matrix.slug == 'ios' && 'xcode-27' || 'macos-26') }}
+    runs-on: ${{ inputs.apple_runner_pool == 'private' && github.event_name == 'workflow_dispatch' && github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && github.workflow_ref == 'snapetech-org/pleazyng/.github/workflows/build.yml@refs/heads/main' && fromJSON(format('{{"group":"private-apple-builds","labels":["self-hosted","macOS","ARM64","private-apple","ng-shared-main-pleazyng","ng-main-run-{0}","gha-{0}-apple-native-test-{1}"]}}', github.run_id, matrix.slug)) || 'macos-26' }}
     permissions:
       contents: read
     env:
@@ -836,13 +834,141 @@ jobs:
           export PATH="$RUNNER_TEMP/cocoapods-bin:/opt/homebrew/bin:$PATH"
           pod --version
       - name: Qualify Apple native components
+        id: qualify-apple-native
         uses: ./.github/actions/apple-native-reliability
         timeout-minutes: 110
         with:
           platform: ${{ matrix.platform }}
           motion-test-only: ${{ inputs.action == 'ios-motion' }}
+          defer-older-iphone-smoke: ${{ inputs.action != 'ios-motion' && matrix.slug == 'ios' && runner.environment == 'github-hosted' && 'true' || 'false' }}
         env:
           PUB_CACHE: ${{ runner.temp }}/apple-native-pub-${{ matrix.slug }}
+
+  apple-native-ios-suite:
+    name: Apple native reliability (${{ matrix.platform }})
+    if: ${{ inputs.action != 'ios-motion' && ((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (inputs.execution_profile != 'hybrid' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: iOS
+            slug: ios
+    runs-on: ${{ inputs.apple_runner_pool == 'private' && github.event_name == 'workflow_dispatch' && github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && github.workflow_ref == 'snapetech-org/pleazyng/.github/workflows/build.yml@refs/heads/main' && fromJSON(format('{{"group":"private-apple-builds","labels":["self-hosted","macOS","ARM64","private-apple","ng-shared-main-pleazyng","ng-main-run-{0}","gha-{0}-apple-native-test-{1}"]}}', github.run_id, matrix.slug)) || (matrix.slug == 'ios' && 'xcode-27' || 'macos-26') }}
+    permissions:
+      contents: read
+    env:
+      LANG: en_US.UTF-8
+    outputs:
+      ios-compatibility-artifact-id: ${{ steps.qualify-apple-native.outputs.ios-compatibility-artifact-id }}
+    steps: *apple-native-steps
+
+  apple-native-ios-compatibility:
+    name: iOS compatibility launch
+    if: ${{ inputs.action != 'ios-motion' && needs.apple-native-ios-suite.outputs.ios-compatibility-artifact-id != '' }}
+    needs: apple-native-ios-suite
+    runs-on: macos-26
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify the iOS checkpoint producer
+        id: ios-producer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PRODUCT_SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/apple/verify_ios_compatibility_checkpoint.py producer \
+            --run-id "$WORKFLOW_RUN_ID" \
+            --run-attempt "$WORKFLOW_RUN_ATTEMPT" \
+            --job-name 'Apple native reliability (iOS)' \
+            --job-name 'Release CI / Apple native reliability (iOS)' \
+            --workflow-sha "$PRODUCT_SOURCE_SHA"
+
+      - name: Download candidate iOS app artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ios-compatibility-app-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate-ios-app
+
+      - name: Verify frozen candidate source
+        id: verify-candidate
+        shell: bash
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/candidate-ios-app
+          PRODUCT_SOURCE_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_PRODUCER_ATTEMPT: ${{ steps.ios-producer.outputs.attempt }}
+        run: |
+          set -euo pipefail
+          python3 scripts/apple/verify_ios_compatibility_checkpoint.py checkpoint \
+            --artifact-dir "$ARTIFACT_DIR" \
+            --source-sha "$PRODUCT_SOURCE_SHA" \
+            --run-id "$WORKFLOW_RUN_ID" \
+            --producer-attempt "$WORKFLOW_PRODUCER_ATTEMPT"
+
+      - name: Require preinstalled iOS 26.5 compatibility runtime
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = arm64
+          selected_developer=''
+          for developer in \
+            /Applications/Xcode_26.5.app/Contents/Developer \
+            /Applications/Xcode_26.6.app/Contents/Developer; do
+            [[ -d "$developer" ]] || continue
+            if DEVELOPER_DIR="$developer" xcrun simctl list -j | python3 -c '
+          import json, sys
+          inventory = json.load(sys.stdin)
+          sys.exit(0 if any(runtime.get("isAvailable") is True
+                            and runtime.get("version") == "26.5"
+                            and ".iOS-" in runtime.get("identifier", "")
+                            for runtime in inventory.get("runtimes", [])) else 1)
+          '; then
+              selected_developer="$developer"
+              break
+            fi
+          done
+          [[ -n "$selected_developer" ]] || {
+            echo 'The macos-26 runner must provide a preinstalled iOS 26.5 simulator runtime.' >&2
+            exit 1
+          }
+          echo "DEVELOPER_DIR=$selected_developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$selected_developer" xcodebuild -version
+
+      - name: Extract candidate iOS app
+        shell: bash
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/candidate-ios-app
+          PRODUCTS: ${{ runner.temp }}/candidate-ios-products
+          APP_NAME: ${{ steps.verify-candidate.outputs.app_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PRODUCTS"
+          ditto -x -k "$ARTIFACT_DIR/ios-simulator-app.zip" "$PRODUCTS"
+          test -d "$PRODUCTS/$APP_NAME/Frameworks/App.framework"
+
+      - name: Qualify Apple native components
+        shell: bash
+        env:
+          PRODUCTS: ${{ runner.temp }}/candidate-ios-products
+        run: |
+          set -euo pipefail
+          python3 scripts/apple/smoke_older_iphone.py "$PRODUCTS" --require-installed-runtime
 
   ios-motion:
     name: iPhone live motion
@@ -863,7 +989,10 @@ jobs:
   apple-native-test:
     name: Apple native reliability
     if: ${{ inputs.action != 'ios-motion' && (always() && !cancelled()) }}
-    needs: apple-native-suite
+    needs:
+      - apple-native-suite
+      - apple-native-ios-suite
+      - apple-native-ios-compatibility
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -871,7 +1000,18 @@ jobs:
       - name: Require all Apple native suites
         env:
           SUITE_RESULT: ${{ needs.apple-native-suite.result }}
-        run: test "$SUITE_RESULT" = success
+          IOS_SUITE_RESULT: ${{ needs.apple-native-ios-suite.result }}
+          IOS_COMPATIBILITY_RESULT: ${{ needs.apple-native-ios-compatibility.result }}
+          IOS_COMPATIBILITY_ARTIFACT_ID: ${{ needs.apple-native-ios-suite.outputs.ios-compatibility-artifact-id }}
+        run: |
+          set -euo pipefail
+          test "$SUITE_RESULT" = success
+          test "$IOS_SUITE_RESULT" = success
+          if [[ -n "$IOS_COMPATIBILITY_ARTIFACT_ID" ]]; then
+            test "$IOS_COMPATIBILITY_RESULT" = success
+          else
+            test "$IOS_COMPATIBILITY_RESULT" = skipped
+          fi
 
   windows-native-test:
     name: Windows native reliability (${{ matrix.arch }})
