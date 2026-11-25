@@ -21,6 +21,8 @@ SCREENSHOT_TYPE = 'APP_SCREENSHOT'
 CATEGORY = 'APP_SCREENSHOTS_AND_PREVIEWS'
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
 OPEN_MEDIA_SCENE = 'Post-onboarding local Files and Books screen'
+IPAD_OPEN_MEDIA_FORM = 'ipad-02-open-media-form.png'
+IPAD_OPEN_MEDIA_FORM_SCENE = 'Post-onboarding Open media form after the real trial CTA completed '
 
 
 @dataclass(frozen=True)
@@ -43,18 +45,21 @@ LISTINGS = {
 }
 
 
-def read_capture(directory, platform, version, build, source, run, attempt, workflow_source):
+def read_capture(directory, platform, version, build, source, run, attempt, workflow_source, *, ipad_open_media=False):
     listing = LISTINGS[platform]
+    if ipad_open_media and platform != 'IOS':
+        raise ValueError('The Open media form selection requires an iPad capture')
+    filename = IPAD_OPEN_MEDIA_FORM if ipad_open_media else listing.filename
     data = json.loads((directory / 'capture-provenance.json').read_text())
     if platform == 'TV_OS':
         size, expected_digest, expected_bytes = read_tv_provenance(
-            data, listing.filename, version, build, source, run, attempt, workflow_source)
+            data, filename, version, build, source, run, attempt, workflow_source)
     else:
         size, expected_digest = read_native_provenance(
-            data, platform, listing.filename, version, build, source, workflow_source)
+            data, platform, filename, version, build, source, workflow_source)
         expected_bytes = None
 
-    with (directory / listing.filename).open('rb') as stream:
+    with (directory / filename).open('rb') as stream:
         image = stream.read(MAX_IMAGE_BYTES + 1)
     digest = hashlib.sha256(image).hexdigest()
     if (not 33 <= len(image) <= MAX_IMAGE_BYTES or (expected_bytes is not None and len(image) != expected_bytes)
@@ -97,11 +102,13 @@ def read_native_provenance(data, platform, filename, version, build, source, wor
     if len(matches) != 1:
         raise ValueError('Expected one Open media screenshot in the verified capture manifest')
     record = matches[0]
+    scene_prefixes = ((IPAD_OPEN_MEDIA_FORM_SCENE,) if filename == IPAD_OPEN_MEDIA_FORM else
+                      (f'{OPEN_MEDIA_SCENE}.', f'{OPEN_MEDIA_SCENE} after '))
     if ((record['app_version'], record['app_build'], record['bundle_id'], record['source_sha'], record['source_tag'])
             != (version, build, BUNDLE, source, source_tag)
             or record['capture_tools_sha'] != workflow_source or record['platform'] != capture_platform
             or record['build_configuration'] != configuration or record['build_defines'] != defines
-            or not record['capture_scene'].startswith((f'{OPEN_MEDIA_SCENE}.', f'{OPEN_MEDIA_SCENE} after '))
+            or not record['capture_scene'].startswith(scene_prefixes)
             or not record['qualification'] or not re.fullmatch(r'[0-9a-f]{64}', record['app_bundle_sha256'])):
         raise ValueError(f'Unexpected {manifest_platform} screenshot provenance')
     return tuple(record['dimensions']), record['capture_sha256']
@@ -247,10 +254,12 @@ def main():
     for field in ('version', 'build', 'source', 'capture-run', 'capture-attempt', 'capture-workflow-source'):
         parser.add_argument(f'--{field}', required=True)
     parser.add_argument('--capture-dir', type=Path, required=True)
+    parser.add_argument('--ipad-open-media', action='store_true')
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     image, digest, size = read_capture(args.capture_dir, args.platform, args.version, args.build, args.source,
-                                       args.capture_run, args.capture_attempt, args.capture_workflow_source)
+                                       args.capture_run, args.capture_attempt, args.capture_workflow_source,
+                                       ipad_open_media=args.ipad_open_media)
     with tempfile.TemporaryDirectory(prefix='pleazyng-apple-screenshots-') as directory:
         api = AppleProfileAPI(_apple_api_token(Path(directory)))
         receipt = stage(api, args.platform, args.version, args.build, image, digest, size)

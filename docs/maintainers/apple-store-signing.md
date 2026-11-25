@@ -167,7 +167,9 @@ platform. The workflow checks the successful platform job and its artifact,
 then verifies the screenshot's product source, version, build, PNG dimensions
 and digest. It places the image in the existing en-US listing and checks for
 an `ACTIVE` placement. The `IOS` lane places the 13-inch iPad image alongside
-the separately managed iPhone screenshots. Check the receipt before continuing.
+the separately managed iPhone screenshots. Set `ipad_open_media=true` to select
+the visually reviewed Open media form from a successful iPad LOCALTEST capture.
+Check the receipt before continuing.
 
 Once the required screenshots and review details are present, set
 `add_for_review=true` to add the app version to an editable review submission.

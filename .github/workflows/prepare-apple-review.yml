@@ -30,6 +30,10 @@ on:
         description: Successful platform job run supplying the exact Open media screenshot
         type: string
         required: false
+      ipad_open_media:
+        description: Select the visually reviewed iPad Open media form from the capture
+        type: boolean
+        default: false
       tvos_capture_run:
         description: Existing alias for capture_run on tvOS
         type: string
@@ -60,10 +64,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           PLATFORM: ${{ inputs.platform }}
           PROCESSING_RUN: ${{ inputs.processing_run }}
+          CAPTURE_RUN: ${{ inputs.capture_run }}
+          IPAD_OPEN_MEDIA: ${{ inputs.ipad_open_media }}
           PYTHONPATH: scripts
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$PROCESSING_RUN" =~ ^[1-9][0-9]*$ ]]
+          [[ "$IPAD_OPEN_MEDIA" != true || ( "$PLATFORM" == IOS && -n "$CAPTURE_RUN" ) ]]
           case "$PLATFORM" in
             MAC_OS)
               workflow=macos-app-store-signed.yml
@@ -169,12 +176,15 @@ jobs:
           CAPTURE_RUN: ${{ inputs.capture_run || inputs.tvos_capture_run }}
           CAPTURE_ATTEMPT: ${{ steps.capture.outputs.attempt }}
           CAPTURE_WORKFLOW_SOURCE: ${{ steps.capture.outputs.source }}
+          IPAD_OPEN_MEDIA: ${{ inputs.ipad_open_media }}
           PYTHONPATH: scripts
         run: |
+          args=()
+          if [[ "$IPAD_OPEN_MEDIA" == true ]]; then args+=(--ipad-open-media); fi
           python3 scripts/stores/stage_apple_listing_screenshot.py --platform "$PLATFORM" --version "$VERSION" --build "$BUILD_NUMBER" \
             --source "$PRODUCT_SOURCE" --capture-run "$CAPTURE_RUN" --capture-attempt "$CAPTURE_ATTEMPT" \
             --capture-workflow-source "$CAPTURE_WORKFLOW_SOURCE" --capture-dir "$RUNNER_TEMP/apple-listing-capture" \
-            --receipt "$RUNNER_TEMP/apple-review-draft.json"
+            --receipt "$RUNNER_TEMP/apple-review-draft.json" "${args[@]}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:

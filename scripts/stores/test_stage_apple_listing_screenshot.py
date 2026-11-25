@@ -44,6 +44,17 @@ class AppleListingScreenshotTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, 'PNG format'):
                         screenshot.read_capture(*args)
+            image = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR' + struct.pack('>IIBB', *dimensions, 8, 2) + b'\1' * 7
+            digest = hashlib.sha256(image).hexdigest()
+            form = {**record, 'filename': screenshot.IPAD_OPEN_MEDIA_FORM, 'capture_sha256': digest}
+            (directory / screenshot.IPAD_OPEN_MEDIA_FORM).write_bytes(image)
+            (directory / 'capture-provenance.json').write_text(json.dumps({**manifest, 'captures': [record, form]}))
+            with self.assertRaisesRegex(ValueError, 'Unexpected iOS and iPadOS screenshot provenance'):
+                screenshot.read_capture(*args, ipad_open_media=True)
+            form['capture_scene'] = ('Post-onboarding Open media form after the real trial CTA completed '
+                                     'one isolated Xcode StoreKitTest LOCALTEST purchase.')
+            (directory / 'capture-provenance.json').write_text(json.dumps({**manifest, 'captures': [record, form]}))
+            self.assertEqual(screenshot.read_capture(*args, ipad_open_media=True), (image, digest, dimensions))
 
     def test_asset_upload_refuses_untrusted_destinations(self):
         api = Mock()
