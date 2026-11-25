@@ -3264,7 +3264,7 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
     if getattr(args, "localtest_trial", False):
         if selected_category != "ipad":
             raise ValueError("The LOCALTEST trial gate is supported only for the focused iPad capture")
-        capture = capture_ios_in_use_with_localtest_trial(
+        captures = capture_ios_in_use_with_localtest_trial(
             product_root=product_root,
             app=app,
             app_digest=app_digest,
@@ -3277,8 +3277,8 @@ def capture_ios_in_use(args: argparse.Namespace) -> None:
             run_id=args.run_id,
             run_attempt=args.run_attempt,
         )
-        write_capture_manifest(output, "iOS and iPadOS", [capture])
-        print(f"Captured the iPad Files and Books screen after a real LOCALTEST trial flow in {output}")
+        write_capture_manifest(output, "iOS and iPadOS", captures)
+        print(f"Captured the iPad Files and Books and Open media screens after a real LOCALTEST trial flow in {output}")
         return
     simulator_entitlements = args.simulator_entitlements.resolve(strict=True)
     if simulator_entitlements.is_symlink() or not simulator_entitlements.is_file():
@@ -3355,7 +3355,7 @@ def capture_ios_in_use_with_localtest_trial(
     tool_source_sha: str,
     run_id: str,
     run_attempt: str,
-) -> dict[str, Any]:
+) -> list[dict[str, Any]]:
     """Use the proven isolated LOCALTEST flow without mutating the retained product signature."""
     from stores import capture_apple_trial_storekit as trial_capture
 
@@ -3395,11 +3395,22 @@ def capture_ios_in_use_with_localtest_trial(
     localtest_provenance = json.loads(localtest_provenance_path.read_text(encoding="utf-8"))
     localtest_record = localtest_provenance.get("localtest_transaction_record")
     transactions = localtest_record.get("allLocalTestTransactions") if isinstance(localtest_record, dict) else None
+    app_behavior = localtest_record.get("appBehavior", {}) if isinstance(localtest_record, dict) else {}
+    simulator_signing = localtest_provenance.get("simulator_app_signing")
     if (not isinstance(transactions, list) or len(transactions) != 1
             or transactions[0].get("productID") != "pleazyng_7_day_trial"
             or transactions[0].get("state") != "purchased"
-            or localtest_record.get("appBehavior", {}).get("lifetimeTransactionCreated") is not False):
+            or app_behavior.get("lifetimeTransactionCreated") is not False
+            or app_behavior.get("openMediaFormOpenedAfterTrial") is not True
+            or app_behavior.get("openMediaAddressFieldVisible") is not True
+            or app_behavior.get("openMediaFormKeychainWarningVisible") is not False
+            or app_behavior.get("openMediaFormSystemAlertVisible") is not False):
         raise ValueError("The retained iPad app did not produce exactly one verified LOCALTEST trial transaction")
+    if (not isinstance(simulator_signing, dict)
+            or simulator_signing.get("signature_verified") is not True
+            or simulator_signing.get("signing_mode", "").find("ad-hoc Simulator-only") < 0
+            or localtest_provenance.get("producer_app_bundle_sha256_unchanged") is not True):
+        raise ValueError("The simulator-only signed copy or unchanged producer app lacks verified provenance")
 
     screenshot = output / filename
     shutil.copyfile(localtest_output / "trial-active-files-books-localtest.png", screenshot)
@@ -3411,6 +3422,18 @@ def capture_ios_in_use_with_localtest_trial(
         raise ValueError(f"The LOCALTEST iPad listing screenshot is {dimensions}; expected the 13-inch size (2064, 2752)")
     screen_content_check = require_visible_screen_content(screenshot)
 
+    open_media_screenshot = output / "ipad-02-open-media-form.png"
+    shutil.copyfile(localtest_output / "open-media-form-localtest.png", open_media_screenshot)
+    open_media_png_encoding = normalize_opaque_rgb_png(open_media_screenshot)
+    if png_color_type(open_media_screenshot) != 2:
+        raise ValueError("The LOCALTEST iPad Open media screenshot is not an opaque RGB PNG")
+    open_media_dimensions = png_dimensions(open_media_screenshot)
+    if open_media_dimensions != (2064, 2752):
+        raise ValueError(
+            f"The LOCALTEST iPad Open media screenshot is {open_media_dimensions}; expected the 13-inch size (2064, 2752)"
+        )
+    open_media_content_check = require_visible_screen_content(open_media_screenshot)
+
     attachments_manifest = json.loads(
         (localtest_output / "xcresult-attachments" / "manifest.json").read_text(encoding="utf-8")
     )
@@ -3421,6 +3444,12 @@ def capture_ios_in_use_with_localtest_trial(
     ]
     if len(listing_attachments) != 1:
         raise ValueError("The StoreKitTest result does not contain exactly one active Files and Books screenshot")
+    open_media_attachments = [
+        item for item in all_attachments
+        if "pleazyng-open-media-form-localtest" in item.get("suggestedHumanReadableName", "")
+    ]
+    if len(open_media_attachments) != 1:
+        raise ValueError("The StoreKitTest result does not contain exactly one actual Open media form screenshot")
 
     simulator = json.loads((localtest_output / "simulator.json").read_text(encoding="utf-8"))
     trial_runner_root = localtest_output / "storekit-ui-runner"
@@ -3432,13 +3461,20 @@ def capture_ios_in_use_with_localtest_trial(
     app_stage = json.loads((localtest_output / "xctestrun-app-association.json").read_text(encoding="utf-8"))
     app_signature_before = app_stage.get("product_app_codesign_identity_before")
     app_signature_staged = app_stage.get("product_app_codesign_identity_staged")
+    staged_hash_before_signing = app_stage.get("product_app_bundle_sha256_staged_before_simulator_signing")
+    staged_signature_before_signing = app_stage.get("product_app_codesign_identity_staged_before_simulator_signing")
+    signed_stage_hash = app_stage.get("simulator_signed_app_bundle_sha256")
     if (not isinstance(app_signature_before, dict)
             or app_signature_before != app_signature_staged
             or app_stage.get("product_app_bundle_sha256_before") != app_digest
-            or app_stage.get("product_app_bundle_sha256_staged") != app_digest):
+            or app_stage.get("product_app_bundle_sha256_staged") != app_digest
+            or staged_hash_before_signing != app_digest
+            or staged_signature_before_signing != app_signature_staged
+            or signed_stage_hash != simulator_signing.get("derived_app_bundle_sha256")
+            or app_stage.get("product_app_source_unchanged") is not True):
         raise ValueError("The XCTest staged app signature state differs from the retained product app")
 
-    return {
+    files_books_capture = {
         "filename": filename,
         "platform": "iOS",
         "build_configuration": BUILD_CONFIGURATION["ios"],
@@ -3484,6 +3520,8 @@ def capture_ios_in_use_with_localtest_trial(
             "product_app_bundle_id": BUNDLE_ID,
             "product_app_codesign_identity": app_signature_staged,
             "product_app_staged_bundle_sha256": app_stage.get("product_app_bundle_sha256_staged"),
+            "simulator_signed_app_codesign_identity": app_stage.get("simulator_signature_identity"),
+            "simulator_signed_app_bundle_sha256": signed_stage_hash,
             "simulator_udid": simulator.get("udid"),
             "xcode_version": localtest_provenance.get("xcode_version"),
             "screenshot_attachment": listing_attachments[0].get("exportedFileName"),
@@ -3501,6 +3539,16 @@ def capture_ios_in_use_with_localtest_trial(
                 "identity_staged": app_signature_staged,
                 "app_bundle_sha256_before": app_stage.get("product_app_bundle_sha256_before"),
                 "app_bundle_sha256_staged": app_stage.get("product_app_bundle_sha256_staged"),
+                "app_bundle_sha256_staged_before_simulator_signing": staged_hash_before_signing,
+                "simulator_signed_app_bundle_sha256": signed_stage_hash,
+                "simulator_signature_identity": app_stage.get("simulator_signature_identity"),
+                "simulator_signing_provenance_file": app_stage.get("simulator_signing_provenance_file"),
+                "product_app_source_unchanged": app_stage.get("product_app_source_unchanged"),
+                "qualification": (
+                    "The exact producer app remains unchanged. A separate staged Simulator copy received a standard ad-hoc "
+                    "Simulator signature using the Xcode UI-test runner's observed derived Keychain identity; this is not "
+                    "an App Store signature or physical-device qualification."
+                ),
             },
             "storekit_configuration_sha256": localtest_provenance.get("storekit_configuration_sha256"),
             "ui_test_source_sha256": test_source_sha,
@@ -3510,6 +3558,41 @@ def capture_ios_in_use_with_localtest_trial(
         "build_receipt": build_receipt,
         "build_configuration_evidence": build_configuration_evidence(build_receipt, "ios"),
     }
+    open_media_capture = {
+        **files_books_capture,
+        "filename": open_media_screenshot.name,
+        "capture_scene": (
+            "Post-onboarding Open media form after the real trial CTA completed one isolated Xcode StoreKitTest "
+            "LOCALTEST purchase. The local stream form is empty; no account, server, or media was configured."
+        ),
+        "capture_method": [
+            "XCTest UI automation opened the product app's real Open media form after fresh relaunch",
+            "XCUIScreen.main.screenshot() exported from the StoreKitTest result bundle",
+        ],
+        "capture_sha256": sha256_file(open_media_screenshot),
+        "dimensions": list(open_media_dimensions),
+        "png_color_type": png_color_type(open_media_screenshot),
+        "png_alpha_channel": False,
+        "png_encoding": open_media_png_encoding,
+        "qualification": (
+            "Authentic empty Open media form from the exact retained App Store IAP app after the real trial action "
+            "completed in isolated Xcode StoreKitTest LOCALTEST. The screen was verified free of the saved-streaming "
+            "Keychain warning and system alerts. This does not qualify App Store Sandbox, streaming playback, or physical-device behavior."
+        ),
+        "screen_content_check": open_media_content_check,
+        "open_media_form_evidence": {
+            "after_verified_trial_relaunch": True,
+            "media_address_field_visible": app_behavior.get("openMediaAddressFieldVisible"),
+            "saved_streaming_keychain_warning_visible": app_behavior.get("openMediaFormKeychainWarningVisible"),
+            "system_alert_visible": app_behavior.get("openMediaFormSystemAlertVisible"),
+        },
+        "ui_test_runner": {
+            **files_books_capture["ui_test_runner"],
+            "test_identifier": open_media_attachments[0].get("suggestedHumanReadableName"),
+            "screenshot_attachment": open_media_attachments[0].get("exportedFileName"),
+        },
+    }
+    return [files_books_capture, open_media_capture]
 
 
 def capture_tvos_in_use(args: argparse.Namespace) -> None:

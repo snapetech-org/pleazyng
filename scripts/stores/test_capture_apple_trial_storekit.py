@@ -29,6 +29,16 @@ CATALOG_PATH = ROOT / "scripts/stores/apple/pleazyng-trial-review.storekit"
 
 
 class AppleTrialStoreKitCaptureTests(unittest.TestCase):
+    def test_storekit_trial_captures_include_the_actual_open_media_form(self) -> None:
+        self.assertEqual(
+            capture.SCREENSHOTS["pleazyng-open-media-form-localtest"],
+            "open-media-form-localtest.png",
+        )
+        self.assertIn('app.buttons["Open media"]', UI_TEST)
+        self.assertIn('app.textFields["Media address"]', UI_TEST)
+        self.assertIn('"openMediaFormKeychainWarningVisible": openMediaFormHasKeychainWarning', UI_TEST)
+        self.assertIn('attachScreenshot(of: app, named: "pleazyng-open-media-form-localtest")', UI_TEST)
+
     def test_full_source_sha_is_required(self) -> None:
         sha = "a" * 40
         self.assertEqual(capture.require_exact_source_sha(sha), sha)
@@ -1006,6 +1016,9 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('pleazyng-trial-offer-localtest', UI_TEST)
         self.assertIn('pleazyng-trial-active-files-books-localtest', UI_TEST)
         self.assertIn('pleazyng-trial-active-supporter-localtest', UI_TEST)
+        self.assertIn('pleazyng-open-media-form-localtest', UI_TEST)
+        self.assertIn('app.textFields["Display name (optional)"]', UI_TEST)
+        self.assertIn('"openMediaFormSystemAlertVisible": openMediaFormHasSystemAlert', UI_TEST)
         self.assertIn("let restoreActionTapCompleted = true", UI_TEST)
         self.assertNotIn("restoreBusy", UI_TEST)
         self.assertNotIn("restoreIdle", UI_TEST)
@@ -1075,6 +1088,8 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('"CODE_SIGN_STYLE": "Automatic"', SCRIPT)
         self.assertNotIn('"CODE_SIGN_ENTITLEMENTS"', SCRIPT)
         self.assertIn("stage_verified_app_for_xctestrun", SCRIPT)
+        self.assertIn("runner_signing_identity", SCRIPT)
+        self.assertIn("sign_ios_app_for_simulator", SCRIPT)
         self.assertIn("install_verified_app_on_simulator", SCRIPT)
         self.assertIn("capture_simulator_storekit_logs", SCRIPT)
         self.assertIn("ensure_simulator_ready_after_xctest_build", SCRIPT)
@@ -1084,6 +1099,10 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('"diagnostic_files"', SCRIPT)
         self.assertIn('["xcrun", "simctl", "install", device_id, str(app)]', SCRIPT)
         capture_body = SCRIPT[SCRIPT.index("def capture(args:"):]
+        self.assertLess(
+            capture_body.index("simulator_signing = capture_tools.sign_ios_app_for_simulator("),
+            capture_body.index("installed_app_receipt = install_verified_app_on_simulator("),
+        )
         self.assertLess(
             capture_body.index("installed_app_receipt = install_verified_app_on_simulator("),
             capture_body.index("test_command = ["),

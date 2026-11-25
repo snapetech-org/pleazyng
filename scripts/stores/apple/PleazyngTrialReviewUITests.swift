@@ -168,6 +168,26 @@ final class PleazyngTrialReviewUITests: XCTestCase {
             "Fresh launch must retain the original LOCALTEST trial purchase date"
         )
 
+        let openMediaAction = app.buttons["Open media"]
+        XCTAssertTrue(
+            openMediaAction.waitForExistence(timeout: 60),
+            "The local source screen did not expose the actual Open media action"
+        )
+        tapWhenHittable(openMediaAction, in: app, failureMessage: "The actual Open media action was not reachable")
+        let mediaAddressField = app.textFields["Media address"]
+        XCTAssertTrue(mediaAddressField.waitForExistence(timeout: 30), "The real Open media form did not open")
+        XCTAssertTrue(app.staticTexts["Open media"].exists, "The actual Open media form title was not visible")
+        XCTAssertTrue(app.textFields["Display name (optional)"].exists, "The real optional display-name field was missing")
+        let keychainWarning = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS[c] %@", "Couldn't unlock the saved streaming settings")
+        ).firstMatch
+        XCTAssertFalse(keychainWarning.exists, "The Open media form must not show a saved-streaming Keychain error")
+        XCTAssertFalse(app.alerts.firstMatch.exists, "The Open media form must not contain an XCTest or system alert")
+        let openMediaFormOpened = mediaAddressField.exists
+        let openMediaFormHasKeychainWarning = keychainWarning.exists
+        let openMediaFormHasSystemAlert = app.alerts.firstMatch.exists
+        attachScreenshot(of: app, named: "pleazyng-open-media-form-localtest")
+
         let record: [String: Any] = [
             "environment": "LOCALTEST",
             "qualification": "Xcode StoreKitTest local configuration only; not App Store Connect or App Store Sandbox evidence.",
@@ -216,6 +236,10 @@ final class PleazyngTrialReviewUITests: XCTestCase {
                     "windowEndsBeforeFreshRelaunch": true,
                 ],
                 "activeTrialRestoredAfterFreshRelaunch": relaunchedLocalScreen.exists,
+                "openMediaFormOpenedAfterTrial": openMediaFormOpened,
+                "openMediaAddressFieldVisible": mediaAddressField.exists,
+                "openMediaFormKeychainWarningVisible": openMediaFormHasKeychainWarning,
+                "openMediaFormSystemAlertVisible": openMediaFormHasSystemAlert,
                 "lifetimePurchaseActivated": false,
                 "lifetimeTransactionCreated": false,
             ],
