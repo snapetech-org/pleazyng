@@ -1,0 +1,11 @@
+[Unit]
+Description=Service queued automatic Pleazyng Mac App Store signing
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Documents/code/pleazyng
+Environment=PYTHONPATH=%h/Documents/code/pleazyng/scripts
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 %h/Documents/code/pleazyng/scripts/stores/launch_pending_macos_store.py --evidence-dir %S/pleazyng/apple-store
+TimeoutStartSec=6h
+UMask=0077

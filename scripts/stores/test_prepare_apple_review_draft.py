@@ -206,33 +206,48 @@ class AddVersionForReviewTests(unittest.TestCase):
 
 
 class SubmitAppleReviewTests(unittest.TestCase):
-    def test_submits_the_exact_version_and_first_purchases_together(self):
+    approved = {product: 'APPROVED' for product in review.PURCHASES}
+
+    def test_submits_the_exact_app_version_after_first_purchase_approval(self):
         api = Mock()
-        purchases = [{'type': 'inAppPurchaseVersions', 'id': name} for name in ('trial', 'unlock')]
         receipt = {'exact_build_attached': True, 'observed_draft_state': 'PREPARE_FOR_SUBMISSION',
                    'release_type': 'AFTER_APPROVAL', 'app_store_version_id': 'ios-version',
                    'app_review_detail': {'notes_present': True}}
         expected = {'type': 'appStoreVersions', 'id': 'ios-version'}
-        app_item = {'attributes': {'state': 'READY_FOR_REVIEW'},
-                    'relationships': {'appStoreVersion': {'data': expected}}}
-        purchase_items = [{'attributes': {'state': 'READY_FOR_REVIEW'},
-                           'relationships': {'inAppPurchaseVersion': {'data': link}}} for link in purchases]
-        api.items.side_effect = [[app_item], [app_item, *purchase_items]]
-        api.request.side_effect = [{}, {}, {}, {'data': {'type': 'reviewSubmissions', 'id': 'review-id',
+        item = {'type': 'reviewSubmissionItems', 'id': 'item',
+                'attributes': {'state': 'READY_FOR_REVIEW'},
+                'relationships': {'appStoreVersion': {'data': expected}}}
+        api.items.return_value = [item]
+        api.request.side_effect = [{}, {'data': {'type': 'reviewSubmissions', 'id': 'review-id',
             'attributes': {'platform': 'IOS', 'state': 'WAITING_FOR_REVIEW', 'submittedDate': 'date'}}}]
         with patch.object(review, 'prepare', return_value=receipt), \
              patch.object(review, 'add_version_for_review', return_value={**receipt, 'review_submission_id': 'review-id'}), \
-             patch.object(review, 'first_purchase_versions', return_value=purchases) as products:
-            result = review.submit_for_review(api, 'IOS', '3.0.51', '210', first_purchases=True)
-        products.assert_called_once_with(api, first_purchases=True)
-        self.assertEqual(result['submitted_purchase_count'], 2)
+             patch.object(review, 'purchase_states', return_value=self.approved):
+            result = review.submit_for_review(api, 'IOS', '3.0.51', '210')
         self.assertEqual(result['verified_review_state'], 'WAITING_FOR_REVIEW')
-        self.assertEqual(api.request.call_args_list[2].args[1]['data']['attributes'], {'submitted': True})
+        self.assertEqual(api.request.call_args_list[0].args[1]['data']['attributes'], {'submitted': True})
+
+    def test_first_purchase_must_go_through_console(self):
+        api = Mock()
+        with patch.object(review, 'purchase_states', return_value={'pleazyng_7_day_trial': 'READY_TO_SUBMIT'}):
+            with self.assertRaisesRegex(ValueError, 'first purchase approvals'):
+                review.submit_for_review(api, 'IOS', '3.0.51', '210')
+        api.request.assert_not_called()
 
     def test_in_review_version_is_observed_without_additional_mutations(self):
         receipt = {'exact_build_attached': True, 'observed_draft_state': 'IN_REVIEW'}
         api = Mock()
-        with patch.object(review, 'prepare', return_value=receipt):
+        with patch.object(review, 'prepare', return_value=receipt), \
+             patch.object(review, 'purchase_states', return_value=self.approved):
             self.assertEqual(review.submit_for_review(api, 'IOS', '3.0.51', '210')['submission_outcome'],
                              'already_submitted')
+        api.request.assert_not_called()
+
+    def test_new_store_version_requires_a_live_predecessor(self):
+        api = Mock()
+        api.items.return_value = [{'type': 'appStoreVersions', 'attributes': {
+            'platform': 'TV_OS', 'versionString': '3.0.51', 'appVersionState': 'IN_REVIEW',
+        }}]
+        with self.assertRaisesRegex(ValueError, 'existing live version'):
+            review.eligible_previous_version(api, 'TV_OS', '3.0.52')
         api.request.assert_not_called()

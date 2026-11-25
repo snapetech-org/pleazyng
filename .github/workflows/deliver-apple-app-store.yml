@@ -1,0 +1,51 @@
+name: Deliver releases to Apple App Store
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: '12,27,42,57 * * * *'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published version tag (empty checks the latest release)
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: apple-app-store-release-reconciliation
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  deliver:
+    if: github.repository == 'snapetech-org/pleazyng' && vars.APPLE_APP_STORE_AUTOMATIC_RELEASES == 'true' && github.event.release.prerelease != true && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Reconcile qualified Apple releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: scripts
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          GITHUB_SHA="$(git rev-parse HEAD)"
+          export GITHUB_SHA
+          python3 scripts/stores/deliver_apple_releases.py --tag "$RELEASE_TAG" --receipt "$RUNNER_TEMP/apple-delivery.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: apple-app-store-delivery
+          path: ${{ runner.temp }}/apple-delivery.json
+          if-no-files-found: ignore
+          retention-days: 30

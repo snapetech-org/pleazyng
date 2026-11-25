@@ -363,7 +363,6 @@ class _NoAppleRedirect(urllib.request.HTTPRedirectHandler):
 class AppleProfileAPI:
     """Bounded Apple-only API requests; credentials/response bodies never logged."""
     origin = 'https://api.appstoreconnect.apple.com'
-    allowed_api_prefixes = ('/v1/',)
 
     def __init__(self, token: str):
         self.token = token
@@ -372,7 +371,7 @@ class AppleProfileAPI:
     def request(self, path: str, body: dict | None = None, *, method: str | None = None) -> dict:
         url = path if path.startswith('https://') else self.origin + path
         parsed = urllib.parse.urlsplit(url)
-        if (parsed.scheme, parsed.netloc) != ('https', 'api.appstoreconnect.apple.com') or not parsed.path.startswith(self.allowed_api_prefixes):
+        if (parsed.scheme, parsed.netloc) != ('https', 'api.appstoreconnect.apple.com') or not parsed.path.startswith('/v1/'):
             raise ValueError('Refusing a non-Apple provisioning API destination')
         request = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + self.token,
             'Content-Type': 'application/json'}, data=json.dumps(body).encode() if body is not None else None,

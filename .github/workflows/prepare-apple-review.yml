@@ -34,8 +34,8 @@ on:
         description: Send the exact attached version to App Review and release after approval
         type: boolean
         default: false
-      first_purchases:
-        description: Include both existing first purchases with the iOS version
+      automatic_update:
+        description: Prepare a later version from the last live listing and submit it for review
         type: boolean
         default: false
       capture_run:
@@ -83,12 +83,12 @@ jobs:
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review }}
-          FIRST_PURCHASES: ${{ inputs.first_purchases }}
+          AUTOMATIC_UPDATE: ${{ inputs.automatic_update }}
           PYTHONPATH: scripts
         run: |
           set -euo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$PROCESSING_RUN" =~ ^[1-9][0-9]*$ ]]
-          [[ "$FIRST_PURCHASES" != true || ( "$PLATFORM" == IOS && "$SUBMIT_FOR_REVIEW" == true ) ]]
+          [[ "$AUTOMATIC_UPDATE" != true || "$SUBMIT_FOR_REVIEW" == true ]]
           [[ "$SUBMIT_FOR_REVIEW" != true || ( "$ADD_FOR_REVIEW" != true && "$INSPECT_ONLY" != true &&
                -z "$CAPTURE_RUN" && -z "$TVOS_CAPTURE_RUN" ) ]]
           [[ "$IPAD_OPEN_MEDIA" != true || ( "$PLATFORM" == IOS && -n "$CAPTURE_RUN" ) ]]
@@ -114,8 +114,11 @@ jobs:
               '.display_title == $title and .path == $path and .head_branch == "main" and
                .repository.full_name == $repo and .head_repository.full_name == $repo and
                .event == "workflow_dispatch" and .status == "completed" and .conclusion == "success"' >/dev/null
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" |
-            jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false and .published_at != null' >/dev/null
+          release_json=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")
+          jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false and .published_at != null' <<< "$release_json" >/dev/null
+          if [[ "$AUTOMATIC_UPDATE" == true ]]; then
+            jq -r '.body // ""' <<< "$release_json" > "$RUNNER_TEMP/apple-release-notes.txt"
+          fi
           source="$(python3 -c 'import sys; from refresh_release_facts import tag_commit; print(tag_commit(sys.argv[1]))' "$RELEASE_TAG")"
           spec="$(gh api "repos/$GITHUB_REPOSITORY/contents/pubspec.yaml?ref=$source" --jq .content | base64 -d)"
           version_build="$(printf '%s\n' "$spec" | python3 scripts/pubspec_version.py /dev/stdin)"
@@ -133,7 +136,7 @@ jobs:
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review }}
-          FIRST_PURCHASES: ${{ inputs.first_purchases }}
+          AUTOMATIC_UPDATE: ${{ inputs.automatic_update }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
@@ -184,7 +187,7 @@ jobs:
           INSPECT_ONLY: ${{ inputs.inspect_only }}
           ADD_FOR_REVIEW: ${{ inputs.add_for_review }}
           SUBMIT_FOR_REVIEW: ${{ inputs.submit_for_review }}
-          FIRST_PURCHASES: ${{ inputs.first_purchases }}
+          AUTOMATIC_UPDATE: ${{ inputs.automatic_update }}
           PYTHONPATH: scripts
         run: |
           args=()
@@ -192,7 +195,7 @@ jobs:
           if [[ "$INSPECT_ONLY" == true ]]; then args+=(--inspect-only); fi
           if [[ "$ADD_FOR_REVIEW" == true ]]; then args+=(--add-for-review); fi
           if [[ "$SUBMIT_FOR_REVIEW" == true ]]; then args+=(--submit-for-review); fi
-          if [[ "$FIRST_PURCHASES" == true ]]; then args+=(--first-purchases); fi
+          if [[ "$AUTOMATIC_UPDATE" == true ]]; then args+=(--automatic-notes "$RUNNER_TEMP/apple-release-notes.txt"); fi
           python3 scripts/stores/prepare_apple_review_draft.py --platform "$PLATFORM" --version "$VERSION" \
             --build-number "$BUILD_NUMBER" --receipt "$RUNNER_TEMP/apple-review-draft.json" "${args[@]}"
 

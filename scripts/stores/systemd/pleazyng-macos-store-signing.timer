@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for approved Pleazyng Mac App Store signing jobs
+
+[Timer]
+OnBootSec=1m
+OnUnitInactiveSec=2m
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

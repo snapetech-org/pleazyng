@@ -19,10 +19,7 @@ REVIEWING_OR_RELEASED = {
     'READY_FOR_DISTRIBUTION', 'READY_FOR_SALE', 'PROCESSING_FOR_DISTRIBUTION',
 }
 EDITABLE = {'PREPARE_FOR_SUBMISSION', 'READY_FOR_REVIEW'}
-
-
-class AppleStoreAPI(AppleProfileAPI):
-    allowed_api_prefixes = ('/v1/', '/v2/')
+LIVE = {'READY_FOR_DISTRIBUTION', 'READY_FOR_SALE'}
 
 
 REQUIRED_SCREENSHOT_GROUPS = {
@@ -53,7 +50,31 @@ def version_state(draft):
     return draft['attributes'].get('appVersionState') or draft['attributes'].get('appStoreState')
 
 
-def prepare(api, platform, version, build_number, *, inspect_only=False, previous_draft=None):
+def platform_versions(api, platform):
+    filters = urlencode({'filter[platform]': platform})
+    return [entry for entry in api.items(f'/v1/apps/{APP_ID}/appStoreVersions?{filters}')
+            if entry.get('type') == 'appStoreVersions' and entry['attributes'].get('platform') == platform]
+
+
+def version_key(version):
+    if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){0,2}', version):
+        raise ValueError('Apple returned a nonnumeric app version')
+    parts = tuple(map(int, version.split('.')))
+    return parts + (0,) * (3 - len(parts))
+
+
+def eligible_previous_version(api, platform, version):
+    current = max(platform_versions(api, platform),
+                  key=lambda entry: version_key(entry['attributes']['versionString']), default=None)
+    if not current or version_state(current) not in LIVE:
+        raise ValueError('Apple App Store updates require an existing live version for this platform')
+    if version_key(version) <= version_key(current['attributes']['versionString']):
+        raise ValueError('Apple will only receive a release newer than the live version')
+    return current
+
+
+def prepare(api, platform, version, build_number, *, inspect_only=False, previous_draft=None,
+            create_update=False):
     if previous_draft is not None and (
         inspect_only or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', previous_draft)
         or tuple(map(int, previous_draft.split('.'))) >= tuple(map(int, version.split('.')))
@@ -67,7 +88,11 @@ def prepare(api, platform, version, build_number, *, inspect_only=False, previou
 
     drafts = version_records(api, platform, version)
     replace_draft = not drafts and previous_draft is not None
-    if replace_draft:
+    new_version = None
+    if not drafts and create_update:
+        new_version = eligible_previous_version(api, platform, version)
+        draft = None
+    elif replace_draft:
         draft = exact_version(version_records(api, platform, previous_draft), platform, previous_draft)
         if version_state(draft) != 'PREPARE_FOR_SUBMISSION':
             raise ValueError('Only a previous draft in Prepare for Submission can be updated')
@@ -89,6 +114,15 @@ def prepare(api, platform, version, build_number, *, inspect_only=False, previou
         raise ValueError('The exact uploaded build must be VALID and unexpired')
 
     expected = {'type': 'builds', 'id': build['id']}
+    if new_version:
+        attributes = {'platform': platform, 'versionString': version, 'releaseType': 'AFTER_APPROVAL'}
+        if copyright_text := new_version['attributes'].get('copyright'):
+            attributes['copyright'] = copyright_text
+        resource = api.request('/v1/appStoreVersions', {'data': {
+            'type': 'appStoreVersions', 'attributes': attributes,
+            'relationships': {'app': {'data': {'type': 'apps', 'id': APP_ID}}},
+        }})['data']
+        draft = exact_version([resource], platform, version)
     draft_path = f'/v1/appStoreVersions/{draft["id"]}'
     relationship = f'{draft_path}/relationships/build'
     if replace_draft:
@@ -113,7 +147,7 @@ def prepare(api, platform, version, build_number, *, inspect_only=False, previou
             raise ValueError('Apple did not retain the exact draft build attachment')
     receipt = {'app_id': APP_ID, 'platform': platform, 'version': version, 'build_number': build_number,
                'app_store_version_id': draft['id'], 'asc_build_id': build['id'],
-               'observed_draft_state': state, 'release_type': draft['attributes'].get('releaseType'), 'changed': (changed or replace_draft) and not inspect_only}
+               'observed_draft_state': state, 'release_type': draft['attributes'].get('releaseType'), 'changed': (changed or replace_draft or new_version is not None) and not inspect_only}
     if replace_draft:
         receipt['previous_draft_version'] = previous_draft
     if inspect_only:
@@ -183,9 +217,8 @@ def app_version_link(receipt):
     return {'type': 'appStoreVersions', 'id': receipt['app_store_version_id']}
 
 
-def draft_review_items(api, submission_id, *, purchases=False):
-    related = 'appStoreVersion,inAppPurchaseVersion' if purchases else 'appStoreVersion'
-    return api.items(f'/v1/reviewSubmissions/{submission_id}/items?' + urlencode({'include': related}))
+def draft_review_items(api, submission_id):
+    return api.items(f'/v1/reviewSubmissions/{submission_id}/items?include=appStoreVersion')
 
 
 def select_review_draft(api, platform, version_link, version_state):
@@ -254,26 +287,40 @@ def add_version_for_review(api, platform, version, build_number, *, receipt=None
             'review_item_state': item['attributes']['state']}
 
 
-def first_purchase_versions(api, *, first_purchases):
+def purchase_states(api):
     products = api.items(f'/v1/apps/{APP_ID}/inAppPurchasesV2')
-    links = []
-    for product_id in sorted(PURCHASES):
-        product = exact_record(products, 'inAppPurchases', lambda attrs:
-                               attrs.get('productId') == product_id
-                               and attrs.get('inAppPurchaseType') == 'NON_CONSUMABLE')
-        state = product['attributes']['state']
-        if state == 'APPROVED':
-            continue
-        if not first_purchases or state != 'READY_TO_SUBMIT':
-            raise ValueError(f'Apple review is waiting for {product_id} ({state})')
-        versions = api.items(f'/v2/inAppPurchases/{product["id"]}/versions')
-        version = exact_record(versions, 'inAppPurchaseVersions', lambda attrs:
-                               attrs.get('state') in {'PREPARE_FOR_SUBMISSION', 'READY_FOR_REVIEW'})
-        links.append({'type': version['type'], 'id': version['id']})
-    return links
+    return {
+        product_id: exact_record(products, 'inAppPurchases', lambda attrs:
+                                 attrs.get('productId') == product_id
+                                 and attrs.get('inAppPurchaseType') == 'NON_CONSUMABLE')['attributes']['state']
+        for product_id in sorted(PURCHASES)
+    }
 
 
-def submit_for_review(api, platform, version, build_number, *, first_purchases=False):
+def write_update_notes(api, receipt, notes):
+    english = [item for item in receipt['localizations'] if item['locale'] == 'en-US']
+    if len(english) != 1:
+        raise ValueError('The Apple update must inherit its English (US) listing')
+    locale = english[0]
+    resource = {'type': 'appStoreVersionLocalizations', 'id': locale['id']}
+    path = f'/v1/appStoreVersionLocalizations/{locale["id"]}'
+    api.request(path, {'data': {**resource, 'attributes': {'whatsNew': notes}}}, method='PATCH')
+    if api.request(path)['data']['attributes'].get('whatsNew') != notes:
+        raise ValueError('Apple did not retain the release notes')
+
+
+def submit_for_review(api, platform, version, build_number, *, automatic_notes=None):
+    # Apple's web console is required to submit the first In-App Purchases with the first iOS version.
+    pending = {product: state for product, state in purchase_states(api).items() if state != 'APPROVED'}
+    if pending:
+        states = ', '.join(f'{product} ({state})' for product, state in pending.items())
+        raise ValueError(f'Apple review is waiting for the first purchase approvals: {states}')
+    if automatic_notes is not None:
+        if not version_records(api, platform, version):
+            prepare(api, platform, version, build_number, create_update=True)
+        else:
+            # The exact version may have been created or staged by an earlier delivery attempt.
+            prepare(api, platform, version, build_number)
     receipt = prepare(api, platform, version, build_number, inspect_only=True)
     if not receipt['exact_build_attached']:
         raise ValueError('Attach the exact processed Apple build before submitting')
@@ -284,7 +331,8 @@ def submit_for_review(api, platform, version, build_number, *, first_purchases=F
         raise ValueError(f'Apple version is not an editable review draft ({state})')
     if not receipt['app_review_detail']['notes_present']:
         raise ValueError('App Review notes are required for this listing')
-    purchases = first_purchase_versions(api, first_purchases=first_purchases)
+    if automatic_notes and any(version_state(entry) in LIVE for entry in platform_versions(api, platform)):
+        write_update_notes(api, receipt, automatic_notes)
     draft_path = f'/v1/appStoreVersions/{receipt["app_store_version_id"]}'
     if receipt['release_type'] != 'AFTER_APPROVAL':
         api.request(draft_path, {'data': {
@@ -297,39 +345,32 @@ def submit_for_review(api, platform, version, build_number, *, first_purchases=F
     receipt = add_version_for_review(api, platform, version, build_number, receipt=receipt)
     submission_id = receipt['review_submission_id']
     submission = {'type': 'reviewSubmissions', 'id': submission_id}
-    version_link = app_version_link(receipt)
-    allowed = [version_link, *purchases]
-
-    def submitted_items():
-        items = draft_review_items(api, submission_id, purchases=True)
-        links = []
-        for item in items:
-            relations = item.get('relationships', {})
-            link = next((relations.get(key, {}).get('data') for key in ('appStoreVersion', 'inAppPurchaseVersion')
-                         if relations.get(key, {}).get('data')), None)
-            if link not in allowed or item['attributes']['state'] != 'READY_FOR_REVIEW':
-                raise ValueError('The Apple submission contains an unexpected or non-ready review item')
-            links.append(link)
-        return links
-
-    existing = submitted_items()
-    for purchase in purchases:
-        if purchase in existing:
-            continue
-        api.request('/v1/reviewSubmissionItems', {'data': {
-            'type': 'reviewSubmissionItems',
-            'relationships': {'reviewSubmission': {'data': submission}, 'inAppPurchaseVersion': {'data': purchase}},
-        }})
-    final = submitted_items()
-    if len(final) != len(allowed) or any(link not in final for link in allowed):
-        raise ValueError('Apple did not retain the exact app version and requested purchase items')
+    items = draft_review_items(api, submission_id)
+    exact_record(items, 'reviewSubmissionItems', lambda attrs: attrs['state'] == 'READY_FOR_REVIEW')
+    if len(items) != 1 or items[0].get('relationships', {}).get('appStoreVersion', {}).get('data') != app_version_link(receipt):
+        raise ValueError('Submit only the exact ready Apple app version')
     path = f'/v1/reviewSubmissions/{submission_id}'
     api.request(path, {'data': {**submission, 'attributes': {'submitted': True}}}, method='PATCH')
     acknowledged = exact_record([api.request(path)['data']], 'reviewSubmissions', lambda attrs:
                                 attrs.get('platform') in {None, platform} and
                                 (attrs.get('submittedDate') is not None or attrs['state'] != 'READY_FOR_REVIEW'))
     return {**receipt, 'submission_outcome': 'submitted_for_review',
-            'verified_review_state': acknowledged['attributes']['state'], 'submitted_purchase_count': len(purchases)}
+            'verified_review_state': acknowledged['attributes']['state']}
+
+
+def update_notes(source, version):
+    notes = []
+    size = 0
+    for raw in source.splitlines():
+        if not raw.startswith('- '):
+            continue
+        line = re.sub(r'\[([^\]]+)\]\(https?://[^)]+\)', r'\1', raw)
+        line = ' '.join(line.replace('`', '').split())
+        if size + len(line) + 1 > 3900:
+            break
+        notes.append(line)
+        size += len(line) + 1
+    return '\n'.join(notes) or f'Pleazyng {version} is available. See the Pleazyng release notes on GitHub.'
 
 
 def main():
@@ -343,20 +384,19 @@ def main():
     modes.add_argument('--inspect-only', action='store_true')
     modes.add_argument('--add-for-review', action='store_true')
     modes.add_argument('--submit-for-review', action='store_true')
-    parser.add_argument('--first-purchases', action='store_true',
-                        help='Submit the two existing non-consumables with the first iOS release')
+    parser.add_argument('--automatic-notes', type=Path, help='Published GitHub release notes used for Apple updates')
     args = parser.parse_args()
     if not re.fullmatch(r'\d+\.\d+\.\d+', args.version) or not re.fullmatch(r'[1-9]\d*', args.build_number):
         parser.error('Expected a stable release version and positive numeric build')
     if args.previous_draft and (args.inspect_only or args.add_for_review or args.submit_for_review):
         parser.error('Updating a previous draft requires attachment mode')
-    if args.first_purchases and (not args.submit_for_review or args.platform != 'IOS'):
-        parser.error('First purchases require submitting the iOS app version')
+    if args.automatic_notes and not args.submit_for_review:
+        parser.error('Automated preparation requires review submission mode')
     with tempfile.TemporaryDirectory(prefix='pleazyng-apple-review-') as directory:
-        api = AppleStoreAPI(_apple_api_token(Path(directory)))
+        api = AppleProfileAPI(_apple_api_token(Path(directory)))
         if args.submit_for_review:
-            receipt = submit_for_review(api, args.platform, args.version, args.build_number,
-                                        first_purchases=args.first_purchases)
+            notes = update_notes(args.automatic_notes.read_text(), args.version) if args.automatic_notes else None
+            receipt = submit_for_review(api, args.platform, args.version, args.build_number, automatic_notes=notes)
         elif args.add_for_review:
             receipt = add_version_for_review(api, args.platform, args.version, args.build_number)
         else:

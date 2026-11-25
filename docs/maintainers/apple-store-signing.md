@@ -64,7 +64,7 @@ artifact's checksum requirement in force.
 
 Keep `include_apple_store_build=true` for the first coordinated signed qualification run. The unsigned developer IPA remains separate. `build_apple_store_archive.py` imports the signing identity in a scoped context, validates and temporarily installs profiles, applies distinct manual Release signing settings to Runner and TopShelfExtension, archives and exports with an explicit profile map. It restores the original project bytes and removes only profiles it created. Existing installed profiles are preserved. iOS Store compilation explicitly selects trial/IAP mode and disables the direct-download update check; tvOS's native AOT build already selects IAP mode.
 
-The helper's public receipt records archive/export completion separately from purchase and application qualification. Run the exact intended release revision through the existing coordinated full build; do not dispatch a duplicate matrix just for these secrets. A signed IPA must still process in App Store Connect and pass actual device, StoreKit purchase/restore, reviewer-access and screenshot checks. Set `APPLE_IOS_STORE_UPLOAD_READY` or `APPLE_TVOS_STORE_UPLOAD_READY` only after verifying the corresponding signed build and upload path. Upload automation is separate from TestFlight tester invitations and App Review submission.
+The helper's public receipt records archive/export completion separately from purchase and application qualification. Run the exact intended release revision through the existing coordinated full build; do not dispatch a duplicate matrix just for these secrets. A signed IPA must still process in App Store Connect and pass actual device, StoreKit purchase/restore, reviewer-access and screenshot checks. Set `APPLE_IOS_STORE_UPLOAD_READY` or `APPLE_TVOS_STORE_UPLOAD_READY` only after verifying the corresponding signed build and upload path. TestFlight invitations and App Store releases use separate workflows.
 
 ## macOS App Store package
 
@@ -179,9 +179,44 @@ Check the receipt before continuing.
 
 Once the required screenshots and review details are present, set
 `add_for_review=true` to add the app version to an editable review submission.
-Add the first in-app purchases to that draft and submit it in the App Store
-Connect review screen.
+In the App Store Connect console, attach the existing seven-day trial and
+lifetime unlock to the first iOS version and submit them together. Apple
+requires the web console for that first purchase submission.
 [Apple's first-purchase review steps](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/submit-an-in-app-purchase)
+
+### Automatic Apple App Store updates
+
+Set the GitHub repository variable `APPLE_APP_STORE_AUTOMATIC_RELEASES=true`
+to enable [Deliver releases to Apple App Store](../../.github/workflows/deliver-apple-app-store.yml).
+It checks on a stable release event and every 15 minutes, including releases
+whose publication does not emit an Actions release event. It waits for the
+first purchase approval, then reconciles iOS, tvOS, and macOS separately.
+
+iOS and tvOS use signed release assets or one exact focused hosted signing
+run. macOS uses the existing private signing identities and runner route.
+The orchestrator reuses completed processing runs, creates a later version
+when the previous version is live, verifies the inherited listing and
+screenshots, supplies release notes, and submits the exact build for App Review
+with release after approval. Approval and availability remain Apple states.
+For a manual retry, dispatch the delivery workflow on `main` for the exact
+published tag. Previous signing failures on the current workflow revision
+need a correction or a separately targeted recovery.
+
+On the existing trusted controller, keep the checkout current and install
+the user units in `scripts/stores/systemd/` for automatic Mac signing:
+
+```sh
+install -d "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+install -m 644 scripts/stores/systemd/pleazyng-macos-store-signing.{service,timer} \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/"
+systemctl --user daemon-reload
+systemctl --user enable --now pleazyng-macos-store-signing.timer
+```
+
+The controller handles only trusted automatic Mac App Store signing jobs.
+It uses the existing isolated queue launcher and waits for the signing Mac
+to be reachable. iOS, tvOS, and the unsigned GitHub packages continue
+independently. Diagnostic artifacts remain in the user state directory.
 
 The iOS archive uses an isolated, time-bounded signing keychain. Flutter's
 native-asset signing call receives that same keychain and the iOS timestamp
