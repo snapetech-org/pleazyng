@@ -88,6 +88,39 @@ class AppleStoreCaptureWorkflowRoutingTests(unittest.TestCase):
             self.assertIn(f"APPLE_STORE_APP_PATH={fresh_path}", preserve_step, platform)
             self.assertIn(f"APPLE_STORE_BUILD_RECEIPT={fresh_receipt}", preserve_step, platform)
 
+    def test_ipad_listing_capture_restores_the_exact_ios_artifact_without_building(self) -> None:
+        target = "ipad-in-use-capture-only"
+        ios = job_text("ios", "tvos")
+
+        self.assertIn(f"- {target}", WORKFLOW)
+        self.assertIn(target, ios.split("\n", 2)[1])
+        self.assertIn("runs-on: ${{ (inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only') && 'xcode-27' || 'macos-26' }}", ios)
+        self.assertIn("inputs.ios_artifact_run_id", named_step_text(ios, "Verify the prior build artifact producer"))
+        self.assertIn("inputs.ios_artifact_run_id", named_step_text(ios, "Download prior iOS build"))
+        self.assertIn("apple-store-build-ios-${{ inputs.product_version || '3.0.37' }}", named_step_text(ios, "Download prior iOS build"))
+
+        for step_name in (
+            "Load pinned Flutter SDK",
+            "Setup Flutter",
+            "Cache Pub dependencies",
+            "Install native build tools",
+            "Install CocoaPods",
+            "Install locked Flutter dependencies",
+            "Resolve pinned iOS Swift packages",
+            "Build the Store-mode iOS Simulator app",
+            "Preserve the compiled iOS Simulator app before capture",
+        ):
+            self.assertIn(target, named_step_condition(ios, step_name), step_name)
+
+        capture_step = named_step_text(ios, "Capture post-onboarding iPhone and iPad Files and Books screens")
+        self.assertIn(target, named_step_condition(ios, "Capture post-onboarding iPhone and iPad Files and Books screens"))
+        self.assertIn("'ipad' || 'both'", capture_step)
+        self.assertIn("apple-store-in-use-captures-ios-${{ inputs.product_version || '3.0.37' }}", ios)
+        self.assertIn(
+            "if: always() && (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only')",
+            ios,
+        )
+
     def test_tvos_in_use_capture_restores_bundle_and_never_builds_or_preserves_a_new_one(self) -> None:
         tvos = job_text("tvos", "macos")
         self.assertIn("inputs.target == 'tvos-in-use-capture-only'", tvos)

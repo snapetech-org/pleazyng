@@ -17,6 +17,7 @@ on:
           - macos-paywall-capture-only
           - app-in-use-capture-only
           - ios-in-use-capture-only
+          - ipad-in-use-capture-only
           - ipad-listing-producer-only
           - macos-in-use-capture-only
           - macos-listing-capture-only
@@ -90,12 +91,12 @@ env:
 
 jobs:
   ios:
-    if: github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && (inputs.target == 'all' || inputs.target == 'ios-macos-only' || inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only' || inputs.target == '')
+    if: github.repository == 'snapetech-org/pleazyng' && github.ref == 'refs/heads/main' && (inputs.target == 'all' || inputs.target == 'ios-macos-only' || inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only' || inputs.target == '')
     concurrency:
       group: pleazyng-apple-store-screenshots-ios
       cancel-in-progress: false
       queue: max
-    runs-on: ${{ inputs.target == 'ipad-listing-producer-only' && 'xcode-27' || 'macos-26' }}
+    runs-on: ${{ (inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only') && 'xcode-27' || 'macos-26' }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -151,10 +152,10 @@ jobs:
 
       - name: Verify the prior build artifact producer
         id: producer
-        if: inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only'
+        if: inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only'
         env:
           GH_TOKEN: ${{ github.token }}
-          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only') && inputs.ios_artifact_run_id || inputs.artifact_run_id }}
+          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only') && inputs.ios_artifact_run_id || inputs.artifact_run_id }}
         run: |
           set -euo pipefail
           [[ "$PRODUCER_RUN_ID" =~ ^[0-9]+$ ]]
@@ -168,18 +169,18 @@ jobs:
           echo "run_attempt=$run_attempt" >> "$GITHUB_OUTPUT"
 
       - name: Download prior iOS build
-        if: inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only'
+        if: inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: apple-store-build-ios-${{ inputs.product_version || '3.0.37' }}
-          run-id: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only') && inputs.ios_artifact_run_id || inputs.artifact_run_id }}
+          run-id: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only') && inputs.ios_artifact_run_id || inputs.artifact_run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/apple-store-build-ios-input
 
       - name: Validate and restore prior iOS build
-        if: inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only'
+        if: inputs.target == 'capture-only' || inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only'
         env:
-          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only') && inputs.ios_artifact_run_id || inputs.artifact_run_id }}
+          PRODUCER_RUN_ID: ${{ (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only') && inputs.ios_artifact_run_id || inputs.artifact_run_id }}
           PRODUCER_RUN_ATTEMPT: ${{ steps.producer.outputs.run_attempt }}
           PRODUCER_TOOLS_SHA: ${{ steps.producer.outputs.tool_sha }}
         run: |
@@ -195,7 +196,7 @@ jobs:
           echo "APPLE_STORE_BUILD_RECEIPT=$RUNNER_TEMP/apple-store-build-ios-restored/build-provenance.json" >> "$GITHUB_ENV"
 
       - name: Install the UI capture project generator
-        if: inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only'
+        if: inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -203,25 +204,25 @@ jobs:
           echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
 
       - name: Load pinned Flutter SDK
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         run: python3 scripts/flutter/load_sdk_pin.py --github-env
 
       - name: Setup Flutter
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         uses: ./.github/actions/setup-flutter-apple
         with:
           hosted-xcode-version: ${{ inputs.target == 'ipad-listing-producer-only' && '27.1' || '26.5' }}
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
       - name: Cache Pub dependencies
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ${{ env.PUB_CACHE }}
           key: apple-store-v${{ inputs.product_version || '3.0.37' }}-${{ runner.os }}-${{ runner.arch }}-pub-${{ hashFiles('pubspec.yaml', 'pubspec.lock') }}
 
       - name: Install native build tools
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
@@ -230,7 +231,7 @@ jobs:
           command -v git-lfs >/dev/null || brew install git-lfs
 
       - name: Install CocoaPods
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         run: |
           set -euo pipefail
           export PATH="/opt/homebrew/bin:$PATH"
@@ -245,27 +246,27 @@ jobs:
           echo "$RUNNER_TEMP/cocoapods-bin" >> "$GITHUB_PATH"
 
       - name: Install locked Flutter dependencies
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         run: flutter pub get --enforce-lockfile --no-example
 
       - name: Prefetch checksum-pinned iOS native downloads
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         run: python3 scripts/prepare_native_downloads.py --sqlite-platform ios
 
       - name: Prepare pinned iOS Steam sources
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: python3 scripts/games/prepare_steam.py
 
       - name: Resolve pinned iOS Swift packages
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         env:
           PLEAZYNG_APPLE_SOURCE_ROOT: ${{ github.workspace }}
         run: capture-tools/scripts/refresh_apple_spm.sh ios
 
       - name: Build the Store-mode iOS Simulator app
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         env:
           SOURCE_SHA: ${{ inputs.product_source_sha || '28f417ab17a4b6dc4c2e422b27662c62f62be7fb' }}
         run: |
@@ -279,7 +280,7 @@ jobs:
 
       - name: Preserve the compiled iOS Simulator app before capture
         id: preserve-build
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
         run: |
@@ -293,7 +294,7 @@ jobs:
           echo "APPLE_STORE_BUILD_RECEIPT=$RUNNER_TEMP/apple-store-build-ios/build-provenance.json" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only'
+        if: inputs.target != 'capture-only' && inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only'
         with:
           name: apple-store-build-ios-${{ inputs.product_version || '3.0.37' }}
           path: |
@@ -303,7 +304,7 @@ jobs:
           retention-days: 7
 
       - name: Capture actual iPhone and iPad app screens
-        if: inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-listing-producer-only'
+        if: inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only' && inputs.target != 'ipad-listing-producer-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
         run: |
@@ -313,7 +314,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/apple-store-captures-ios"
 
       - name: Capture post-onboarding iPhone and iPad Files and Books screens
-        if: inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only'
+        if: inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only'
         env:
           PLEAZYNG_CAPTURE_TOOLS_SHA: ${{ github.sha }}
         run: |
@@ -323,11 +324,11 @@ jobs:
             --build-receipt "$APPLE_STORE_BUILD_RECEIPT" \
             --simulator-entitlements "$GITHUB_WORKSPACE/capture-tools/ios/Runner/DebugProfile.entitlements" \
             --extension-entitlements "$GITHUB_WORKSPACE/native/games/romm/apple/extension/RommWorker.entitlements" \
-            --device-category "${{ inputs.target == 'ipad-listing-producer-only' && 'ipad' || 'both' }}" \
+            --device-category "${{ (inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only') && 'ipad' || 'both' }}" \
             --output-dir "$RUNNER_TEMP/apple-store-in-use-captures-ios"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-listing-producer-only'
+        if: inputs.target != 'app-in-use-capture-only' && inputs.target != 'ios-in-use-capture-only' && inputs.target != 'ipad-in-use-capture-only' && inputs.target != 'ipad-listing-producer-only'
         with:
           name: apple-store-captures-ios-${{ inputs.product_version || '3.0.37' }}
           path: ${{ runner.temp }}/apple-store-captures-ios/
@@ -335,7 +336,7 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        if: always() && (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only')
+        if: always() && (inputs.target == 'app-in-use-capture-only' || inputs.target == 'ios-in-use-capture-only' || inputs.target == 'ipad-in-use-capture-only' || inputs.target == 'ipad-listing-producer-only')
         with:
           name: apple-store-in-use-captures-ios-${{ inputs.product_version || '3.0.37' }}
           path: ${{ runner.temp }}/apple-store-in-use-captures-ios/

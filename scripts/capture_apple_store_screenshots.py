@@ -1409,25 +1409,88 @@ def create_simulator(platform: str, category: str, run_id: str, attempt: str) ->
              else device.get("name", "").startswith("Apple TV"))
         and isinstance(device.get("deviceTypeIdentifier"), str)
     ]
-    if not devices:
-        raise RuntimeError(f"No available {category} device exists in runtime {runtime['identifier']}")
-    template = max(devices, key=lambda item: device_preference(item["name"], category))
-    name = f"Pleazyng-{run_id}-{attempt}-{category}"
-    udid = run([
-        "xcrun", "simctl", "create", name,
-        template["deviceTypeIdentifier"], runtime["identifier"],
-    ], capture=True, timeout=120)
-    if re.fullmatch(r"[0-9A-Fa-f-]{36}", udid) is None:
-        raise RuntimeError(f"Simulator returned an invalid device identifier: {udid!r}")
-    return {
-        "udid": udid,
-        "name": name,
-        "runtime_id": runtime["identifier"],
-        "runtime_version": runtime["version"],
-        "device_name": template["name"],
-        "device_type": template["deviceTypeIdentifier"],
-        "sdk_version": run(["xcrun", "--sdk", sdk, "--show-sdk-version"], capture=True, timeout=60),
-    }
+    templates: list[dict[str, str]]
+    if category == "ipad" and platform == "iOS":
+        def is_thirteen_inch(name: str) -> bool:
+            return "13-inch" in name.lower() or "13 inch" in name.lower()
+
+        thirteen_inch_devices = [device for device in devices if is_thirteen_inch(device["name"])]
+        if thirteen_inch_devices:
+            selected = max(thirteen_inch_devices, key=lambda item: device_preference(item["name"], category))
+            templates = [{
+                "name": selected["name"],
+                "device_type": selected["deviceTypeIdentifier"],
+            }]
+        else:
+            device_types = json.loads(run(["xcrun", "simctl", "list", "devicetypes", "-j"], capture=True, timeout=60))
+            ipad_types = [
+                item for item in device_types.get("devicetypes", [])
+                if item.get("productFamily") in (None, "iPad")
+                and isinstance(item.get("name"), str)
+                and item["name"].startswith("iPad")
+                and is_thirteen_inch(item["name"])
+                and isinstance(item.get("identifier"), str)
+            ]
+            templates = [
+                {"name": item["name"], "device_type": item["identifier"]}
+                for item in sorted(
+                    ipad_types,
+                    key=lambda item: device_preference(item["name"], category),
+                    reverse=True,
+                )
+            ]
+            if not templates:
+                registered_ipads = sorted(
+                    item["name"] for item in device_types.get("devicetypes", [])
+                    if item.get("productFamily") in (None, "iPad")
+                    and isinstance(item.get("name"), str)
+                    and item["name"].startswith("iPad")
+                )
+                raise RuntimeError(
+                    f"No available 13-inch iPad simulator exists in runtime {runtime['identifier']}; "
+                    f"registered iPad device types: {registered_ipads}"
+                )
+    else:
+        if not devices:
+            raise RuntimeError(f"No available {category} device exists in runtime {runtime['identifier']}")
+        selected = max(devices, key=lambda item: device_preference(item["name"], category))
+        templates = [{
+            "name": selected["name"],
+            "device_type": selected["deviceTypeIdentifier"],
+        }]
+
+    base_name = f"Pleazyng-{run_id}-{attempt}-{category}"
+    failures: list[str] = []
+    device: dict[str, str] | None = None
+    for index, template in enumerate(templates):
+        name = base_name if index == 0 else f"{base_name}-{index + 1}"
+        try:
+            udid = run([
+                "xcrun", "simctl", "create", name,
+                template["device_type"], runtime["identifier"],
+            ], capture=True, timeout=120)
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or str(error)).strip().splitlines()
+            failures.append(f"{template['name']} ({template['device_type']}): {detail[-1] if detail else error}")
+            continue
+        if re.fullmatch(r"[0-9A-Fa-f-]{36}", udid) is None:
+            raise RuntimeError(f"Simulator returned an invalid device identifier: {udid!r}")
+        device = {
+            "udid": udid,
+            "name": name,
+            "runtime_id": runtime["identifier"],
+            "runtime_version": runtime["version"],
+            "device_name": template["name"],
+            "device_type": template["device_type"],
+            "sdk_version": run(["xcrun", "--sdk", sdk, "--show-sdk-version"], capture=True, timeout=60),
+        }
+        break
+    if device is None:
+        raise RuntimeError(
+            f"Could not create a {category} simulator for runtime {runtime['identifier']}: "
+            + "; ".join(failures)
+        )
+    return device
 
 
 def cleanup_simulator(device: dict[str, str]) -> None:

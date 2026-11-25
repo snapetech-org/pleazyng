@@ -6,6 +6,7 @@ from __future__ import annotations
 import plistlib
 import hashlib
 import json
+import subprocess
 import struct
 import tempfile
 import unittest
@@ -286,6 +287,71 @@ class SimulatorSigningTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "invalid mode"):
                 bundle_executable(extension)
+
+
+class IpadSimulatorSelectionTests(unittest.TestCase):
+    def test_creates_registered_thirteen_inch_ipad_when_runtime_has_no_precreated_ipads(self) -> None:
+        runtime_id = "com.apple.CoreSimulator.SimRuntime.iOS-27-1"
+        inventory = {
+            "runtimes": [{
+                "identifier": runtime_id,
+                "version": "27.1",
+                "isAvailable": True,
+            }],
+            "devices": {runtime_id: []},
+        }
+        device_types = {"devicetypes": [
+            {
+                "name": "iPad Pro 13-inch (M5)",
+                "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5",
+            },
+            {
+                "name": "iPad Pro 13-inch (M4)",
+                "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4",
+            },
+            {
+                "name": "iPad Air 11-inch (M3)",
+                "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Air-11-inch-M3",
+                "productFamily": "iPad",
+            },
+        ]}
+        create_m5 = subprocess.CalledProcessError(
+            1,
+            ["xcrun", "simctl", "create"],
+            stderr="device type is unsupported by this runtime",
+        )
+        created_udid = "01234567-89AB-CDEF-0123-456789ABCDEF"
+        with patch(
+            "capture_apple_store_screenshots.run",
+            side_effect=[
+                "27.1",
+                json.dumps(inventory),
+                json.dumps(device_types),
+                create_m5,
+                created_udid,
+                "27.1",
+            ],
+        ) as run_command:
+            device = capture.create_simulator("iOS", "ipad", "45569185714", "1")
+
+        self.assertEqual(device["udid"], created_udid)
+        self.assertEqual(device["device_name"], "iPad Pro 13-inch (M4)")
+        self.assertEqual(
+            device["device_type"],
+            "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4",
+        )
+        create_calls = [call.args[0] for call in run_command.call_args_list if "create" in call.args[0]]
+        self.assertEqual(create_calls, [
+            [
+                "xcrun", "simctl", "create", "Pleazyng-45569185714-1-ipad",
+                "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5", runtime_id,
+            ],
+            [
+                "xcrun", "simctl", "create", "Pleazyng-45569185714-1-ipad-2",
+                "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M4", runtime_id,
+            ],
+        ])
+
 
 
 class ProductSourcePinTests(unittest.TestCase):
