@@ -124,11 +124,12 @@ python3 scripts/release_all_platforms.py --version MAJOR.MINOR.PATCH \
   --include-webos-release --publish
 ```
 
-Once the original run finishes, assembly checks its non-Apple qualification and release jobs,
+Once the original run finishes, the controller checks its non-Apple qualification and release jobs,
 verifies the supplemental Apple suite results, and preflights every original
-platform artifact before creating the stable tag. It verifies the downloaded
-artifact digests again before drafting the release. Keep the original run ID
-and qualification run ID when retrying delivery for the same version.
+platform artifact. It creates the annotated stable tag using the release operator's
+authenticated `gh` session. Assembly independently verifies the same proof, tag,
+and downloaded artifact digests before drafting the release. Keep the original
+run ID and qualification run ID when retrying delivery for the same version.
 
 When exactly one supplemental Apple suite fails and the fix changes the
 workflow revision, dispatch **Apple candidate qualification** again using the

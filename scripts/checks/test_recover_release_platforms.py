@@ -1800,16 +1800,29 @@ class ControllerTests(unittest.TestCase):
         product_sha, tooling_sha = 'a' * 40, 'b' * 40
         title = 'action:release:pool:public:tag:v3.0.51:assembly:source:42:qualification:84'
         completed = {'databaseId': 85, 'status': 'completed', 'conclusion': 'success'}
-        with patch.object(controller, 'verify_platform_recovery') as gate, \
+        proof = {'source_sha': product_sha, 'version': '3.0.51', 'qualification_run_id': 84,
+                 'platforms_complete': True, 'artifact_preflight': {'ios': {'id': 7}}}
+        with patch.object(controller, 'verify_platform_recovery', return_value=proof) as gate, \
+             patch.object(recovery, 'github_token', return_value='fixture-token'), \
+             patch('verify_embedded_release_ci.create_stable_tag') as freeze, \
              patch.object(controller, 'matching_packaging_repair_run', side_effect=[None, completed]) as matches, \
              patch.object(controller, 'gh_json', return_value={'commit': {'sha': tooling_sha}}), \
              patch.object(controller, 'ensure_remote_main_sha'), \
              patch.object(controller, 'dispatch', return_value=completed) as dispatch:
+            proof['artifact_preflight'] = {}
+            with self.assertRaisesRegex(controller.ReleaseError, 'artifact proof is incomplete'):
+                controller.ensure_release('v3.0.51', product_sha, include_webos_release=True,
+                                          reuse_platform_run_id=42, reuse_webos_run_id=42,
+                                          reuse_repaired_run_id='qualification:84')
+            freeze.assert_not_called()
+            proof['artifact_preflight'] = {'ios': {'id': 7}}
             for _ in range(2):
                 result = controller.ensure_release(
                     'v3.0.51', product_sha, include_webos_release=True, reuse_platform_run_id=42,
                     reuse_webos_run_id=42, reuse_repaired_run_id='qualification:84')
                 self.assertEqual(result, completed)
+        self.assertEqual([call.args for call in freeze.call_args_list],
+                         [('fixture-token', 'v3.0.51', product_sha)] * 2)
         gate.assert_called_with(42, product_sha, '3.0.51', qualification_run=84, webos_run=42, android_run=42)
         self.assertEqual([call.args for call in matches.call_args_list], [(title,), (title,)])
         dispatch.assert_called_once()

@@ -2044,6 +2044,18 @@ def ensure_release(
         if repair:
             validate_packaging_repair_proof(proof, tag, packaging_source_sha, workflow_source_sha)
         elif qualification_run is not None:
+            if (proof.get("source_sha") != commit_sha or f"v{proof.get('version')}" != tag
+                    or proof.get("qualification_run_id") != qualification_run
+                    or proof.get("platforms_complete") is not True or proof.get("pending_jobs")
+                    or not proof.get("artifact_preflight")):
+                raise ReleaseError("The exact supplemental platform and artifact proof is incomplete.")
+            from recover_release_platforms import github_token
+            from verify_embedded_release_ci import create_stable_tag
+
+            # The release operator can tag the verified historical source. The
+            # workflow token may be unable to create a ref for that commit.
+            # Assembly independently verifies the same proof and stable tag.
+            create_stable_tag(github_token(), tag, commit_sha)
             existing = matching_packaging_repair_run(run_title)
         elif reuse_platform_run_id:
             # Validate the source artifacts before looking for or resuming a
