@@ -19,6 +19,9 @@ outputs:
   dv-build-tool-overlay-applied:
     description: Whether the Apple DV runtime helper overlay was applied to the candidate tree.
     value: ${{ steps.checkout.outputs.dv_build_tool_overlay_applied }}
+  ios-compatibility-artifact-id:
+    description: Artifact ID for the tested iOS simulator app when the compatibility check is deferred.
+    value: ${{ steps.compatibility-upload.outputs.artifact-id }}
 inputs:
   platform:
     description: iOS, macOS or tvOS.
@@ -537,6 +540,7 @@ runs:
         }
 
     - name: Run Apple native reliability tests
+      id: native-tests
       if: inputs.platform != 'macOS' && inputs.build-only != 'true'
       env:
         APPLE_LOCAL_BUILD_DIR: ${{ steps.scratch.outputs.APPLE_LOCAL_BUILD_DIR }}
@@ -693,7 +697,8 @@ runs:
         PY
 
     - name: Upload tested iOS compatibility app checkpoint
-      if: inputs.defer-older-iphone-smoke == 'true' && inputs.platform == 'iOS' && steps.native-tests.outcome == 'success' && steps.compatibility-checkpoint.outcome == 'success'
+      id: compatibility-upload
+      if: inputs.defer-older-iphone-smoke == 'true' && inputs.platform == 'iOS' && steps.compatibility-checkpoint.outcome == 'success'
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: ios-compatibility-app-${{ github.run_id }}

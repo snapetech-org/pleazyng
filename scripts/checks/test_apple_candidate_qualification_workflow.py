@@ -67,6 +67,12 @@ class AppleCandidateQualificationWorkflowTest(unittest.TestCase):
         self.assertNotIn("motion-test-only: 'true'", self.workflow)
 
     def test_legacy_iphone_smoke_is_a_separate_retained_artifact_consumer(self):
+        self.assertIn('- name: Run Apple native reliability tests\n      id: native-tests', self.action)
+        self.assertIn('steps.native-tests.outcome', self.action)
+        self.assertIn('- name: Upload tested iOS compatibility app checkpoint\n      id: compatibility-upload', self.action)
+        self.assertIn('steps.compatibility-upload.outputs.artifact-id', self.action)
+        self.assertIn('- name: Require retained iOS simulator app', self.workflow)
+        self.assertIn('steps.native-tests.outputs.ios-compatibility-artifact-id', self.workflow)
         consumer = self.workflow.split("  apple-native-ios-compatibility:\n", 1)[1]
         self.assertIn("name: Apple native reliability (iOS)", consumer)
         self.assertIn("needs: apple-native-reliability", consumer)

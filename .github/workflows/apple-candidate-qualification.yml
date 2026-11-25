@@ -364,6 +364,17 @@ jobs:
         env:
           PUB_CACHE: ${{ env.PUB_CACHE }}
 
+      - name: Require retained iOS simulator app
+        if: matrix.platform == 'iOS'
+        shell: bash
+        env:
+          IOS_COMPATIBILITY_ARTIFACT_ID: ${{ steps.native-tests.outputs.ios-compatibility-artifact-id }}
+        run: |
+          if [[ ! "$IOS_COMPATIBILITY_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::The native iOS job did not upload its tested simulator app.'
+            exit 1
+          fi
+
       - name: Record candidate qualification receipt
         if: always() && steps.verify-candidate.outcome == 'success'
         shell: bash
