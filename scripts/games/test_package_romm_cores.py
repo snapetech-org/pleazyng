@@ -1,6 +1,8 @@
+import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import subprocess
 import tarfile
 import tempfile
@@ -102,6 +104,70 @@ class CorrespondingSourceTests(unittest.TestCase):
 
 
 class AppleCacheTests(unittest.TestCase):
+    def test_ios_notice_bundle_shares_source_and_licenses_between_sdk_receipts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sources = {}
+            shared_files = {
+                'mgba-source.json': b'{"commit":"fixture"}\n',
+                'mgba-fixture.tar.gz': b'fixture corresponding source archive',
+                'licenses/mgba/LICENSE': b'fixture license\n',
+                'build-recipe/native/games/romm/CMakeLists.txt': b'fixture recipe\n',
+            }
+            source_digest = hashlib.sha256(shared_files['mgba-fixture.tar.gz']).hexdigest()
+            for sdk, architecture, library_digest in (
+                    ('iphoneos', 'arm64', '1' * 64),
+                    ('iphonesimulator', 'arm64,x86_64', '2' * 64)):
+                source = root / 'inputs' / sdk
+                for relative, data in shared_files.items():
+                    path = source / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                manifest = {
+                    'schemaVersion': 1, 'platform': 'iOS', 'architecture': architecture,
+                    'hashStage': 'before-app-signing', 'qualified': False,
+                    'cores': [{
+                        'core': 'mgba', 'commit': 'a' * 40, 'library': 'mgba_libretro',
+                        'sha256': library_digest, 'sourceArchive': 'mgba-fixture.tar.gz',
+                        'sourceSha256': source_digest, 'licenses': ['licenses/mgba/LICENSE'],
+                    }],
+                }
+                (source / 'romm-cores.json').write_text(json.dumps(manifest) + '\n')
+                sources[sdk] = source
+
+            destination = root / 'bundle-resources'
+            apple.stage_ios_notices(sources, destination)
+
+            self.assertEqual((destination / 'shared/mgba-fixture.tar.gz').read_bytes(),
+                             shared_files['mgba-fixture.tar.gz'])
+            self.assertEqual((destination / 'shared/licenses/mgba/LICENSE').read_bytes(),
+                             shared_files['licenses/mgba/LICENSE'])
+            self.assertFalse((destination / 'shared/romm-cores.json').exists())
+            self.assertEqual(sorted(path.name for path in destination.iterdir()),
+                             ['iphoneos', 'iphonesimulator', 'shared'])
+            self.assertEqual(len(list(destination.rglob('mgba-fixture.tar.gz'))), 1)
+            for sdk, architecture, library_digest in (
+                    ('iphoneos', 'arm64', '1' * 64),
+                    ('iphonesimulator', 'arm64,x86_64', '2' * 64)):
+                manifest = json.loads((destination / sdk / 'romm-cores.json').read_text())
+                self.assertEqual(manifest['architecture'], architecture)
+                entry = manifest['cores'][0]
+                self.assertEqual(entry['sha256'], library_digest)
+                self.assertEqual(entry['sourceSha256'], source_digest)
+                archive = (destination / sdk / entry['sourceArchive']).resolve()
+                self.assertEqual(archive, (destination / 'shared/mgba-fixture.tar.gz').resolve())
+                for license in entry['licenses']:
+                    self.assertTrue((destination / sdk / PurePosixPath(license)).resolve().is_file())
+
+            podspec = (apple.PACKAGE / 'apple/plezy_romm_ios.podspec').read_text()
+            self.assertIn("['Frameworks/ios/notices/*']", podspec)
+            self.assertNotIn("['Frameworks/ios/notices/**/*']", podspec)
+
+            (sources['iphonesimulator'] / 'build-recipe/native/games/romm/CMakeLists.txt').write_bytes(
+                b'simulator-only recipe change\n')
+            with self.assertRaisesRegex(RuntimeError, 'shared notice resources differ'):
+                apple.stage_ios_notices(sources, root / 'rejected-resources')
+
     def test_framework_collection_requires_a_built_binary_not_an_xcode_stub(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -8,5 +8,7 @@ Pod::Spec.new do |s|
   s.source = { :path => '.' }
   s.platform = :ios, '15.5'
   s.vendored_frameworks = 'Frameworks/ios/PlezyRetro.xcframework'
-  s.resource_bundles = { 'PleazyngRommNotices' => ['Frameworks/ios/notices/**/*'] }
+  # Match only the three top-level directories. A recursive glob also matches
+  # every nested directory and file, causing CocoaPods to copy the tree many times.
+  s.resource_bundles = { 'PleazyngRommNotices' => ['Frameworks/ios/notices/*'] }
 end
