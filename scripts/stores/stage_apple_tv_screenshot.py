@@ -78,7 +78,7 @@ def upload_parts(api, operations, image):
         length = operation['length']
         headers = {item['name']: item['value'] for item in operation['requestHeaders']}
         if (operation['method'] != 'PUT' or url.scheme != 'https' or url.username or url.password
-                or not re.fullmatch(r'(?:[a-z0-9-]+\.)+blobstore\.apple\.com', url.netloc)
+                or not re.fullmatch(r'(?:[a-z0-9-]+\.)+(?:blobstore|object-storage)\.apple\.com', url.netloc)
                 or operation['offset'] != offset or not 0 < length <= len(image) - offset
                 or {'authorization', 'cookie', 'proxy-authorization'} & {name.lower() for name in headers}):
             # Apple storage URLs and header values are temporary credentials. Keep those out of logs.

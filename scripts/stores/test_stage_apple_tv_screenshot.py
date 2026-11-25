@@ -23,8 +23,11 @@ class AppleTvScreenshotTests(unittest.TestCase):
         response.__enter__ = Mock(return_value=SimpleNamespace(status=200))
         response.__exit__ = Mock(return_value=False)
         api.opener.open.return_value = response
-        base = {'url': 'https://store-030.blobstore.apple.com/asset', 'method': 'PUT', 'requestHeaders': []}
-        screenshot.upload_parts(api, [{**base, 'offset': 2, 'length': 1}, {**base, 'offset': 0, 'length': 2}], b'png')
+        base = {'method': 'PUT', 'requestHeaders': []}
+        screenshot.upload_parts(api, [
+            {**base, 'url': 'https://store-030.blobstore.apple.com/asset', 'offset': 2, 'length': 1},
+            {**base, 'url': 'https://northamerica-1.object-storage.apple.com/asset', 'offset': 0, 'length': 2},
+        ], b'png')
         self.assertEqual([call.args[0].data for call in api.opener.open.call_args_list], [b'pn', b'g'])
 
     def test_existing_image_and_placement_are_reused(self):
