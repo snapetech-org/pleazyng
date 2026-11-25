@@ -74,7 +74,7 @@ def proposed_metadata(current: dict, tag: str, manifest: str) -> dict:
     return proposed
 
 
-def manifest_run(proofs: list, digest: str, commit: str) -> tuple[int, int]:
+def manifest_invocations(proofs: list, digest: str) -> set[tuple[str, int, int]]:
     """Inspect only statements already cryptographically verified by gh."""
     matches = set()
     for proof in proofs:
@@ -87,15 +87,23 @@ def manifest_run(proofs: list, digest: str, commit: str) -> tuple[int, int]:
         definition = predicate.get("buildDefinition", {})
         workflow = definition.get("externalParameters", {}).get("workflow", {})
         if (workflow.get("repository") != f"https://github.com/{REPOSITORY}"
-                or workflow.get("path") != ".github/workflows/build.yml"
-                or not any(dependency.get("digest", {}).get("gitCommit") == commit
-                           and dependency.get("uri", "").startswith(f"git+https://github.com/{REPOSITORY}@")
-                           for dependency in definition.get("resolvedDependencies", []))):
+                or workflow.get("path") != ".github/workflows/build.yml"):
             continue
         invocation = predicate.get("runDetails", {}).get("metadata", {}).get("invocationId", "")
         match = re.fullmatch(rf"https://github.com/{REPOSITORY}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)", invocation)
-        if match:
-            matches.add(tuple(map(int, match.groups())))
+        if not match:
+            continue
+        run_id, attempt = map(int, match.groups())
+        for dependency in definition.get("resolvedDependencies", []):
+            commit = dependency.get("digest", {}).get("gitCommit", "")
+            if (isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit)
+                    and dependency.get("uri", "").startswith(f"git+https://github.com/{REPOSITORY}@")):
+                matches.add((commit, run_id, attempt))
+    return matches
+
+
+def manifest_run(proofs: list, digest: str, commit: str) -> tuple[int, int]:
+    matches = {(run_id, attempt) for sha, run_id, attempt in manifest_invocations(proofs, digest) if sha == commit}
     if len(matches) != 1:
         raise ValueError("Final manifest has no unique exact-source assembly attestation")
     return matches.pop()
@@ -255,8 +263,32 @@ def verify_macos_packaging_recovery(receipt: dict, product_commit: str, tag: str
     return head_sha
 
 
+def verify_supplemental_recovery(receipt: dict, product_commit: str, tag: str) -> str:
+    """Bind every reused package to the same candidate and exact Apple qualification."""
+    import recover_release_platforms as recovery
+
+    source_run = receipt.get("source_run_id")
+    qualification = receipt.get("qualification_run_id")
+    if (type(source_run) is not int or source_run < 1
+            or type(qualification) is not int or qualification < 1 or qualification == source_run
+            or receipt.get("head_sha") != product_commit or receipt.get("source_sha") != product_commit
+            or receipt.get("version") != tag[1:] or receipt.get("platforms_complete") is not True):
+        raise ValueError("Invalid supplemental recovery source, version, or qualification")
+    proof = recovery.verify_source_run(source_run, product_commit, tag[1:], REPOSITORY,
+                                       qualification_run=qualification)
+    proof = recovery.compose_proof(proof, source_run, True, source_run)
+    if (any(receipt.get(key) != value for key, value in proof.items())
+            or set(receipt) != set(proof) | {"artifacts"}):
+        raise ValueError("Supplemental recovery receipt differs from the independently verified candidate")
+    artifacts = recovery.preflight_platform_artifacts(proof, REPOSITORY)
+    expected = [dict(item, workflow_source_sha=product_commit) for item in artifacts]
+    if receipt["artifacts"] != expected:
+        raise ValueError("Supplemental recovery artifact IDs or digests differ from GitHub evidence")
+    return f"action:release:pool:public:tag:{tag}:assembly:source:{source_run}:qualification:{qualification}"
+
+
 def recovery_source(directory: str, assets: dict, manifest: str, product_commit: str,
-                    tag: str, github) -> tuple[str, dict | None]:
+                    tag: str, github) -> tuple[str | None, dict | None]:
     """Read an attestation-bound recovery receipt, if this release has one."""
     asset = assets.get("platform-reuse-provenance.json")
     if asset is None:
@@ -277,6 +309,8 @@ def recovery_source(directory: str, assets: dict, manifest: str, product_commit:
     receipt = json.loads(raw)
     if not isinstance(receipt, dict):
         raise ValueError("Recovery receipt must be a JSON object")
+    if "qualification_run_id" in receipt:
+        return None, receipt
     if receipt.get("profile") == "macos-packaging":
         workflow_commit = verify_macos_packaging_recovery(receipt, product_commit, tag)
         return workflow_commit, receipt
@@ -326,18 +360,35 @@ def prepare(root: Path, metadata: dict, commit: str, github) -> tuple[str | None
         workflow_commit, recovery = recovery_source(
             directory, assets, raw.decode("utf-8"), commit, tag, github,
         )
+        source_selector = (["--source-digest", workflow_commit] if workflow_commit is not None
+                           else ["--source-ref", "refs/heads/main"])
         result = subprocess.run(["gh", "attestation", "verify", str(manifest), "--repo", REPOSITORY,
-                                 "--source-digest", workflow_commit, "--signer-workflow",
+                                 *source_selector, "--signer-workflow",
                                  f"{REPOSITORY}/.github/workflows/build.yml", "--format", "json"],
                                 check=True, capture_output=True, text=True)
-        run_id, attempt = manifest_run(json.loads(result.stdout), digest, workflow_commit)
-        assembly = github(f"actions/runs/{run_id}/attempts/{attempt}")
+        verified = json.loads(result.stdout)
+        supplemental = workflow_commit is None
+        if supplemental:
+            title = verify_supplemental_recovery(recovery, commit, tag)
+            matches = []
+            for sha, run_id, attempt in manifest_invocations(verified, digest):
+                run = github(f"actions/runs/{run_id}/attempts/{attempt}")
+                if (run.get("display_title") == title and run.get("event") == "workflow_dispatch"
+                        and run.get("head_branch") == "main" and run.get("head_sha") == sha
+                        and run.get("head_repository", {}).get("full_name") == REPOSITORY):
+                    matches.append((sha, run_id, attempt, run))
+            if len(matches) != 1:
+                raise ValueError("Final manifest has no unique exact supplemental assembly attestation")
+            workflow_commit, run_id, attempt, assembly = matches[0]
+        else:
+            run_id, attempt = manifest_run(verified, digest, workflow_commit)
+            assembly = github(f"actions/runs/{run_id}/attempts/{attempt}")
         if (assembly.get("status") != "completed" or assembly.get("conclusion") != "success"
                 or assembly.get("head_sha") != workflow_commit or assembly.get("path") != ".github/workflows/build.yml"
                 or assembly.get("run_attempt") != attempt
                 or assembly.get("repository", {}).get("full_name") != REPOSITORY):
             raise ValueError("Manifest assembly did not successfully build the immutable release source")
-        if recovery is not None:
+        if recovery is not None and not supplemental:
             if not FROZEN_REPAIR_RECEIPT_FIELDS.intersection(recovery):
                 if (workflow_commit != recovery.get("head_sha")
                         or assembly.get("head_branch") != "main"

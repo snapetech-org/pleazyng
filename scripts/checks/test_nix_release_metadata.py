@@ -205,6 +205,26 @@ class NixMetadataTests(unittest.TestCase):
         self.assertEqual(prepared["assembly_workflow_source"], workflow)
         self.assertEqual(prepared["assembly_run"], 123)
 
+    def test_supplemental_recovery_binds_receipt_to_verified_jobs_and_artifact_digests(self):
+        proof = {"source_run_id": 99, "qualification_run_id": 100, "head_sha": self.commit,
+                 "source_sha": self.commit, "version": "3.0.33", "platforms_complete": True,
+                 "rebuilt_jobs": []}
+        artifact = {"name": "linux-x64", "artifact_id": 200, "source_run_id": 99,
+                    "source_sha": self.commit, "digest": "sha256:" + "a" * 64}
+        receipt = {**proof, "artifacts": [{**artifact, "workflow_source_sha": self.commit}]}
+        with patch("recover_release_platforms.verify_source_run", return_value=proof) as verify, \
+             patch("recover_release_platforms.compose_proof", return_value=proof), \
+             patch("recover_release_platforms.preflight_platform_artifacts", return_value=[artifact]):
+            self.assertEqual(nix.verify_supplemental_recovery(receipt, self.commit, "v3.0.33"),
+                             "action:release:pool:public:tag:v3.0.33:assembly:source:99:qualification:100")
+            verify.assert_called_once_with(99, self.commit, "3.0.33", nix.REPOSITORY, qualification_run=100)
+            with self.assertRaisesRegex(ValueError, "independently verified candidate"):
+                nix.verify_supplemental_recovery({**receipt, "rebuilt_jobs": ["build-ios"]},
+                                                 self.commit, "v3.0.33")
+            receipt["artifacts"][0]["digest"] = "sha256:" + "b" * 64
+            with self.assertRaisesRegex(ValueError, "IDs or digests"):
+                nix.verify_supplemental_recovery(receipt, self.commit, "v3.0.33")
+
     def test_ordinary_recovery_rejects_receipt_source_run_ci_and_artifact_mismatches(self):
         original, source_proof, inventory, workflow = self.ordinary_recovery()
         cases = []
