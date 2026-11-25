@@ -1034,8 +1034,6 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('"CODE_SIGN_STYLE": "Automatic"', SCRIPT)
         self.assertNotIn('"CODE_SIGN_ENTITLEMENTS"', SCRIPT)
         self.assertIn("stage_verified_app_for_xctestrun", SCRIPT)
-        self.assertIn("runner_signing_identity", SCRIPT)
-        self.assertIn("sign_ios_app_for_simulator", SCRIPT)
         self.assertIn("install_verified_app_on_simulator", SCRIPT)
         self.assertIn("capture_simulator_storekit_logs", SCRIPT)
         self.assertIn("ensure_simulator_ready_after_xctest_build", SCRIPT)
@@ -1045,10 +1043,10 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('"diagnostic_files"', SCRIPT)
         self.assertIn('["xcrun", "simctl", "install", device_id, str(app)]', SCRIPT)
         capture_body = SCRIPT[SCRIPT.index("def capture(args:"):]
-        self.assertLess(
-            capture_body.index("simulator_signing = capture_tools.sign_ios_app_for_simulator("),
-            capture_body.index("installed_app_receipt = install_verified_app_on_simulator("),
-        )
+        self.assertNotIn("capture_tools.runner_signing_identity", capture_body)
+        self.assertNotIn("capture_tools.sign_ios_app_for_simulator", capture_body)
+        self.assertIn('"status": "not-applied"', capture_body)
+        self.assertIn('expected_sha256=receipt["product_app_bundle_sha256"]', capture_body)
         self.assertLess(
             capture_body.index("installed_app_receipt = install_verified_app_on_simulator("),
             capture_body.index("test_command = ["),

@@ -3408,6 +3408,11 @@ def capture_ios_in_use_with_localtest_trial(
     transactions = localtest_record.get("allLocalTestTransactions") if isinstance(localtest_record, dict) else None
     app_behavior = localtest_record.get("appBehavior", {}) if isinstance(localtest_record, dict) else {}
     simulator_signing = localtest_provenance.get("simulator_app_signing")
+    installed_app_receipt = localtest_provenance.get("simulator_installed_app")
+    installed_identity = (
+        installed_app_receipt.get("installed_app_identity")
+        if isinstance(installed_app_receipt, dict) else None
+    )
     if (not isinstance(transactions, list) or len(transactions) != 1
             or transactions[0].get("productID") != "pleazyng_7_day_trial"
             or transactions[0].get("state") != "purchased"
@@ -3418,10 +3423,13 @@ def capture_ios_in_use_with_localtest_trial(
             or app_behavior.get("openMediaFormSystemAlertVisible") is not False):
         raise ValueError("The retained iPad app did not produce exactly one verified LOCALTEST trial transaction")
     if (not isinstance(simulator_signing, dict)
-            or simulator_signing.get("signature_verified") is not True
-            or simulator_signing.get("signing_mode", "").find("ad-hoc Simulator-only") < 0
+            or simulator_signing.get("status") != "not-applied"
+            or not isinstance(installed_app_receipt, dict)
+            or installed_app_receipt.get("installed_app_bundle_sha256") != app_digest
+            or not isinstance(installed_identity, dict)
+            or installed_identity.get("bundle_id") != BUNDLE_ID
             or localtest_provenance.get("producer_app_bundle_sha256_unchanged") is not True):
-        raise ValueError("The simulator-only signed copy or unchanged producer app lacks verified provenance")
+        raise ValueError("The unchanged unsigned producer and Simulator-installed app lack verified provenance")
 
     screenshot = output / filename
     shutil.copyfile(localtest_output / "trial-active-files-books-localtest.png", screenshot)
@@ -3472,18 +3480,14 @@ def capture_ios_in_use_with_localtest_trial(
     app_stage = json.loads((localtest_output / "xctestrun-app-association.json").read_text(encoding="utf-8"))
     app_signature_before = app_stage.get("product_app_codesign_identity_before")
     app_signature_staged = app_stage.get("product_app_codesign_identity_staged")
-    staged_hash_before_signing = app_stage.get("product_app_bundle_sha256_staged_before_simulator_signing")
-    staged_signature_before_signing = app_stage.get("product_app_codesign_identity_staged_before_simulator_signing")
-    signed_stage_hash = app_stage.get("simulator_signed_app_bundle_sha256")
-    if (not isinstance(app_signature_before, dict)
-            or app_signature_before != app_signature_staged
+    staged_hash = app_stage.get("product_app_bundle_sha256_staged")
+    if (app_signature_before != {"status": "unsigned"}
+            or app_signature_staged != app_signature_before
             or app_stage.get("product_app_bundle_sha256_before") != app_digest
-            or app_stage.get("product_app_bundle_sha256_staged") != app_digest
-            or staged_hash_before_signing != app_digest
-            or staged_signature_before_signing != app_signature_staged
-            or signed_stage_hash != simulator_signing.get("derived_app_bundle_sha256")
+            or staged_hash != app_digest
+            or installed_app_receipt.get("installed_app_bundle_sha256") != staged_hash
             or app_stage.get("product_app_source_unchanged") is not True):
-        raise ValueError("The XCTest staged app signature state differs from the retained product app")
+        raise ValueError("The XCTest staged app differs from the retained unsigned product app")
 
     files_books_capture = {
         "filename": filename,
@@ -3530,9 +3534,9 @@ def capture_ios_in_use_with_localtest_trial(
             "test_target_bundle_id": "org.snapetech.pleazyng.localtest.trial-review-tests",
             "product_app_bundle_id": BUNDLE_ID,
             "product_app_codesign_identity": app_signature_staged,
-            "product_app_staged_bundle_sha256": app_stage.get("product_app_bundle_sha256_staged"),
-            "simulator_signed_app_codesign_identity": app_stage.get("simulator_signature_identity"),
-            "simulator_signed_app_bundle_sha256": signed_stage_hash,
+            "product_app_staged_bundle_sha256": staged_hash,
+            "simulator_app_signing_applied": False,
+            "simulator_installed_app_bundle_sha256": installed_app_receipt.get("installed_app_bundle_sha256"),
             "simulator_udid": simulator.get("udid"),
             "xcode_version": localtest_provenance.get("xcode_version"),
             "screenshot_attachment": listing_attachments[0].get("exportedFileName"),
@@ -3550,15 +3554,12 @@ def capture_ios_in_use_with_localtest_trial(
                 "identity_staged": app_signature_staged,
                 "app_bundle_sha256_before": app_stage.get("product_app_bundle_sha256_before"),
                 "app_bundle_sha256_staged": app_stage.get("product_app_bundle_sha256_staged"),
-                "app_bundle_sha256_staged_before_simulator_signing": staged_hash_before_signing,
-                "simulator_signed_app_bundle_sha256": signed_stage_hash,
-                "simulator_signature_identity": app_stage.get("simulator_signature_identity"),
-                "simulator_signing_provenance_file": app_stage.get("simulator_signing_provenance_file"),
+                "simulator_signing_applied": False,
+                "simulator_installed_app_bundle_sha256": installed_app_receipt.get("installed_app_bundle_sha256"),
                 "product_app_source_unchanged": app_stage.get("product_app_source_unchanged"),
                 "qualification": (
-                    "The exact producer app remains unchanged. A separate staged Simulator copy received a standard ad-hoc "
-                    "Simulator signature using the Xcode UI-test runner's observed derived Keychain identity; this is not "
-                    "an App Store signature or physical-device qualification."
+                    "The exact producer app, XCTest-staged copy, and Simulator-installed app remain byte-identical and "
+                    "unsigned. This capture does not qualify code signing or physical-device behavior."
                 ),
             },
             "storekit_configuration_sha256": localtest_provenance.get("storekit_configuration_sha256"),

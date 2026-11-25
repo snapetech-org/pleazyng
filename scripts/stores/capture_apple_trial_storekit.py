@@ -1405,54 +1405,17 @@ def capture(args: argparse.Namespace) -> None:
         )
         if staged_app != built_products / "Debug-iphonesimulator" / "Pleazyng.app":
             raise ValueError("The staged UI target app path differs from the xctestrun TestROOT path")
-        runner_signing = capture_tools.runner_signing_identity(
-            derived_data,
-            "org.snapetech.pleazyng.localtest.trial-review-tests",
-            output,
-        )
-        runner_xcent, runner_entitlements, _, runner_bundle_id, runner_signed_entitlements, runner_signed_path = runner_signing
-        if runner_signed_path is None:
-            raise ValueError("Xcode did not produce signed UI-test runner entitlements for the simulator app")
-        simulator_entitlements = args.capture_tools_root / "ios" / "Runner" / "DebugProfile.entitlements"
-        extension_entitlements = (
-            args.product_root / "native" / "games" / "romm" / "apple" / "extension" / "RommWorker.entitlements"
-        )
-        simulator_signing = capture_tools.sign_ios_app_for_simulator(
-            staged_app,
-            output,
-            "trial-active-files-books-localtest.png",
-            device["udid"],
-            receipt["product_app_bundle_sha256"],
-            receipt,
-            receipt["product_build_receipt_sha256"],
-            simulator_entitlements,
-            extension_entitlements,
-            runner_xcent,
-            runner_entitlements,
-            runner_bundle_id,
-            runner_signed_entitlements,
-            runner_signed_path,
-            None,
-        )
         stage_evidence = json.loads((output / "xctestrun-app-association.json").read_text(encoding="utf-8"))
         if (stage_evidence.get("product_app_bundle_sha256_before") != receipt["product_app_bundle_sha256"]
                 or stage_evidence.get("product_app_bundle_sha256_staged") != receipt["product_app_bundle_sha256"]
                 or stage_evidence.get("product_app_codesign_identity_before") != {"status": "unsigned"}
                 or stage_evidence.get("product_app_codesign_identity_staged") != {"status": "unsigned"}):
-            raise ValueError("Simulator signing did not start from an unchanged copy of the unsigned producer app")
+            raise ValueError("The XCTest app staging copy differs from the unchanged unsigned producer app")
         stage_evidence.update({
-            "product_app_bundle_sha256_staged_before_simulator_signing": stage_evidence["product_app_bundle_sha256_staged"],
-            "product_app_codesign_identity_staged_before_simulator_signing": stage_evidence[
-                "product_app_codesign_identity_staged"
-            ],
-            "simulator_signed_app_bundle_sha256": simulator_signing["derived_app_bundle_sha256"],
-            "simulator_signing_provenance_file": simulator_signing["provenance_filename"],
-            "simulator_signature_entitlements_file": simulator_signing["derived_signature_entitlements_filename"],
-            "simulator_signature_identity": codesign_identity(staged_app),
             "product_app_source_unchanged": True,
             "qualification": (
-                "The producer app remains byte-identical and unsigned. Only the separate XCTest-staged simulator copy "
-                "received a standard ad-hoc Simulator signature using the test runner's observed Xcode-derived Keychain group."
+                "The producer app remains byte-identical and unsigned. The XCTest-staged simulator copy is also "
+                "byte-identical and unsigned; no additional code signature was applied."
             ),
         })
         write_json(output / "xctestrun-app-association.json", stage_evidence)
@@ -1461,14 +1424,14 @@ def capture(args: argparse.Namespace) -> None:
             device_id=device["udid"],
             app=staged_app,
             expected_identity=identity,
-            expected_sha256=simulator_signing["derived_app_bundle_sha256"],
+            expected_sha256=receipt["product_app_bundle_sha256"],
             diagnostic_dir=output,
         )
         installed_app_receipt["producer_app_bundle_sha256"] = receipt["product_app_bundle_sha256"]
-        installed_app_receipt["simulator_signing_provenance_file"] = simulator_signing["provenance_filename"]
+        installed_app_receipt["simulator_signing_applied"] = False
         installed_app_receipt["qualification"] = (
-            "simctl installed the separate simulator-only signed copy of the receipt-verified app; its app container "
-            "hash and bundle identity match the signed staged copy. The producer app remains unchanged."
+            "simctl installed the byte-identical unsigned XCTest-staged copy of the receipt-verified app; its app "
+            "container hash and bundle identity match that staged copy. The producer app remains unchanged."
         )
         write_json(output / "simulator-installed-app.json", installed_app_receipt)
         result_bundle = output / "pleazyng-trial-review.xcresult"
@@ -1564,7 +1527,13 @@ def capture(args: argparse.Namespace) -> None:
             "test_runner_build_log_sha256": sha256_file(build_log),
             "ui_test_log_sha256": sha256_file(test_log),
             "localtest_transaction_record": localtest,
-            "simulator_app_signing": simulator_signing,
+            "simulator_app_signing": {
+                "status": "not-applied",
+                "qualification": (
+                    "No extra Simulator signature was applied. The producer app, XCTest-staged copy, and installed "
+                    "app container remain byte-identical and unsigned."
+                ),
+            },
             "simulator_installed_app": installed_app_receipt,
             "producer_app_bundle_sha256_unchanged": sha256_tree(app) == receipt["product_app_bundle_sha256"],
             "screenshots": screenshot_receipts,

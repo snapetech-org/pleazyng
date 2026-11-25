@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import plistlib
 import hashlib
+import inspect
 import json
 import subprocess
 import struct
@@ -700,6 +701,15 @@ class TvOSSimulatorFrameworkClosureTests(unittest.TestCase):
 
 
 class ListingCaptureMetadataTests(unittest.TestCase):
+    def test_localtest_ipad_lane_requires_unchanged_unsigned_app(self) -> None:
+        source = inspect.getsource(capture.capture_ios_in_use_with_localtest_trial)
+
+        self.assertIn('simulator_signing.get("status") != "not-applied"', source)
+        self.assertIn('installed_app_receipt.get("installed_app_bundle_sha256") != app_digest', source)
+        self.assertIn('app_signature_before != {"status": "unsigned"}', source)
+        self.assertIn('"simulator_signing_applied": False', source)
+        self.assertNotIn("simulator_signed_app_bundle_sha256", source)
+
     def make_rgba_png(self, path: Path, *, alpha: int) -> bytes:
         header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
         png = (
