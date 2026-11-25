@@ -1401,9 +1401,12 @@ require(
     "github.repository == 'snapetech-org/pleazyng'" in supplemental_freeze
     and "github.ref == 'refs/heads/main'" in supplemental_freeze
     and "startsWith(inputs.reuse_repaired_run_id, 'qualification:')" in supplemental_freeze
+    and "REBUILD_TVOS: ${{ inputs.rebuild_tvos }}" in supplemental_freeze
+    and 'if [[ "$REBUILD_TVOS" == true ]]; then options+=(--rebuild-tvos); fi' in supplemental_freeze
     and "--qualification-run" in supplemental_freeze
     and "--freeze-qualified-release" in supplemental_freeze
     and "contents: write" in supplemental_freeze
+    and "inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:release:pool:{0}:tag:v{1}:assembly:source:{2}:{3}:rebuild-tvos'" in text
     and "needs.freeze-requalified-source.outputs.source_sha" in trusted_gate
     and '"$release_commit" == "$REQUALIFIED_SOURCE"' in trusted_gate
     and "--qualification-run" in named_step(trusted_gate, "Verify reusable platform source")
@@ -1775,7 +1778,7 @@ require(
     and '"$GITHUB_WORKSPACE/pleazyng-tvos-unsigned.ipa"' in tvos_dependency_gate
     and '"$GITHUB_WORKSPACE/pleazyng-tvos-appstore.ipa"' in tvos_dependency_gate
     and "--require-signed" in tvos_dependency_gate
-    and "TVOS_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_product_sha || github.sha }}" in tvos_dependency_gate
+    and "TVOS_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_product_sha || (inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && needs.validate-trusted-ref.outputs.reuse_source_sha && needs.validate-trusted-ref.outputs.reuse_source_sha) || github.sha }}" in tvos_dependency_gate
     and '"$TVOS_PRODUCT_SOURCE_SHA"' in tvos_dependency_gate
     and '"$COMPILE_SOURCE_SHA"' in tvos_dependency_gate
     and "--packaging-source-sha" in tvos_dependency_gate
@@ -2233,7 +2236,9 @@ require(
 )
 require(
     "outputs.mode == 'tvos-store' && 'xcode-27' || 'macos-26'" in job("build-tvos").split("permissions:", 1)[0]
-    and "outputs.mode == 'tvos-store' && '27.1' || '26.5'" in job("build-tvos")
+    and "inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && 'xcode-27'" in job("build-tvos").split("permissions:", 1)[0]
+    and "(needs.validate-trusted-ref.outputs.mode == 'tvos-store' || (inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:'))) && '27.1' || '26.5'" in job("build-tvos")
+    and "inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && needs.validate-trusted-ref.outputs.reuse_source_sha && needs.validate-trusted-ref.outputs.reuse_source_sha" in job("build-tvos")
     and 'test "$(uname -m)" = arm64' in named_step(job("build-tvos"), "Require native ARM host for tvOS AOT")
     and "(inputs.reuse_platform_run_id == '' || inputs.rebuild_tvos)" in job("build-tvos")
     and "--rebuild-tvos" in recovery_gate and "--rebuild-tvos" in recovery_download

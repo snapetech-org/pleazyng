@@ -63,6 +63,23 @@ class ArtifactPreflightTests(unittest.TestCase):
             with self.subTest(first=inventory[0]), self.assertRaises(recovery.RecoveryError):
                 self.preflight(inventory)
 
+    def test_tvos_rebuild_preflights_every_original_artifact_except_the_missing_ipa(self):
+        proof = {**self.proof, 'rebuild_tvos': True}
+        inventory = [item for item in self.inventory if item['name'] != 'tvos-ipa']
+
+        def metadata(path):
+            artifact_id = int(path.rsplit('/', 1)[-1])
+            artifact = next(item for item in inventory if item['id'] == artifact_id)
+            return {**artifact, 'workflow_run': dict(artifact['workflow_run'])}
+
+        with patch.object(recovery, 'collection', return_value=inventory), \
+                patch.object(recovery, 'api', side_effect=metadata):
+            records = recovery.preflight_platform_artifacts(proof)
+        self.assertEqual({item['name'] for item in records}, set(recovery.ARTIFACTS) - {'tvos-ipa'})
+        with patch.object(recovery, 'collection', return_value=inventory[1:]), \
+                self.assertRaisesRegex(recovery.RecoveryError, 'missing, expired, or ambiguous'):
+            recovery.preflight_platform_artifacts(proof)
+
     def test_metadata_endpoint_must_still_match_the_inventory(self):
         with self.assertRaisesRegex(recovery.RecoveryError, 'metadata changed'):
             self.preflight(metadata_change=lambda item: item.update(digest='sha256:' + 'f' * 64))
@@ -204,6 +221,40 @@ class SourceProofTests(unittest.TestCase):
         with patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 42}):
             with self.assertRaisesRegex(recovery.RecoveryError, 'Release CI / Code Analysis'):
                 self.prove(head_sha=sha, qualification_run=84)
+
+    def test_supplemental_qualification_allows_only_a_terminal_unassigned_tvos_package_rebuild(self):
+        sha = self.source['head_sha']
+        self.source.update(status='completed', conclusion='failure', run_attempt=1)
+        self.compare.update(status='identical', files=[])
+        tvos = next(job for job in self.jobs if job['name'] == 'Build tvOS developer package (arm64)')
+        tvos.update(status='completed', conclusion='cancelled', labels=['macos-26'],
+                    runner_id=0, runner_name='', steps=[], run_id=42, run_attempt=1,
+                    head_sha=sha)
+        next(job for job in self.jobs if job['name'] == 'build-android').update(conclusion='success', id=101)
+        self.jobs.extend([
+            {'name': 'Build WebOS TV package (ARMv7)', 'id': 102,
+             'status': 'completed', 'conclusion': 'success'},
+            {'name': 'Release CI / Apple native reliability (tvOS)',
+             'status': 'completed', 'conclusion': 'cancelled'},
+        ])
+        with patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 42}):
+            proof = self.prove(head_sha=sha, qualification_run=84, rebuild_tvos=True, freeze=True)
+            with patch.object(recovery, 'collection', return_value=self.jobs):
+                assembled = recovery.compose_proof(proof, android_run=42, webos_run=42)
+        self.assertEqual(assembled['rebuilt_jobs'], ['Build tvOS developer package (arm64)'])
+        self.assertTrue(assembled['rebuild_tvos'])
+        self.assertEqual(assembled['android_source']['job_id'], 101)
+        self.assertEqual(assembled['webos_source']['job_id'], 102)
+
+        tvos.update(status='in_progress', conclusion=None, runner_id=0)
+        with patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 42}), \
+                self.assertRaisesRegex(recovery.RecoveryError, 'cancelled before macos-26 runner acquisition'):
+            self.prove(head_sha=sha, qualification_run=84, rebuild_tvos=True, freeze=True)
+        tvos.update(status='completed', conclusion='failure', runner_id=1000088520,
+                    runner_name='GitHub Actions 1000088520', steps=[{'name': 'Set up job'}])
+        with patch.object(recovery, 'supplemental_ci_proof', return_value={'ci_run_id': 42}), \
+                self.assertRaisesRegex(recovery.RecoveryError, 'cancelled before macos-26 runner acquisition'):
+            self.prove(head_sha=sha, qualification_run=84, rebuild_tvos=True, freeze=True)
 
     def test_actual_public_candidate_run_shape_is_accepted_for_mac_rebuild(self):
         source_sha = "2388a06cc74d03e69ac7178fcd927a54460a5e3a"
@@ -1829,6 +1880,100 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(dispatch.call_args.kwargs['expected_sha'], tooling_sha)
         self.assertEqual(dispatch.call_args.kwargs['expected_title'], title)
         self.assertEqual(dispatch.call_args.args[3]['reuse_repaired_run_id'], 'qualification:84')
+
+    def test_supplemental_qualification_dispatches_distinct_hosted_tvos_rebuild(self):
+        product_sha, tooling_sha = 'a' * 40, 'b' * 40
+        tvos_job = 'Build tvOS developer package (arm64)'
+        title = ('action:release:pool:public:tag:v3.0.51:assembly:source:42:'
+                 'qualification:84:rebuild-tvos')
+        completed = {'databaseId': 86, 'status': 'completed', 'conclusion': 'success'}
+        proof = {'source_sha': product_sha, 'version': '3.0.51', 'qualification_run_id': 84,
+                 'platforms_complete': True, 'rebuild_tvos': True, 'rebuilt_jobs': [tvos_job],
+                 'artifact_preflight': [{'name': 'ios-ipa', 'source_run_id': 42}]}
+        with patch.object(controller, 'verify_platform_recovery', return_value=proof) as gate, \
+             patch.object(recovery, 'github_token', return_value='fixture-token'), \
+             patch('verify_embedded_release_ci.create_stable_tag') as freeze, \
+             patch.object(controller, 'matching_packaging_repair_run', return_value=None), \
+             patch.object(controller, 'gh_json', return_value={'commit': {'sha': tooling_sha}}), \
+             patch.object(controller, 'ensure_remote_main_sha'), \
+             patch.object(controller, 'dispatch', return_value=completed) as dispatch, \
+             patch.object(controller, 'run_has_successful_job', return_value=True) as successful_job, \
+             patch.object(controller, 'run_has_successful_step', return_value=True) as successful_step:
+            result = controller.ensure_release(
+                'v3.0.51', product_sha, include_webos_release=True,
+                reuse_platform_run_id=42, reuse_webos_run_id=42,
+                reuse_repaired_run_id='qualification:84', rebuild_tvos=True,
+            )
+        self.assertEqual(result, completed)
+        gate.assert_called_once_with(42, product_sha, '3.0.51', qualification_run=84,
+                                     rebuild_tvos=True, webos_run=42, android_run=42)
+        freeze.assert_called_once_with('fixture-token', 'v3.0.51', product_sha)
+        self.assertEqual(dispatch.call_args.kwargs['expected_title'], title)
+        self.assertEqual(dispatch.call_args.kwargs['expected_sha'], tooling_sha)
+        fields = dispatch.call_args.args[3]
+        self.assertEqual(fields['reuse_repaired_run_id'], 'qualification:84')
+        self.assertEqual(fields['reuse_platform_run_id'], '42')
+        self.assertEqual(fields['reuse_android_run_id'], '42')
+        self.assertEqual(fields['reuse_webos_run_id'], '42')
+        self.assertEqual(fields['rebuild_tvos'], 'true')
+        self.assertEqual(fields['tvos_runner_pool'], 'hosted')
+        self.assertEqual(
+            {call.args[3] for call in successful_step.call_args_list},
+            {
+                'Package unsigned tvOS developer IPA',
+                'Verify unsigned tvOS runtime dependencies',
+                'Attest unsigned tvOS checkpoint',
+                'Upload durable unsigned tvOS checkpoint',
+                'Verify tvOS runtime dependencies',
+                'Attest unsigned tvOS developer package',
+                'Upload tvOS package',
+            },
+        )
+        successful_job.assert_called_with(controller.PLEZY_REPO, completed, tvos_job)
+
+    def test_supplemental_tvos_rebuild_requires_only_the_rebuilt_tvos_in_its_proof(self):
+        product_sha = 'a' * 40
+        tvos_job = 'Build tvOS developer package (arm64)'
+        valid_proof = {
+            'source_sha': product_sha,
+            'version': '3.0.51',
+            'qualification_run_id': 84,
+            'platforms_complete': True,
+            'rebuild_tvos': True,
+            'rebuilt_jobs': [tvos_job],
+            'artifact_preflight': [{'name': 'ios-ipa', 'source_run_id': 42}],
+        }
+        invalid_proofs = [
+            {**valid_proof, 'rebuild_tvos': False},
+            {**valid_proof, 'rebuilt_jobs': []},
+            {**valid_proof, 'artifact_preflight': [
+                {'name': 'ios-ipa', 'source_run_id': 42},
+                {'name': 'tvos-ipa', 'source_run_id': 42},
+            ]},
+        ]
+        for proof in invalid_proofs:
+            with self.subTest(proof=proof), \
+                    patch.object(controller, 'verify_platform_recovery', return_value=proof), \
+                    self.assertRaisesRegex(controller.ReleaseError, 'artifact proof is incomplete'):
+                controller.ensure_release(
+                    'v3.0.51', product_sha, include_webos_release=True,
+                    reuse_platform_run_id=42, reuse_webos_run_id=42,
+                    reuse_repaired_run_id='qualification:84', rebuild_tvos=True,
+                )
+
+    def test_supplemental_qualification_rejects_signing_or_sibling_substitution_with_tvos_rebuild(self):
+        with self.assertRaisesRegex(controller.ReleaseError, 'only permits a verified tvOS acquisition rebuild'):
+            controller.ensure_release(
+                'v3.0.51', 'a' * 40, include_webos_release=True, include_apple_store_build=True,
+                reuse_platform_run_id=42, reuse_webos_run_id=42,
+                reuse_repaired_run_id='qualification:84', rebuild_tvos=True,
+            )
+        with self.assertRaisesRegex(controller.ReleaseError, 'only permits a verified tvOS acquisition rebuild'):
+            controller.ensure_release(
+                'v3.0.51', 'a' * 40, include_webos_release=True,
+                reuse_platform_run_id=42, reuse_webos_run_id=99,
+                reuse_repaired_run_id='qualification:84', rebuild_tvos=True,
+            )
 
     @patch.object(controller, "verify_platform_recovery")
     @patch.object(controller, "verify_unacquired_hosted_tvos_run", return_value={"run_id": 77})

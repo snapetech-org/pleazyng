@@ -22,7 +22,7 @@
 
 - Keep complete playlists in offline sync and native music playback when Plex, Jellyfin, or Emby omits the total count. Malformed replies preserve the existing offline playlist, and batch removal stops before deleting entries if the listing is incomplete or inconsistent.
 
-- Requalify an interrupted Apple release on hosted Macs and reuse the original verified packages across every platform.
+- Requalify an interrupted Apple release on hosted Macs and reuse the original verified packages across every platform. If the original tvOS package is cancelled before hosted runner acquisition, rebuild only that unsigned package from the same source.
 
 - Keep authenticated artwork requests separate in the disk cache and store opaque identifiers for artwork URLs and explicit cache keys. Existing account-specific posters remain available offline.
 - Share one seek-preview memory budget across the files of a stacked Plex title, prioritize the playing file, and release preview archives independently of cached thumbnail images. Plex and Emby now discard stale loads and invalid thumbnail indexes.

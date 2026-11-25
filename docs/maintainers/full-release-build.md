@@ -131,6 +131,21 @@ authenticated `gh` session. Assembly independently verifies the same proof, tag,
 and downloaded artifact digests before drafting the release. Keep the original
 run ID and qualification run ID when retrying delivery for the same version.
 
+If the original **Build tvOS developer package (arm64)** job is terminal and was
+cancelled before acquiring a `macos-26` runner, with no runner assignment and no
+steps started, retain the same source and Apple qualification and add
+`--rebuild-tvos`. This guarded exception accepts only that exact acquisition
+failure; it does not retry a package job that started or failed during build.
+The controller and workflow give the recovery a distinct
+`...:assembly:source:SOURCE_RUN:qualification:QUALIFICATION_RUN:rebuild-tvos`
+identity, preflight all original artifacts except the missing tvOS package, and
+freeze the stable source tag before building. The replacement uses the hosted
+ARM `xcode-27` runner and checks out the exact original product SHA. Assembly
+requires the new unsigned IPA, runtime dependency verification, durable
+checkpoint attestation and upload, final package attestation, and uploaded tvOS
+artifact, alongside the original Android, webOS, and all other platform outputs.
+This recovery remains unsigned and uses the public hosted runner.
+
 When exactly one supplemental Apple suite fails and the fix changes the
 workflow revision, dispatch **Apple candidate qualification** again using the
 same original run ID and product SHA. Set `retained_run_id` to the failed

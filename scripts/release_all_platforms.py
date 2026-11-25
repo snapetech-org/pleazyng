@@ -1863,11 +1863,17 @@ def ensure_release(
         if (not reuse_platform_run_id or reuse_android_run_id != reuse_platform_run_id
                 or reuse_webos_run_id != reuse_platform_run_id or repair or candidate_ref
                 or not include_webos_build or include_apple_store_build or prepare_homebrew_cask
-                or any((rebuild_ios, rebuild_tvos, rebuild_macos, rebuild_linux, rebuild_tizen,
+                or any((rebuild_ios, rebuild_macos, rebuild_linux, rebuild_tizen,
                         rebuild_webos, reuse_macos_run_id, reuse_tvos_run_id, reuse_ios_run_id,
-                        reuse_ios_developer_run_id, private_apple_signing_unavailable))):
-            raise ReleaseError("Supplemental qualification requires assembly of every original unsigned artifact.")
+                        reuse_ios_developer_run_id, private_apple_signing_unavailable))
+                or (rebuild_tvos and (not reuse_platform_run_id
+                                      or reuse_android_run_id != reuse_platform_run_id
+                                      or reuse_webos_run_id != reuse_platform_run_id))):
+            raise ReleaseError("Supplemental qualification requires original unsigned artifacts and only permits a verified tvOS acquisition rebuild.")
         run_title += f":assembly:source:{reuse_platform_run_id}:qualification:{qualification_run}"
+        if rebuild_tvos:
+            run_title += ":rebuild-tvos"
+            tvos_runner_pool = macos_runner_pool = ios_runner_pool = "hosted"
     if runner_acquisition_retry_of is not None:
         if (repair or reuse_platform_run_id or reuse_repaired_run_id is not None
                 or type(runner_acquisition_retry_of) is not int or runner_acquisition_retry_of < 1):
@@ -1878,7 +1884,7 @@ def ensure_release(
         run_title += f":recovery:source:{reuse_platform_run_id}:macos"
     elif not repair and reuse_platform_run_id and reuse_macos_run_id:
         run_title += f":assembly:source:{reuse_platform_run_id}:macos:{reuse_macos_run_id}"
-    elif not repair and reuse_platform_run_id and rebuild_tvos:
+    elif not qualification_run and not repair and reuse_platform_run_id and rebuild_tvos:
         run_title += f":recovery:source:{reuse_platform_run_id}:tvos"
     elif not repair and reuse_platform_run_id and rebuild_tizen:
         run_title += f":recovery:source:{reuse_platform_run_id}:tizen"
@@ -2047,7 +2053,12 @@ def ensure_release(
             if (proof.get("source_sha") != commit_sha or f"v{proof.get('version')}" != tag
                     or proof.get("qualification_run_id") != qualification_run
                     or proof.get("platforms_complete") is not True or proof.get("pending_jobs")
-                    or not proof.get("artifact_preflight")):
+                    or not proof.get("artifact_preflight")
+                    or (rebuild_tvos and (
+                        proof.get("rebuild_tvos") is not True
+                        or "Build tvOS developer package (arm64)" not in proof.get("rebuilt_jobs", [])
+                        or any(item.get("name") == "tvos-ipa" for item in proof["artifact_preflight"])
+                    ))):
                 raise ReleaseError("The exact supplemental platform and artifact proof is incomplete.")
             from recover_release_platforms import github_token
             from verify_embedded_release_ci import create_stable_tag
@@ -2099,6 +2110,21 @@ def ensure_release(
         complete = bool(reuse_platform_run_id) or execution_profile != "hybrid" or run_has_successful_job(
             PLEZY_REPO, existing, "Build Windows (arm64)"
         )
+        if qualification_run is not None and rebuild_tvos:
+            tvos_steps = (
+                "Package unsigned tvOS developer IPA",
+                "Verify unsigned tvOS runtime dependencies",
+                "Attest unsigned tvOS checkpoint",
+                "Upload durable unsigned tvOS checkpoint",
+                "Verify tvOS runtime dependencies",
+                "Attest unsigned tvOS developer package",
+                "Upload tvOS package",
+            )
+            complete = complete and run_has_successful_job(
+                PLEZY_REPO, existing, "Build tvOS developer package (arm64)"
+            ) and all(run_has_successful_step(
+                PLEZY_REPO, existing, "Build tvOS developer package (arm64)", step
+            ) for step in tvos_steps)
         if include_apple_store_build and repair:
             complete = complete and all(
                 run_has_successful_step(PLEZY_REPO, existing, job_name, step_name)
@@ -2122,6 +2148,8 @@ def ensure_release(
             return existing
         if repair:
             raise ReleaseError("Existing packaging repair lacks requested signing/qualification steps; refusing a duplicate dispatch.")
+        if qualification_run is not None and rebuild_tvos:
+            raise ReleaseError("Existing qualified tvOS rebuild lacks required unsigned package verification; refusing a duplicate dispatch.")
         print(
             f"Release run {existing['databaseId']} passed without all requested platform jobs; "
             "dispatching the required profile."
@@ -2211,6 +2239,21 @@ def ensure_release(
                                   ("Generate Homebrew Cask candidate", "Attest Homebrew Cask candidate"))
         if any(not run_has_successful_step(PLEZY_REPO, result, job, step) for job, step in required_steps):
             raise ReleaseError("Packaging repair completed without every requested signing/qualification step.")
+    if qualification_run is not None and rebuild_tvos and not start_only:
+        tvos_steps = (
+            "Package unsigned tvOS developer IPA",
+            "Verify unsigned tvOS runtime dependencies",
+            "Attest unsigned tvOS checkpoint",
+            "Upload durable unsigned tvOS checkpoint",
+            "Verify tvOS runtime dependencies",
+            "Attest unsigned tvOS developer package",
+            "Upload tvOS package",
+        )
+        if (not run_has_successful_job(PLEZY_REPO, result, "Build tvOS developer package (arm64)")
+                or any(not run_has_successful_step(
+                    PLEZY_REPO, result, "Build tvOS developer package (arm64)", step
+                ) for step in tvos_steps)):
+            raise ReleaseError("Qualified tvOS recovery lacks a successful unsigned package, checkpoint, and runtime receipt.")
     return result
 
 
@@ -3361,10 +3404,13 @@ def main() -> int:
                 or args.reuse_android_run not in (None, args.reuse_platform_run)
                 or args.reuse_webos_run not in (None, args.reuse_platform_run)
                 or any((args.include_apple_store_build, args.prepare_homebrew_cask, args.rebuild_ios,
-                        args.rebuild_tvos, args.rebuild_macos, args.rebuild_linux, args.rebuild_tizen,
+                        args.rebuild_macos, args.rebuild_linux, args.rebuild_tizen,
                         args.rebuild_webos, args.reuse_macos_run, args.reuse_tvos_run,
                         args.reuse_ios_run, args.reuse_ios_developer_run))):
-            raise ReleaseError("Supply the original platform run and its exact source for supplemental Apple qualification.")
+            raise ReleaseError("Supply the original platform run and exact source; supplemental qualification only permits the guarded tvOS acquisition rebuild.")
+        if (args.rebuild_tvos and (args.reuse_webos_run not in (None, args.reuse_platform_run)
+                                   or args.reuse_android_run not in (None, args.reuse_platform_run))):
+            raise ReleaseError("Supplemental tvOS recovery must reuse Android and WebOS from the original platform run.")
         args.reuse_android_run = args.reuse_webos_run = args.reuse_platform_run
     packaging_repair = bool(args.reuse_platform_run and getattr(args, "source_commit", None)
                             and qualification_run is None)

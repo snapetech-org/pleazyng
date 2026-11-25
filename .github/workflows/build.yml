@@ -2,7 +2,7 @@
 # Public GitHub-hosted runners are required for all compatible jobs; only
 # requested Apple signing and the verified webOS storage overflow use JIT.
 name: Pleazyng Release
-run-name: ${{ format('{0}{1}{2}', inputs.private_apple_signing_unavailable && 'apple-signing-unavailable:' || '', inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'build' && format('action:{0}:pool:{1}:mode:{2}:version:{3}:runner-retry-of:{4}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}:runner-retry-of:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && startsWith(inputs.reuse_repaired_run_id, 'assembly-tvos:') && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_macos_package_run_id != '' && !inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:macos:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_macos_package_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:macos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tvos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_repaired_run_id == 'tizen-rebuild' && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tizen', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || (inputs.mode == 'ios-store' || inputs.mode == 'tvos-store') && format('action:release:pool:{0}:mode:{1}:tag:v{2}', inputs.runner_pool, inputs.mode, inputs.build_version) || inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}', inputs.action, inputs.runner_pool, inputs.build_version) || inputs.action == 'build' && inputs.mode == 'release' && inputs.build_version != '' && format('action:{0}:pool:{1}:mode:{2}:version:{3}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version) || format('action:{0}:pool:{1}', inputs.action, inputs.runner_pool), inputs.action == 'build' && (inputs.subtitle_gpu_backend == 'vulkan' || inputs.subtitle_gpu_backend == 'cuda') && format(':whisper:{0}', inputs.subtitle_gpu_backend) || '') }}
+run-name: ${{ format('{0}{1}{2}', inputs.private_apple_signing_unavailable && 'apple-signing-unavailable:' || '', inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'build' && format('action:{0}:pool:{1}:mode:{2}:version:{3}:runner-retry-of:{4}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.reuse_repaired_run_id != '' && inputs.rebuild_tvos && inputs.reuse_platform_run_id == '' && inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}:runner-retry-of:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && startsWith(inputs.reuse_repaired_run_id, 'assembly-tvos:') && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha, inputs.reuse_repaired_run_id) || inputs.recovery_source_sha != '' && format('action:{0}:pool:{1}:tag:v{2}:repair:{3}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.recovery_source_sha) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_macos_package_run_id != '' && !inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:macos:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_macos_package_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_macos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:macos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:release:pool:{0}:tag:v{1}:assembly:source:{2}:{3}:rebuild-tvos', inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tvos', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && inputs.reuse_repaired_run_id == 'tizen-rebuild' && format('action:{0}:pool:{1}:tag:v{2}:recovery:source:{3}:tizen', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id) || inputs.action == 'release' && inputs.reuse_platform_run_id != '' && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && format('action:{0}:pool:{1}:tag:v{2}:assembly:source:{3}:{4}', inputs.action, inputs.runner_pool, inputs.build_version, inputs.reuse_platform_run_id, inputs.reuse_repaired_run_id) || (inputs.mode == 'ios-store' || inputs.mode == 'tvos-store') && format('action:release:pool:{0}:mode:{1}:tag:v{2}', inputs.runner_pool, inputs.mode, inputs.build_version) || inputs.action == 'release' && format('action:{0}:pool:{1}:tag:v{2}', inputs.action, inputs.runner_pool, inputs.build_version) || inputs.action == 'build' && inputs.mode == 'release' && inputs.build_version != '' && format('action:{0}:pool:{1}:mode:{2}:version:{3}', inputs.action, inputs.runner_pool, inputs.mode, inputs.build_version) || format('action:{0}:pool:{1}', inputs.action, inputs.runner_pool), inputs.action == 'build' && (inputs.subtitle_gpu_backend == 'vulkan' || inputs.subtitle_gpu_backend == 'cuda') && format(':whisper:{0}', inputs.subtitle_gpu_backend) || '') }}
 
 on:
   workflow_dispatch:
@@ -411,19 +411,25 @@ jobs:
           QUALIFICATION: ${{ inputs.reuse_repaired_run_id }}
           ANDROID_RUN: ${{ inputs.reuse_android_run_id }}
           WEBOS_RUN: ${{ inputs.reuse_webos_run_id }}
+          REBUILD_TVOS: ${{ inputs.rebuild_tvos }}
           VERSION: ${{ inputs.build_version }}
-          FULL_RELEASE: ${{ inputs.subtitle_gpu_backend == 'cpu' && inputs.include_webos_build && inputs.include_webos_release && !inputs.include_apple_store_build && !inputs.prepare_homebrew_cask && !inputs.rebuild_ios && !inputs.rebuild_tvos && !inputs.rebuild_macos && !inputs.rebuild_linux && inputs.recovery_source_sha == '' && inputs.recovery_product_sha == '' && inputs.reuse_macos_package_run_id == '' }}
+          FULL_RELEASE: ${{ inputs.subtitle_gpu_backend == 'cpu' && inputs.include_webos_build && inputs.include_webos_release && !inputs.include_apple_store_build && !inputs.prepare_homebrew_cask && !inputs.rebuild_ios && !inputs.rebuild_macos && !inputs.rebuild_linux && inputs.recovery_source_sha == '' && inputs.recovery_product_sha == '' && inputs.reuse_macos_package_run_id == '' }}
         run: |
           set -euo pipefail
           if [[ "$FULL_RELEASE" != true || ! "$SOURCE_RUN" =~ ^[1-9][0-9]*$ || ! "$QUALIFICATION" =~ ^qualification:([1-9][0-9]*)$ ]]; then
             echo "Supplemental qualification requires the complete original unsigned release and exact run identities." >&2
             exit 1
           fi
+          if [[ "$ANDROID_RUN" != "$SOURCE_RUN" || "$WEBOS_RUN" != "$SOURCE_RUN" ]]; then
+            echo "Supplemental tvOS rebuild must retain Android and webOS from the exact original release run." >&2
+            exit 1
+          fi
           qualification_run=${BASH_REMATCH[1]}
           source_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" --jq .head_sha)
-          python3 scripts/recover_release_platforms.py "$SOURCE_RUN" --head-sha "$source_sha" \
-            --version "$VERSION" --qualification-run "$qualification_run" --freeze-qualified-release \
-            --android-run "$ANDROID_RUN" --webos-run "$WEBOS_RUN"
+          options=(--version "$VERSION" --qualification-run "$qualification_run" --freeze-qualified-release \
+            --android-run "$ANDROID_RUN" --webos-run "$WEBOS_RUN")
+          if [[ "$REBUILD_TVOS" == true ]]; then options+=(--rebuild-tvos); fi
+          python3 scripts/recover_release_platforms.py "$SOURCE_RUN" --head-sha "$source_sha" "${options[@]}"
 
   validate-trusted-ref:
     name: Validate release request
@@ -2224,13 +2230,13 @@ jobs:
       tvos_store_package_available: ${{ steps.tvos-store-package.outcome == 'success' }}
     timeout-minutes: ${{ needs.validate-trusted-ref.outputs.include_apple_store_build == 'true' && 300 || 180 }}
     name: Build tvOS developer package (arm64)
-    runs-on: ${{ needs.validate-trusted-ref.outputs.include_apple_store_build == 'true' && needs.validate-trusted-ref.outputs.tvos_runner_pool == 'private' && fromJSON(format('{{"group":"private-apple-builds","labels":["self-hosted","macOS","ARM64","private-apple","ng-shared-main-pleazyng","ng-main-run-{0}","gha-{0}-build-tvos"]}}', github.run_id)) || (needs.validate-trusted-ref.outputs.mode == 'tvos-store' && 'xcode-27' || 'macos-26') }}
+    runs-on: ${{ needs.validate-trusted-ref.outputs.include_apple_store_build == 'true' && needs.validate-trusted-ref.outputs.tvos_runner_pool == 'private' && fromJSON(format('{{"group":"private-apple-builds","labels":["self-hosted","macOS","ARM64","private-apple","ng-shared-main-pleazyng","ng-main-run-{0}","gha-{0}-build-tvos"]}}', github.run_id)) || (inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:') && 'xcode-27' || needs.validate-trusted-ref.outputs.mode == 'tvos-store' && 'xcode-27' || 'macos-26') }}
     permissions:
       id-token: write
       attestations: write
       contents: read
     env:
-      COMPILE_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_source_sha || github.sha }}
+      COMPILE_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_source_sha || (inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && needs.validate-trusted-ref.outputs.reuse_source_sha && needs.validate-trusted-ref.outputs.reuse_source_sha) || github.sha }}
       TVOS_STORE_ONLY: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' }}
       PUB_CACHE: ${{ github.workspace }}/.cache/plezy-pub-cache
       LANG: en_US.UTF-8
@@ -2251,7 +2257,7 @@ jobs:
       - name: Setup Flutter
         uses: ./.github/actions/setup-flutter-apple
         with:
-          hosted-xcode-version: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && '27.1' || '26.5' }}
+          hosted-xcode-version: ${{ (needs.validate-trusted-ref.outputs.mode == 'tvos-store' || (inputs.rebuild_tvos && startsWith(inputs.reuse_repaired_run_id, 'qualification:'))) && '27.1' || '26.5' }}
           flutter-version: ${{ env.TVOS_FLUTTER_VERSION }}
 
       - name: Cache Pub dependencies
@@ -2412,7 +2418,7 @@ jobs:
       - name: Verify unsigned tvOS runtime dependencies
         if: env.TVOS_STORE_ONLY != 'true'
         env:
-          TVOS_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_product_sha || github.sha }}
+          TVOS_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_product_sha || (inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && needs.validate-trusted-ref.outputs.reuse_source_sha && needs.validate-trusted-ref.outputs.reuse_source_sha) || github.sha }}
         run: |
           set -euo pipefail
           xcrun --sdk appletvos --show-sdk-path > "$RUNNER_TEMP/tvos-sdk-root"
@@ -2485,7 +2491,7 @@ jobs:
       - name: Verify tvOS runtime dependencies
         env:
           TVOS_SIGNED_BUILD: ${{ steps.tvos-store-package.outcome == 'success' }}
-          TVOS_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_product_sha || github.sha }}
+          TVOS_PRODUCT_SOURCE_SHA: ${{ needs.validate-trusted-ref.outputs.mode == 'tvos-store' && needs.validate-trusted-ref.outputs.release_commit || inputs.recovery_product_sha || (inputs.reuse_platform_run_id != '' && inputs.rebuild_tvos && needs.validate-trusted-ref.outputs.reuse_source_sha && needs.validate-trusted-ref.outputs.reuse_source_sha) || github.sha }}
         run: |
           set -euo pipefail
           sdk_root="$(xcrun --sdk appletvos --show-sdk-path)"

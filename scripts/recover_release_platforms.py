@@ -917,10 +917,10 @@ def original_tvos_execution_attempt(repository, run_id, job):
 
 def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow_pending=False, rebuild_linux=False, rebuild_macos=False, rebuild_tvos=False, rebuild_ios=False, rebuild_tizen=False, repaired_run=None, require_homebrew_cask=False, packaging_source_sha=None, workflow_source_sha=None, include_apple_store_build=False, tvos_run=None, ios_run=None, ios_developer_run=None, built_tvos_run=None, append_apple_only=False, qualification_run=None, freeze=False):
     if qualification_run is not None and any((
-            rebuild_linux, rebuild_macos, rebuild_tvos, rebuild_ios, rebuild_tizen, repaired_run,
+            rebuild_linux, rebuild_macos, rebuild_ios, rebuild_tizen, repaired_run,
             require_homebrew_cask, packaging_source_sha, workflow_source_sha, include_apple_store_build,
             tvos_run, ios_run, ios_developer_run, built_tvos_run, append_apple_only)):
-        raise RecoveryError("Supplemental qualification requires assembly of the original unsigned release assets")
+        raise RecoveryError("Supplemental qualification requires assembly of the original unsigned release assets except the guarded tvOS acquisition rebuild")
     if ios_run and not tvos_run:
         raise RecoveryError('Signed iOS sibling reuse requires a distinct signed TV sibling')
     if built_tvos_run is not None:
@@ -1046,6 +1046,24 @@ def verify_source_run(run_id, head_sha, version, repository=REPOSITORY, *, allow
                 or macos_jobs[0].get('conclusion') not in {'success', 'failure'}):
             raise RecoveryError('Append-only Apple recovery requires a completed original Mac job')
     rebuilt_jobs = set(REBUILT_JOBS) | ({"Build Linux (x64)", "Build Linux (arm64)"} if rebuild_linux else set()) | ({"build-macos"} if rebuild_macos else set()) | ({"Build tvOS developer package (arm64)"} if rebuild_tvos else set()) | ({"build-ios"} if rebuild_ios else set()) | ({TIZEN_PACKAGE_JOB} if rebuild_tizen else set())
+    if qualification_run is not None and rebuild_tvos:
+        tvos_jobs = [job for job in jobs if job.get("name") == "Build tvOS developer package (arm64)"]
+        if len(tvos_jobs) != 1:
+            raise RecoveryError("Supplemental tvOS rebuild requires exactly one original tvOS package job")
+        tvos_job = tvos_jobs[0]
+        labels = tvos_job.get("labels")
+        if (source.get("status") != "completed"
+                or tvos_job.get("status") != "completed"
+                or tvos_job.get("conclusion") != "cancelled"
+                or not isinstance(labels, list) or "macos-26" not in labels
+                or tvos_job.get("runner_id") not in (None, 0)
+                or tvos_job.get("runner_name") not in (None, "")
+                or not isinstance(tvos_job.get("steps"), list) or tvos_job["steps"]
+                or tvos_job.get("run_id") != int(run_id)
+                or tvos_job.get("run_attempt") != source.get("run_attempt")
+                or tvos_job.get("head_sha") != source_sha):
+            raise RecoveryError(
+                "Supplemental tvOS rebuild only accepts the original exact-source package cancelled before macos-26 runner acquisition")
     for name in required_jobs:
         matches = [job for job in jobs if job.get("name") == name]
         if len(matches) == 1 and pending and matches[0].get("status") in {"queued", "in_progress", "waiting", "pending", "requested"} and not matches[0].get("conclusion"):
@@ -1353,7 +1371,11 @@ def compose_proof(proof, android_run=None, include_webos_build=True, webos_run=N
                 raise RecoveryError(f'Original platform must be uniquely successful: {name}')
             aliases[key] = {'source_run_id': source_run, 'source_sha': proof['source_sha'],
                             'job_id': matches[0]['id'], 'platforms_complete': True}
-        return {**proof, **aliases, 'rebuilt_jobs': [], 'excluded_optional_jobs': []}
+        rebuilt = set(proof.get('rebuilt_jobs', [])) - {'build-android', 'Build WebOS TV package (ARMv7)'}
+        expected_rebuilt = {'Build tvOS developer package (arm64)'} if proof.get('rebuild_tvos') else set()
+        if rebuilt != expected_rebuilt:
+            raise RecoveryError('Supplemental qualification contains an unexpected package rebuild')
+        return {**proof, **aliases, 'rebuilt_jobs': sorted(rebuilt), 'excluded_optional_jobs': []}
     if proof.get('recovery_policy') == 'frozen-apple-packaging-v1':
         source_run = proof['source_run_id']
         if str(android_run) != str(source_run) or not include_webos_build:
