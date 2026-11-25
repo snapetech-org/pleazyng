@@ -20,6 +20,7 @@ from stores.prepare_apple_review_draft import APP_ID, exact_record, prepare
 SCREENSHOT_TYPE = 'APP_SCREENSHOT'
 CATEGORY = 'APP_SCREENSHOTS_AND_PREVIEWS'
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
+OPEN_MEDIA_SCENE = 'Post-onboarding local Files and Books screen'
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,7 @@ def read_native_provenance(data, platform, filename, version, build, source, wor
             != (version, build, BUNDLE, source, source_tag)
             or record['capture_tools_sha'] != workflow_source or record['platform'] != capture_platform
             or record['build_configuration'] != configuration or record['build_defines'] != defines
-            or not record['capture_scene'].startswith('Post-onboarding local Files and Books screen.')
+            or not record['capture_scene'].startswith((f'{OPEN_MEDIA_SCENE}.', f'{OPEN_MEDIA_SCENE} after '))
             or not record['qualification'] or not re.fullmatch(r'[0-9a-f]{64}', record['app_bundle_sha256'])):
         raise ValueError(f'Unexpected {manifest_platform} screenshot provenance')
     return tuple(record['dimensions']), record['capture_sha256']

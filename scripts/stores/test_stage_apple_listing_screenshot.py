@@ -27,7 +27,8 @@ class AppleListingScreenshotTests(unittest.TestCase):
         record = {'filename': filename, 'app_version': '3.0.51', 'app_build': '210', 'bundle_id': screenshot.BUNDLE,
                   'source_sha': source, 'source_tag': 'v3.0.51', 'capture_tools_sha': workflow_source,
                   'platform': 'iOS', 'build_configuration': 'Debug Simulator', 'build_defines': defines,
-                  'capture_scene': 'Post-onboarding local Files and Books screen. A local profile was created.',
+                  'capture_scene': ('Post-onboarding local Files and Books screen after the real trial CTA completed '
+                                    'one isolated Xcode StoreKitTest LOCALTEST purchase.'),
                   'qualification': 'Exact product on an iPad Simulator', 'app_bundle_sha256': 'c' * 64,
                   'dimensions': dimensions}
         with TemporaryDirectory() as directory:
