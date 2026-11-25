@@ -257,8 +257,44 @@ for (stage, devices) in try request.supportedComputeStageDevices {
   request.setComputeDevice(cpu, for: stage)
 }
 try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-let result: [String: Any] = ["image_pixels": [image.width, image.height], "recognized_lines": lines]
+let observations = request.results ?? []
+let recognized = observations.compactMap { observation -> [String: Any]? in
+  guard let candidate = observation.topCandidates(1).first else { return nil }
+  let box = observation.boundingBox
+  return [
+    "text": candidate.string,
+    "confidence": Double(candidate.confidence),
+    "normalized_bounds": [Double(box.minX), Double(box.minY), Double(box.width), Double(box.height)],
+  ]
+}
+let lines = recognized.compactMap { $0["text"] as? String }
+let result: [String: Any] = [
+  "image_pixels": [image.width, image.height],
+  "recognized_lines": lines,
+  "recognized_regions": recognized,
+]
+let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
+print(String(decoding: data, as: UTF8.self))
+'''
+
+
+MACOS_POST_NATIVE_CLICK_SWIFT = r'''import CoreGraphics
+import Foundation
+
+guard CommandLine.arguments.count == 3,
+      let x = Double(CommandLine.arguments[1]),
+      let y = Double(CommandLine.arguments[2]),
+      x.isFinite, y.isFinite, x >= 0, y >= 0 else { exit(2) }
+let point = CGPoint(x: x, y: y)
+guard let down = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
+      let up = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) else {
+  fputs("Could not create native mouse events.\n", stderr)
+  exit(3)
+}
+down.post(tap: .cghidEventTap)
+Thread.sleep(forTimeInterval: 0.08)
+up.post(tap: .cghidEventTap)
+let result: [String: Any] = ["posted": true, "screen_point": [x, y], "input_method": "CoreGraphics CGEvent left mouse click"]
 let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .prettyPrinted])
 print(String(decoding: data, as: UTF8.self))
 '''
@@ -2500,6 +2536,68 @@ def require_macos_listing_markers(evidence: dict[str, Any], *, before_navigation
         raise ValueError(f"The real empty Files and Books screen was not visible; Vision saw: {text}")
 
 
+def locate_macos_screen_text(
+    evidence: dict[str, Any],
+    target_text: str,
+    *,
+    window_bounds: list[float],
+    display_points: list[float],
+) -> dict[str, Any]:
+    """Map a visibly OCR-recognized label to a native screen point inside its app window."""
+    image_pixels = evidence.get("image_pixels")
+    regions = evidence.get("recognized_regions")
+    if (not isinstance(image_pixels, list) or len(image_pixels) != 2
+            or any(not isinstance(value, int) or value <= 0 for value in image_pixels)
+            or not isinstance(window_bounds, list) or len(window_bounds) != 4
+            or not isinstance(display_points, list) or len(display_points) != 2
+            or any(not isinstance(value, (int, float)) or value <= 0 for value in display_points)
+            or not isinstance(regions, list)):
+        raise ValueError("Vision text click needs screenshot pixels, app-window bounds, display points, and OCR regions")
+    matches: list[dict[str, Any]] = []
+    for region in regions:
+        if not isinstance(region, dict):
+            continue
+        text = region.get("text")
+        normalized_bounds = region.get("normalized_bounds")
+        if (not isinstance(text, str) or target_text.casefold() not in text.casefold()
+                or not isinstance(normalized_bounds, list) or len(normalized_bounds) != 4
+                or any(not isinstance(value, (int, float)) for value in normalized_bounds)):
+            continue
+        left, bottom, width, height = map(float, normalized_bounds)
+        if width <= 0 or height <= 0 or left < 0 or bottom < 0 or left + width > 1 or bottom + height > 1:
+            continue
+        image_width, image_height = image_pixels
+        point_x = (left + width / 2) * image_width * float(display_points[0]) / image_width
+        point_y = (1 - (bottom + height / 2)) * image_height * float(display_points[1]) / image_height
+        window_x, window_y, window_width, window_height = map(float, window_bounds)
+        if not (window_x <= point_x < window_x + window_width and window_y <= point_y < window_y + window_height):
+            continue
+        matches.append({
+            "text": text,
+            "confidence": region.get("confidence"),
+            "normalized_bounds": [left, bottom, width, height],
+            "screen_point": [round(point_x, 2), round(point_y, 2)],
+            "window_bounds_points": [window_x, window_y, window_width, window_height],
+        })
+    if not matches:
+        raise ValueError(f"Vision found no {target_text!r} text region inside the live Pleazyng window")
+    if len(matches) > 1:
+        matches.sort(key=lambda candidate: float(candidate.get("confidence") or 0), reverse=True)
+        if (matches[0].get("confidence") is not None and matches[1].get("confidence") is not None
+                and float(matches[0]["confidence"]) == float(matches[1]["confidence"])):
+            raise ValueError(f"Vision found multiple equally confident {target_text!r} regions in the app window")
+    return matches[0]
+
+
+def post_macos_native_click(point: list[float]) -> dict[str, Any]:
+    if len(point) != 2 or any(not isinstance(value, (int, float)) or value < 0 for value in point):
+        raise ValueError(f"Native Mac click needs a nonnegative screen coordinate pair: {point}")
+    result = run_macos_swift_json(MACOS_POST_NATIVE_CLICK_SWIFT, [str(point[0]), str(point[1])])
+    if result.get("posted") is not True or result.get("screen_point") != point:
+        raise RuntimeError(f"CoreGraphics did not confirm the requested native click: {result}")
+    return result
+
+
 def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dict[str, Any]]:
     display_mode = run_macos_swift_json(MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT, [])
     display_mode_path = output / "macos-01-files-and-books.display-mode.json"
@@ -2524,23 +2622,58 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         raise RuntimeError(f"Could not launch the retained product app: {(open_result.stderr or open_result.stdout).strip()}")
     app_pid, initial_window_id = _launched_app_pid_and_window(app)
     run(["osascript", "-e", f'tell application id "{BUNDLE_ID}" to activate'], timeout=60)
-    _run_paywall_applescript(app_pid, "wait", "Use files and books")
-
-    with tempfile.TemporaryDirectory(prefix="pleazyng-macos-listing-screen-ocr-") as temporary:
-        before_path = Path(temporary) / "before.png"
-        run(["/usr/sbin/screencapture", "-x", str(before_path)], timeout=60)
-        before_ocr = macos_screen_ocr(before_path)
-        require_macos_listing_markers(before_ocr, before_navigation=True)
-
-        _run_paywall_applescript(app_pid, "click", "Use files and books")
-        _run_paywall_applescript(app_pid, "wait", "Import files")
-        time.sleep(3)
-        after_path = Path(temporary) / "after.png"
-        run(["/usr/sbin/screencapture", "-x", str(after_path)], timeout=60)
-        after_ocr = macos_screen_ocr(after_path)
-        require_macos_listing_markers(after_ocr, before_navigation=False)
-
     display_width, display_height = map(int, mode_points)
+    before_path = output / "macos-01-files-and-books.onboarding-display.png"
+    before_deadline = time.monotonic() + 60
+    while True:
+        run(["/usr/sbin/screencapture", "-x", str(before_path)], timeout=60)
+        before_dimensions = png_dimensions(before_path)
+        if before_dimensions != tuple(map(int, mode_pixels)):
+            raise ValueError(f"The genuine onboarding desktop capture is {before_dimensions}, not native mode {mode_pixels}")
+        before_ocr = macos_screen_ocr(before_path)
+        (output / "macos-01-files-and-books.before-ocr.json").write_text(
+            json.dumps(before_ocr, indent=2) + "\n", encoding="utf-8"
+        )
+        if "Use files and books" in str(before_ocr.get("recognized_text", "")):
+            break
+        if time.monotonic() >= before_deadline:
+            require_macos_listing_markers(before_ocr, before_navigation=True)
+        time.sleep(2)
+    require_macos_listing_markers(before_ocr, before_navigation=True)
+
+    initial_geometry = run_macos_swift_json(
+        MACOS_WINDOW_BOUNDS_SWIFT, [str(app_pid), str(initial_window_id)]
+    )
+    initial_bounds = initial_geometry.get("bounds_points")
+    if (initial_geometry.get("on_screen") is not True or not isinstance(initial_bounds, list)
+            or len(initial_bounds) != 4):
+        raise ValueError(f"The launched Pleazyng window is not available for verified native input: {initial_geometry}")
+    click_target = locate_macos_screen_text(
+        before_ocr, "Use files and books", window_bounds=initial_bounds, display_points=mode_points
+    )
+    click_evidence = post_macos_native_click(click_target["screen_point"])
+    click_record = {"target_region": click_target, "native_event": click_evidence}
+    (output / "macos-01-files-and-books.native-click.json").write_text(
+        json.dumps(click_record, indent=2) + "\n", encoding="utf-8"
+    )
+    after_path = output / "macos-01-files-and-books.after-navigation-display.png"
+    after_deadline = time.monotonic() + 40
+    while True:
+        run(["/usr/sbin/screencapture", "-x", str(after_path)], timeout=60)
+        if png_dimensions(after_path) != tuple(map(int, mode_pixels)):
+            raise ValueError("The genuine post-navigation desktop capture no longer matches the selected native display mode")
+        after_ocr = macos_screen_ocr(after_path)
+        (output / "macos-01-files-and-books.after-navigation-ocr.json").write_text(
+            json.dumps(after_ocr, indent=2) + "\n", encoding="utf-8"
+        )
+        after_text = str(after_ocr.get("recognized_text", ""))
+        if "Import files" in after_text and ("Add a source or import a book" in after_text or "Add source" in after_text):
+            break
+        if time.monotonic() >= after_deadline:
+            require_macos_listing_markers(after_ocr, before_navigation=False)
+        time.sleep(2)
+    require_macos_listing_markers(after_ocr, before_navigation=False)
+
     target_window = {"width": 1440, "height": 900, "x": (display_width - 1440) // 2, "y": (display_height - 900) // 2}
     resize = resize_macos_app_window(app_pid, **target_window)
     final_pid, window_id = _launched_app_pid_and_window(app)
@@ -2574,8 +2707,6 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         raise ValueError(f"Mac App Store screenshots must be opaque RGB PNGs: {screenshot}")
 
     for filename, evidence in (
-        ("macos-01-files-and-books.before-ocr.json", before_ocr),
-        ("macos-01-files-and-books.after-navigation-ocr.json", after_ocr),
         ("macos-01-files-and-books.final-window-ocr.json", final_ocr),
         ("macos-01-files-and-books.window.json", {"resize_request_and_result": resize, **geometry}),
     ):
@@ -2592,6 +2723,9 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
         "window_geometry": geometry,
         "pre_navigation_ocr_file": "macos-01-files-and-books.before-ocr.json",
         "post_navigation_ocr_file": "macos-01-files-and-books.after-navigation-ocr.json",
+        "native_click_file": "macos-01-files-and-books.native-click.json",
+        "initial_window_geometry": initial_geometry,
+        "navigation_input_method": "CoreGraphics CGEvent click centered on the Vision OCR bounds of visible Use files and books text",
         "final_window_ocr_file": "macos-01-files-and-books.final-window-ocr.json",
         "screenshot_dimensions": [width, height],
         "screenshot_png_encoding": png_encoding,
@@ -3308,7 +3442,8 @@ def capture_macos_listing_window(args: argparse.Namespace) -> None:
             "no media server, account, or media was configured."
         ),
         "capture_method": [
-            "System Events clicked the visible Use files and books action; Vision OCR verified the live screen before and after navigation; "
+            "Vision OCR located the visible Use files and books text inside the live product window; a CoreGraphics CGEvent mouse click navigated the real app; "
+            "Vision OCR verified the screen before and after navigation; "
             "the actual app window was resized to 1440x900 points on a native 1920x1080 display and captured with "
             "/usr/sbin/screencapture -x -o -l <app-window-id>"
         ],

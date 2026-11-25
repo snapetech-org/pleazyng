@@ -19,6 +19,7 @@ from capture_apple_store_screenshots import (
     BUNDLE_ID,
     BUILD_NUMBER,
     MACOS_LISTING_OCR_SWIFT,
+    MACOS_POST_NATIVE_CLICK_SWIFT,
     MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT,
     MACOS_WINDOW_BOUNDS_SWIFT,
     SOURCE_SHA,
@@ -773,12 +774,40 @@ class MacListingCaptureTests(unittest.TestCase):
         self.assertIn('"target_native_window_points": [1440, 900]', MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
         self.assertIn("CGWindowListCopyWindowInfo", MACOS_WINDOW_BOUNDS_SWIFT)
         self.assertIn("VNRecognizeTextRequest()", MACOS_LISTING_OCR_SWIFT)
+        self.assertIn("normalized_bounds", MACOS_LISTING_OCR_SWIFT)
         self.assertIn('"recognized_lines": lines', MACOS_LISTING_OCR_SWIFT)
+        self.assertIn("CGEvent(mouseEventSource", MACOS_POST_NATIVE_CLICK_SWIFT)
+        self.assertNotIn("System Events", MACOS_POST_NATIVE_CLICK_SWIFT)
         self.assertIn("Use files and books", capture.require_macos_listing_markers.__code__.co_consts)
         self.assertIn("Import files", capture.require_macos_listing_markers.__code__.co_consts)
         self.assertIn("/usr/sbin/screencapture", capture.run_macos_listing_window_capture.__code__.co_consts)
         self.assertNotIn("StoreKit", MACOS_LISTING_OCR_SWIFT)
         self.assertNotIn("XCUITest", capture.run_macos_listing_window_capture.__code__.co_consts)
+
+    def test_mac_native_click_point_comes_from_visible_ocr_inside_product_window(self) -> None:
+        evidence = {
+            "image_pixels": [1920, 1080],
+            "recognized_regions": [{
+                "text": "Use files and books",
+                "confidence": 0.98,
+                "normalized_bounds": [0.4, 0.48, 0.2, 0.04],
+            }],
+        }
+        point = capture.locate_macos_screen_text(
+            evidence,
+            "Use files and books",
+            window_bounds=[300, 300, 1320, 500],
+            display_points=[1920, 1080],
+        )
+        self.assertEqual([960.0, 540.0], point["screen_point"])
+
+        with self.assertRaisesRegex(ValueError, "inside the live Pleazyng window"):
+            capture.locate_macos_screen_text(
+                evidence,
+                "Use files and books",
+                window_bounds=[1000, 700, 300, 200],
+                display_points=[1920, 1080],
+            )
 
     def test_mac_listing_export_keeps_accepted_dimensions_and_rgb_provenance(self) -> None:
         self.assertIn("normalize_opaque_rgb_png", capture.run_macos_listing_window_capture.__code__.co_names)
