@@ -39,6 +39,9 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       homebrew_enabled: ${{ steps.release.outputs.homebrew_enabled }}
       homebrew_skip_reason: ${{ steps.release.outputs.homebrew_skip_reason }}
+      homebrew_asset: ${{ steps.release.outputs.homebrew_asset }}
+      homebrew_checksums: ${{ steps.release.outputs.homebrew_checksums }}
+      homebrew_recovery: ${{ steps.release.outputs.homebrew_recovery }}
     steps:
       - name: Require the default branch for manual runs
         if: github.event_name == 'workflow_dispatch'
@@ -126,12 +129,31 @@ jobs:
           fi
 
           HAS_CASK_CANDIDATE=$(jq -r '[.assets[]?.name] | any(. == "snapetech-pleazyng.rb")' <<< "$RELEASE")
+          RECOVERY_ASSET_COUNT=$(jq -r '[.assets[]?.name] | map(select(. == "pleazyng-macos-notarized.dmg" or . == "pleazyng-homebrew-SHA256SUMS.txt" or . == "pleazyng-homebrew-recovery.json")) | unique | length' <<< "$RELEASE")
+          if [[ "$RECOVERY_ASSET_COUNT" != 0 && "$RECOVERY_ASSET_COUNT" != 3 ]]; then
+            echo "Release $RESOLVED_TAG contains an incomplete Homebrew recovery asset set." >&2
+            exit 1
+          fi
+          if [[ "$RECOVERY_ASSET_COUNT" == 3 && "$HAS_CASK_CANDIDATE" != true ]]; then
+            echo "Release $RESOLVED_TAG has Homebrew recovery assets but no attested Cask candidate." >&2
+            exit 1
+          fi
           SKIP_REASONS=()
           if [[ "$HAS_CASK_CANDIDATE" != "true" ]]; then
             SKIP_REASONS+=("No snapetech-pleazyng.rb candidate is attached to this release.")
           fi
           if [[ "$CREDENTIALS_READY" != "true" ]]; then
             SKIP_REASONS+=("Developer ID signing, notarization, or HOMEBREW_TAP_TOKEN is missing.")
+          fi
+
+          if [[ "$RECOVERY_ASSET_COUNT" == 3 ]]; then
+            echo "homebrew_asset=pleazyng-macos-notarized.dmg" >> "$GITHUB_OUTPUT"
+            echo "homebrew_checksums=pleazyng-homebrew-SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
+            echo "homebrew_recovery=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "homebrew_asset=pleazyng-macos.dmg" >> "$GITHUB_OUTPUT"
+            echo "homebrew_checksums=SHA256SUMS.txt" >> "$GITHUB_OUTPUT"
+            echo "homebrew_recovery=false" >> "$GITHUB_OUTPUT"
           fi
 
           if ((${#SKIP_REASONS[@]})); then
@@ -161,6 +183,9 @@ jobs:
     env:
       RELEASE_TAG: ${{ needs.resolve-release.outputs.tag }}
       RELEASE_VERSION: ${{ needs.resolve-release.outputs.version }}
+      HOMEBREW_ASSET_NAME: ${{ needs.resolve-release.outputs.homebrew_asset }}
+      HOMEBREW_CHECKSUMS_NAME: ${{ needs.resolve-release.outputs.homebrew_checksums }}
+      HOMEBREW_RECOVERY: ${{ needs.resolve-release.outputs.homebrew_recovery }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -173,25 +198,40 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pleazyng-homebrew"
           cd "$RUNNER_TEMP/pleazyng-homebrew"
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern pleazyng-macos.dmg --pattern SHA256SUMS.txt \
-            --pattern snapetech-pleazyng.rb
+          patterns=(--pattern "$HOMEBREW_ASSET_NAME" --pattern "$HOMEBREW_CHECKSUMS_NAME" \
+            --pattern snapetech-pleazyng.rb)
+          if [[ "$HOMEBREW_RECOVERY" == true ]]; then
+            patterns+=(--pattern SHA256SUMS.txt --pattern platform-reuse-provenance.json \
+              --pattern pleazyng-homebrew-recovery.json)
+          fi
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "${patterns[@]}"
           python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" snapetech-pleazyng.rb \
             --repo "$GITHUB_REPOSITORY" --repository-output "$RUNNER_TEMP/cask-publisher-repository.txt"
           python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY"
+          if [[ "$HOMEBREW_RECOVERY" == true ]]; then
+            python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" "$HOMEBREW_ASSET_NAME" --repo "$GITHUB_REPOSITORY"
+            python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" "$HOMEBREW_CHECKSUMS_NAME" --repo "$GITHUB_REPOSITORY"
+            python3 "$GITHUB_WORKSPACE/scripts/verify_release_attestation.py" pleazyng-homebrew-recovery.json --repo "$GITHUB_REPOSITORY"
+            python3 "$GITHUB_WORKSPACE/scripts/recover_macos_dmg_for_homebrew.py" verify \
+              --tag "$RELEASE_TAG" --version "$RELEASE_VERSION" \
+              --core-checksums SHA256SUMS.txt --homebrew-checksums "$HOMEBREW_CHECKSUMS_NAME" \
+              --platform-reuse platform-reuse-provenance.json \
+              --receipt pleazyng-homebrew-recovery.json --asset "$HOMEBREW_ASSET_NAME"
+          fi
           python3 "$GITHUB_WORKSPACE/scripts/generate_homebrew_cask.py" \
-            --version "$RELEASE_VERSION" --checksums SHA256SUMS.txt --output expected.rb \
+            --version "$RELEASE_VERSION" --checksums "$HOMEBREW_CHECKSUMS_NAME" \
+            --asset-name "$HOMEBREW_ASSET_NAME" --output expected.rb \
             --publisher-repository-file "$RUNNER_TEMP/cask-publisher-repository.txt"
           cmp expected.rb snapetech-pleazyng.rb
-          EXPECTED_SHA=$(awk '$2 == "pleazyng-macos.dmg" {print $1}' SHA256SUMS.txt)
-          ACTUAL_SHA=$(shasum -a 256 pleazyng-macos.dmg | cut -d' ' -f1)
+          EXPECTED_SHA=$(awk -v name="$HOMEBREW_ASSET_NAME" '$2 == name {print $1; count++} END {if (count != 1) exit 1}' "$HOMEBREW_CHECKSUMS_NAME")
+          ACTUAL_SHA=$(shasum -a 256 "$HOMEBREW_ASSET_NAME" | cut -d' ' -f1)
           test "$ACTUAL_SHA" = "$EXPECTED_SHA"
           # The released app carries its notarization ticket; the outer DMG
           # does not need a second ticket. Verify the exact immutable payload.
           mountpoint="$RUNNER_TEMP/pleazyng-homebrew/mounted"
           mkdir -p "$mountpoint"
           trap 'hdiutil detach "$mountpoint" || true' EXIT
-          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" pleazyng-macos.dmg
+          hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$HOMEBREW_ASSET_NAME"
           app="$mountpoint/Pleazyng.app"
           test -d "$app"
           codesign --verify --deep --strict --verbose=2 \
@@ -211,6 +251,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p Casks
+          python3 "$GITHUB_WORKSPACE/scripts/check_homebrew_cask_update.py" \
+            --version "$RELEASE_VERSION" \
+            --current Casks/snapetech-pleazyng.rb \
+            --candidate "$RUNNER_TEMP/pleazyng-homebrew/snapetech-pleazyng.rb"
           cp "$RUNNER_TEMP/pleazyng-homebrew/snapetech-pleazyng.rb" Casks/snapetech-pleazyng.rb
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

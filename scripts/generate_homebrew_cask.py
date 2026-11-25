@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-SHA_PATTERN = re.compile(r"^([0-9a-fA-F]{64})\s+pleazyng-macos\.dmg$")
+ASSET_NAMES = frozenset({"pleazyng-macos.dmg", "pleazyng-macos-notarized.dmg"})
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "Casks" / "snapetech-pleazyng.rb.template"
 
 
@@ -16,6 +16,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True, help="stable MAJOR.MINOR.PATCH release version")
     parser.add_argument("--checksums", required=True, type=Path, help="release SHA256SUMS.txt")
+    parser.add_argument("--asset-name", choices=sorted(ASSET_NAMES), default="pleazyng-macos.dmg",
+                        help="versioned release DMG to pin (defaults to the core release asset)")
     parser.add_argument("--output", required=True, type=Path, help="path for the rendered Cask file")
     parser.add_argument("--publisher-repository-file", type=Path,
                         help="publisher identity produced by verify_release_attestation.py")
@@ -26,13 +28,14 @@ def main() -> int:
     if not args.checksums.is_file():
         parser.error(f"checksum manifest does not exist: {args.checksums}")
 
+    expected_pattern = re.compile(rf"^([0-9a-fA-F]{{64}})\s+{re.escape(args.asset_name)}$")
     matches = [
         match.group(1).lower()
         for line in args.checksums.read_text(encoding="utf-8").splitlines()
-        if (match := SHA_PATTERN.fullmatch(line.strip()))
+        if (match := expected_pattern.fullmatch(line.strip()))
     ]
     if len(matches) != 1:
-        parser.error("checksum manifest must contain exactly one SHA-256 entry for pleazyng-macos.dmg")
+        parser.error(f"checksum manifest must contain exactly one SHA-256 entry for {args.asset_name}")
 
     if not TEMPLATE_PATH.is_file():
         parser.error(f"Cask template does not exist: {TEMPLATE_PATH}")
@@ -42,10 +45,13 @@ def main() -> int:
         if publisher not in {"snapetech-org/pleazyng", "snapetech-org/PlezyNG"}:
             parser.error("unrecognized Cask publisher repository")
         template = template.replace("snapetech-org/pleazyng", publisher)
-    if template.count("@@VERSION@@") != 1 or template.count("@@SHA256@@") != 1:
-        parser.error("Cask template must contain one version placeholder and one SHA-256 placeholder")
+    if (template.count("@@VERSION@@") != 1 or template.count("@@SHA256@@") != 1
+            or template.count("@@ASSET_NAME@@") != 1):
+        parser.error("Cask template must contain one version, SHA-256 and asset-name placeholder")
 
-    rendered = template.replace("@@VERSION@@", args.version).replace("@@SHA256@@", matches[0])
+    rendered = (template.replace("@@VERSION@@", args.version)
+                .replace("@@SHA256@@", matches[0])
+                .replace("@@ASSET_NAME@@", args.asset_name))
     if "@@" in rendered:
         parser.error("rendered Cask contains an unresolved placeholder")
 

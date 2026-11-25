@@ -11,14 +11,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class CaskPublisherTests(unittest.TestCase):
-    def render(self, publisher=None):
+    def render(self, publisher=None, asset_name="pleazyng-macos.dmg"):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             checksums = root / "SHA256SUMS.txt"
-            checksums.write_text("a" * 64 + "  pleazyng-macos.dmg\n")
+            checksums.write_text("a" * 64 + f"  {asset_name}\n")
             output = root / "cask.rb"
             command = [sys.executable, str(ROOT / "scripts/generate_homebrew_cask.py"),
                        "--version", "3.0.5", "--checksums", str(checksums), "--output", str(output)]
+            if asset_name != "pleazyng-macos.dmg":
+                command += ["--asset-name", asset_name]
             if publisher is not None:
                 identity = root / "publisher.txt"
                 identity.write_text(publisher + "\n")
@@ -39,6 +41,16 @@ class CaskPublisherTests(unittest.TestCase):
 
     def test_unrelated_publisher_cannot_change_the_download_origin(self):
         result, text = self.render("another/project")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(text)
+
+    def test_notarized_recovery_asset_is_version_pinned(self):
+        result, text = self.render(asset_name="pleazyng-macos-notarized.dmg")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("releases/download/v#{version}/pleazyng-macos-notarized.dmg", text)
+
+    def test_unknown_download_asset_is_rejected(self):
+        result, text = self.render(asset_name="moving-latest.dmg")
         self.assertNotEqual(result.returncode, 0)
         self.assertIsNone(text)
 

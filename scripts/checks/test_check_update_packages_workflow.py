@@ -16,9 +16,15 @@ class UpdatePackagesWorkflowTest(unittest.TestCase):
     def run_guard(self, text: str) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            workflow = root / ".github/workflows/update-packages.yml"
-            workflow.parent.mkdir(parents=True)
+            workflow_dir = root / ".github/workflows"
+            workflow_dir.mkdir(parents=True)
+            workflow = workflow_dir / "update-packages.yml"
             workflow.write_text(text)
+            shutil.copyfile(WORKFLOW.parent / "recover-homebrew-cask-v3051.yml",
+                            workflow_dir / "recover-homebrew-cask-v3051.yml")
+            (root / "scripts").mkdir()
+            shutil.copyfile(ROOT / "scripts/recover_macos_dmg_for_homebrew.py",
+                            root / "scripts/recover_macos_dmg_for_homebrew.py")
             scripts = root / "scripts/checks"
             scripts.mkdir(parents=True)
             for name in ("check_update_packages_workflow.py", "workflow_yaml.py"):

@@ -2,7 +2,7 @@ cask "snapetech-pleazyng" do
   version "@@VERSION@@"
   sha256 "@@SHA256@@"
 
-  url "https://github.com/snapetech-org/pleazyng/releases/download/v#{version}/pleazyng-macos.dmg"
+  url "https://github.com/snapetech-org/pleazyng/releases/download/v#{version}/@@ASSET_NAME@@"
   name "Pleazyng"
   desc "Media client for Plex, Jellyfin, and Emby"
   homepage "https://github.com/snapetech-org/pleazyng"

@@ -8,7 +8,35 @@ The macOS product bundle is `Pleazyng.app`, and the release disk image is `pleaz
 - Configure `MACOS_CERTIFICATE_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`, `APPLE_API_PRIVATE_KEY`, and `APPLE_TEAM_ID` as repository or organization secrets. The ordinary release path stays optional-signing; the Homebrew option fails closed if any signing or notarization credential is missing.
 - Dispatch the workflow against a stable `vMAJOR.MINOR.PATCH` tag with action `release` and mode `release`, then enable `prepare_homebrew_cask`.
 - The run attaches `snapetech-pleazyng.rb` to the draft release and attests that candidate. Publish the release before submitting or installing the Cask because Homebrew must be able to fetch the versioned DMG from the public release URL.
-- Verify the published `pleazyng-macos.dmg` checksum matches the `sha256` in the candidate and confirm the asset URL uses the `vMAJOR.MINOR.PATCH` release tag.
+- Verify the published DMG checksum matches the `sha256` in the candidate and confirm the asset URL uses the `vMAJOR.MINOR.PATCH` release tag. Ordinary qualified releases use `pleazyng-macos.dmg` and the core `SHA256SUMS.txt` manifest.
+
+## v3.0.51 notarization recovery
+
+The v3.0.51 core release contains an unsigned universal macOS DMG. Recover its
+Homebrew payload with the focused **Recover v3.0.51 Homebrew Cask** workflow on
+`main`; do not rebuild the app or replace any existing release asset. The
+workflow verifies the attested core checksum manifest, the exact released DMG,
+the release assembly, and the original trusted macOS compilation checkpoint.
+It checks that the app tree inside the published DMG exactly matches that
+checkpoint, then signs and notarizes a working copy on the public hosted macOS
+runner. The signed result is published as the distinct
+`pleazyng-macos-notarized.dmg` asset with an attested
+`pleazyng-homebrew-SHA256SUMS.txt` manifest and
+`pleazyng-homebrew-recovery.json` receipt. The original
+`pleazyng-macos.dmg` and `SHA256SUMS.txt` remain unchanged.
+
+Update the custom tap only after all supplemental assets are attached:
+
+```sh
+gh workflow run update-packages.yml --repo snapetech-org/pleazyng --ref main \
+  -f action=update-packages -f runner_pool=public -f release_tag=v3.0.51
+```
+
+The package workflow verifies the supplemental asset attestations, recovery
+receipt, manifest, signature, stapled ticket, and Gatekeeper assessment. Its
+Cask points to the version-pinned supplemental DMG. Tap publication rejects a
+version rollback and rejects different bytes for an already-published version.
+Do not upload with `--clobber` or edit the original core checksum manifest.
 
 The Developer ID Application certificate was issued on 2026-11-05 for team `DM9A59DC85`, and the two dedicated macOS certificate secrets are configured. Existing iOS distribution credentials are separate and remain unchanged. Notarization uses the existing App Store Connect API key; an Apple app-specific password and persistent keychain password are not required. Native import, signing, notarization and Gatekeeper still need to pass on the qualified release.
 
@@ -20,8 +48,9 @@ all Developer ID, notarization, and tap credentials are configured. If the
 candidate is absent, the controller records Homebrew Cask as skipped. A direct
 `update-packages.yml` dispatch also reports a no-op when its release has no
 Cask candidate or the publisher credentials are incomplete. When enabled, the
-workflow verifies the candidate attestation, the checksum manifest, and the
-signed, notarized DMG before writing the tap.
+workflow verifies the candidate attestation, the selected checksum manifest,
+and the signed, notarized DMG before writing the tap. For v3.0.51 recovery it
+selects the separately attested supplemental DMG and manifest.
 
 The Sparkle `appcast.xml` is generated and attached by the core release for
 every version; skipping Cask publication does not affect updater-feed delivery.
