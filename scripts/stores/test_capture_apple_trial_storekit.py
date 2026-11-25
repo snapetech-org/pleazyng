@@ -36,7 +36,8 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         )
         self.assertIn('app.buttons["Open media"]', UI_TEST)
         self.assertIn('app.textFields["Media address"]', UI_TEST)
-        self.assertIn('"openMediaFormKeychainWarningVisible": openMediaFormHasKeychainWarning', UI_TEST)
+        self.assertIn('XCTAssertFalse(keychainWarning.exists,', UI_TEST)
+        self.assertIn('appBehavior["openMediaFormKeychainWarningVisible"] = keychainWarning.exists', UI_TEST)
         self.assertIn('attachScreenshot(of: app, named: "pleazyng-open-media-form-localtest")', UI_TEST)
 
     def test_full_source_sha_is_required(self) -> None:
@@ -1010,7 +1011,7 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('trialButton.tap()', UI_TEST)
         self.assertNotIn("XCTAssertTrue(trialButton.isHittable", UI_TEST)
         self.assertIn("verified LOCALTEST transaction", UI_TEST)
-        self.assertIn("localFilesScreenOpened", UI_TEST)
+        self.assertIn('appBehavior["localFilesAndBooksScreenOpened"] = addSource.exists', UI_TEST)
         self.assertNotIn("trialButton.isEnabled", UI_TEST)
         self.assertIn('Restore lifetime purchase', UI_TEST)
         self.assertIn('pleazyng-trial-offer-localtest', UI_TEST)
@@ -1018,11 +1019,10 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('pleazyng-trial-active-supporter-localtest', UI_TEST)
         self.assertIn('pleazyng-open-media-form-localtest', UI_TEST)
         self.assertIn('app.textFields["Display name (optional)"]', UI_TEST)
-        self.assertIn('"openMediaFormSystemAlertVisible": openMediaFormHasSystemAlert', UI_TEST)
-        self.assertIn("let restoreActionTapCompleted = true", UI_TEST)
+        self.assertIn('appBehavior["openMediaFormSystemAlertVisible"] = app.alerts.firstMatch.exists', UI_TEST)
         self.assertNotIn("restoreBusy", UI_TEST)
         self.assertNotIn("restoreIdle", UI_TEST)
-        self.assertIn('"restoreActionTapCompleted": restoreActionTapCompleted', UI_TEST)
+        self.assertIn('appBehavior["restoreActionTapCompleted"] = true', UI_TEST)
         self.assertIn('"restoreActionTiming"', UI_TEST)
         self.assertIn('"tapReturnedAtEpochMilliseconds"', UI_TEST)
         self.assertIn('"preRelaunchAtEpochMilliseconds"', UI_TEST)
@@ -1047,7 +1047,8 @@ class AppleTrialStoreKitCaptureTests(unittest.TestCase):
         self.assertIn('tapWhenHittable(lifetimeTile, in: app', UI_TEST)
         self.assertIn('app.swipeUp()', UI_TEST)
         self.assertNotIn("session.buyProduct", UI_TEST)
-        self.assertNotIn('localLifetimePrice.tap()', UI_TEST)
+        self.assertNotIn('lifetimePrice.tap()', UI_TEST)
+        self.assertNotIn('lifetimeOffer(in: app).tap()', UI_TEST)
         self.assertNotIn('buyProduct(productIdentifier: lifetimeProductID)', UI_TEST)
 
     def test_workflow_is_main_only_hosted_ios_with_one_code_signed_product_build(self) -> None:
