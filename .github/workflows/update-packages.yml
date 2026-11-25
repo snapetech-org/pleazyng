@@ -187,7 +187,8 @@ jobs:
   update-homebrew:
     needs: resolve-release
     if: needs.resolve-release.outputs.homebrew_enabled == 'true'
-    runs-on: macos-15
+    # This job verifies the universal app's signature and notarization without running it.
+    runs-on: macos-26-intel
     permissions:
       contents: read
       attestations: read
