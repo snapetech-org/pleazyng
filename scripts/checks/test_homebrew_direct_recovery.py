@@ -225,13 +225,23 @@ class DirectHomebrewRecoveryTests(unittest.TestCase):
                 proof.write_text(json.dumps({
                     "source_run_id": source_run_id,
                     "source_sha": source,
-                    "head_sha": assembly_sha,
+                    "head_sha": source,
                     "run_attempt": 3,
                     "version": "3.0.52",
                     "reused_jobs": ["build-macos"],
                     "macos_cask_qualified": False,
+                    "qualification_run_id": 42,
+                    "qualification_assembly_run_id": 888,
+                    "assembly_run_id": assembly_run_id,
+                    "actual_checkout_sha": assembly_sha,
                 }))
                 recovery.verify_platform_reuse(proof, facts)
+                wrong_workflow = {**json.loads(proof.read_text()), "actual_checkout_sha": "a" * 40}
+                original = proof.read_text()
+                proof.write_text(json.dumps(wrong_workflow))
+                with self.assertRaisesRegex(ValueError, "different assembly continuation"):
+                    recovery.verify_platform_reuse(proof, facts)
+                proof.write_text(original)
                 wrong_source = json.loads(proof.read_text())
                 wrong_source["source_run_id"] = source_run_id + 1
                 proof.write_text(json.dumps(wrong_source))

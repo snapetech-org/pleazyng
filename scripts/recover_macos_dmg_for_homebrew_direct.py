@@ -342,15 +342,27 @@ def verify_platform_reuse(path: Path, facts: dict) -> None:
     proof = json.loads(path.read_text(encoding="utf-8"))
     source_run = facts["run"]
     assembly = facts["core_run"]
+    qualification = re.search(
+        r":qualification:([1-9][0-9]*)(?::assembly:([1-9][0-9]*)|:rebuild-tvos)?$",
+        assembly.get("display_title", ""),
+    )
+    expected_head = facts["source_sha"] if qualification else assembly.get("head_sha")
     if (
         proof.get("source_run_id") != source_run.get("id")
         or proof.get("source_sha") != facts["source_sha"]
         or proof.get("version") != facts["version"]
         or proof.get("macos_cask_qualified") is not False
         or "build-macos" not in proof.get("reused_jobs", [])
-        or proof.get("head_sha") != assembly.get("head_sha")
+        or proof.get("head_sha") != expected_head
+        or (qualification and proof.get("qualification_run_id") != int(qualification[1]))
     ):
         raise ValueError("Attested platform-reuse proof does not bind the exact Mac source and assembly")
+    if qualification and qualification[2] and (
+        proof.get("qualification_assembly_run_id") != int(qualification[2])
+        or proof.get("assembly_run_id") != assembly.get("id")
+        or proof.get("actual_checkout_sha") != assembly.get("head_sha")
+    ):
+        raise ValueError("Platform-reuse proof identifies a different assembly continuation")
     current = api(f"actions/runs/{source_run['id']}")
     current_attempt = current.get("run_attempt")
     if (
