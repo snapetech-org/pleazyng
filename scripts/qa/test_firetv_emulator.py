@@ -78,9 +78,16 @@ def main() -> int:
             raise RuntimeError(f'APK installation did not report success: {install}')
         result['checks']['install'] = 'passed'
 
-        launch = adb(args.serial, 'shell', 'am', 'start', '-W', '-a',
-                     'android.intent.action.MAIN', '-c', 'android.intent.category.LEANBACK_LAUNCHER',
-                     '-p', PACKAGE, timeout=90)
+        leanback_intent = ('-a', 'android.intent.action.MAIN',
+                           '-c', 'android.intent.category.LEANBACK_LAUNCHER')
+        # TV launchers resolve launcher filters without MATCH_DEFAULT_ONLY.
+        resolved = adb(args.serial, 'shell', 'cmd', 'package', 'resolve-activity',
+                       '--brief', '--query-flags', '0', *leanback_intent, '-p', PACKAGE).splitlines()
+        component = resolved[-1] if resolved else ''
+        if not re.fullmatch(re.escape(PACKAGE) + r'/[A-Za-z0-9_.$]+', component):
+            raise RuntimeError('The installed APK has no enabled Leanback launcher activity.')
+        launch = adb(args.serial, 'shell', 'am', 'start', '-W', *leanback_intent,
+                     '-n', component, timeout=90)
         if 'Status: ok' not in launch:
             raise RuntimeError(f'Leanback launch intent failed: {launch}')
         result['checks']['leanback_launch'] = 'passed'
@@ -90,14 +97,12 @@ def main() -> int:
         while time.monotonic() < deadline:
             pid = adb(args.serial, 'shell', 'pidof', PACKAGE, check=False)
             activities = adb(args.serial, 'shell', 'dumpsys', 'activity', 'activities', check=False)
-            if pid and PACKAGE in activities and ('mResumedActivity' in activities or 'topResumedActivity' in activities):
+            if pid and any(PACKAGE in line and ('mResumedActivity' in line or 'topResumedActivity' in line)
+                           for line in activities.splitlines()):
                 break
             time.sleep(2)
-        if not pid:
-            raise RuntimeError('Pleazyng process did not remain alive after launch.')
-        if not any(PACKAGE in line and ('mResumedActivity' in line or 'topResumedActivity' in line)
-                   for line in activities.splitlines()):
-            raise RuntimeError('Pleazyng did not become the resumed activity after launch.')
+        else:
+            raise RuntimeError('Pleazyng did not stay alive as the resumed activity after launch.')
         result['checks']['foreground_process'] = 'passed'
 
         for key in TV_KEYS:

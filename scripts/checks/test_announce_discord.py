@@ -171,7 +171,8 @@ class DiscordDeliveryTest(unittest.TestCase):
             with self.subTest(draft=draft), patch.object(publisher, "release_metadata", side_effect=[{**release(), "draft": draft}, release()]), patch.object(publisher, "command") as command:
                 publisher.publish_github_release("v3.0.0")
                 self.assertFalse(any(call.args[0][:3] == ["gh", "workflow", "run"] for call in command.call_args_list))
-                with patch.object(publisher, "dispatch_automatic_play", return_value=None):
+                with patch.object(publisher, "dispatch_automatic_play", return_value=None), \
+                     patch.object(publisher, "dispatch_automatic_amazon", return_value=None):
                     publisher.post_release_actions("v3.0.0", "3.0.0", release_sha="a" * 40,
                         include_webos_release=True, publish_channels=False)
                 dispatch = command.call_args.args[0]

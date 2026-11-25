@@ -1,0 +1,60 @@
+name: Deliver releases to Amazon Appstore
+
+on:
+  release:
+    types: [published]
+  schedule:
+    - cron: '37 * * * *'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published version tag (empty checks the latest release)
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: amazon-appstore-release-reconciliation
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  dispatch:
+    if: github.repository == 'snapetech-org/pleazyng' && vars.AMAZON_APPSTORE_BOOTSTRAP_COMPLETE == 'true' && github.event.release.prerelease != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch a missing Amazon submission on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          tag="$RELEASE_TAG"
+          if [[ -z "$tag" ]]; then
+            tag=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a stable release tag." >&2
+            exit 1
+          fi
+          published=$(gh api "repos/$repo/releases/tags/$tag" \
+            --jq 'select(.draft == false and .prerelease == false) | .published_at')
+          if [[ -z "$published" ]]; then
+            echo "Amazon delivery requires a published stable release." >&2
+            exit 1
+          fi
+          title="action:publish-app-stores:pool:public:tag:$tag:channel:amazon-appstore:mode:submit"
+          runs=$(gh api --method GET --paginate "repos/$repo/actions/workflows/publish-app-stores.yml/runs" \
+            -f branch=main -f event=workflow_dispatch -f per_page=100 -f created=">=${published%%T*}" \
+            | jq -s --arg title "$title" '[.[].workflow_runs[] | select(.display_title == $title)]')
+          if jq -e 'any(.[]; .conclusion == "success" or .status != "completed")' <<< "$runs" >/dev/null; then
+            echo "Amazon submission for $tag already succeeded or has a run in progress."
+            exit 0
+          fi
+          gh workflow run publish-app-stores.yml --repo "$repo" --ref main \
+            -f action=publish-app-stores -f runner_pool=public -f release_tag="$tag" \
+            -f channel=amazon-appstore -f amazon_mode=submit -f play_track=internal -f play_release_status=draft

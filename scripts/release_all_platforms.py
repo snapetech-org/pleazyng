@@ -9,7 +9,7 @@ It uses the operator's authenticated
 With --publish, it promotes the verified draft and runs every configured
 package/store publication workflow from main, with bounded concurrency across independent destinations.
 Both publication modes also run the automatic post-release lanes: configured
-Google Play delivery, aerynOS reconciliation, and the Discord announcement
+Google Play and Amazon Appstore delivery, aerynOS reconciliation, and the Discord announcement
 unless it is explicitly disabled.
 `--publish-github-only` skips only the configured manual package/store lanes.
 """
@@ -2735,6 +2735,16 @@ def dispatch_automatic_play(tag: str) -> dict | None:
     return {"tag": tag, "workflow": "deliver-google-play.yml", "state": "dispatched"}
 
 
+def dispatch_automatic_amazon(tag: str) -> dict | None:
+    """Wake the Amazon delivery workflow for a verified GitHub publication."""
+    if configured_repo_variables().get("AMAZON_APPSTORE_BOOTSTRAP_COMPLETE") != "true":
+        return None
+    workflow = "deliver-amazon-appstore.yml"
+    command(["gh", "workflow", "run", workflow, "--repo", PLEZY_REPO,
+             "--ref", "main", "-f", f"release_tag={tag}"])
+    return {"tag": tag, "workflow": workflow, "state": "dispatched"}
+
+
 def dispatch_aerynos_delivery(tag: str) -> dict:
     """Wake the independent qualified package consumer after core publication."""
     command(["gh", "workflow", "run", "reconcile.yml", "--repo", "snapetech-org/pleazyng-aerynos",
@@ -2767,13 +2777,20 @@ def post_release_actions(tag: str, version: str, *, release_sha: str,
     """Retryable delivery follows the already verified GitHub publication."""
     result = {"published_channels": [], "skipped_channels": [],
               "channel_failures": [], "notification_failures": [], "google_play_automation": [],
-              "aerynos_automation": [], "discord_notification_requested": notify_discord}
+              "amazon_appstore_automation": [], "aerynos_automation": [],
+              "discord_notification_requested": notify_discord}
     try:
         play = dispatch_automatic_play(tag)
         if play:
             result["google_play_automation"].append(play)
     except Exception as error:
         result["channel_failures"].append(f"Automatic Google Play delivery: {error}")
+    try:
+        amazon = dispatch_automatic_amazon(tag)
+        if amazon:
+            result["amazon_appstore_automation"].append(amazon)
+    except Exception as error:
+        result["channel_failures"].append(f"Automatic Amazon Appstore delivery: {error}")
     try:
         result["aerynos_automation"].append(dispatch_aerynos_delivery(tag))
     except Exception as error:
@@ -2801,7 +2818,7 @@ def post_release_actions(tag: str, version: str, *, release_sha: str,
         result["skipped_channels"] = [{
             "channel": "configured manual release channels",
             "reason": (
-                "--publish-github-only selected; automatic Play delivery (when enabled), aerynOS "
+                "--publish-github-only selected; automatic Play and Amazon delivery (when enabled), aerynOS "
                 "reconciliation, and the Discord notice (unless skipped) are reported separately."
             ),
         }]
@@ -3031,16 +3048,6 @@ def publish_configured_channels(
                        "channel": "google-play-automotive", "play_track": play_track, "play_release_status": play_status},
             "secrets": {"GOOGLE_PLAY_SERVICE_ACCOUNT_JSON"}, "variables": set(),
             "assets": {"pleazyng-automotive-play.aab", "SHA256SUMS.txt"},
-        },
-        {
-            "name": "Amazon Appstore upload",
-            "readiness_flag": "AMAZON_APPSTORE_BOOTSTRAP_COMPLETE",
-            "workflow": "publish-app-stores.yml",
-            "title": f"action:publish-app-stores:pool:public:tag:{tag}:channel:amazon-appstore",
-            "fields": {"action": "publish-app-stores", "runner_pool": "public", "release_tag": tag,
-                       "channel": "amazon-appstore", "play_track": "internal", "play_release_status": "draft"},
-            "secrets": {"AMAZON_APPSTORE_CLIENT_ID", "AMAZON_APPSTORE_CLIENT_SECRET"}, "variables": {"AMAZON_APPSTORE_APP_ID"},
-            "assets": {"pleazyng-amazon-firetv.apk", "SHA256SUMS.txt"},
         },
         {
             "name": "Apple App Store Connect iOS upload",
@@ -3810,6 +3817,7 @@ def main() -> int:
         skipped_channels: list[dict] = []
         channel_failures: list[str] = []
         notification_failures: list[str] = []
+        amazon_appstore_automation: list[dict] = []
         aerynos_automation: list[dict] = []
         publication_facts_commit = None
         publication_facts_failures: list[str] = []
@@ -3850,6 +3858,7 @@ def main() -> int:
             skipped_channels = followups["skipped_channels"]
             channel_failures = followups["channel_failures"]
             notification_failures = followups["notification_failures"]
+            amazon_appstore_automation = followups.get("amazon_appstore_automation", [])
             aerynos_automation = followups.get("aerynos_automation", [])
             progress.update(followups)
             save_progress()
@@ -3903,6 +3912,7 @@ def main() -> int:
             "channel_failures": channel_failures,
             "notification_failures": notification_failures,
             "discord_notification_requested": not args.skip_discord_notification,
+            "amazon_appstore_automation": amazon_appstore_automation,
             "aerynos_automation": aerynos_automation,
             "publication_facts_commit": publication_facts_commit,
             "publication_facts_failures": publication_facts_failures,

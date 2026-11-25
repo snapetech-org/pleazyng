@@ -147,6 +147,7 @@ class SigningOptionsTests(unittest.TestCase):
             stack.enter_context(patch.object(release, "gh_json", return_value={"commit": {"sha": "b" * 40}}))
             stack.enter_context(patch.object(release, "refresh_latest_published_facts", return_value="b" * 40))
             stack.enter_context(patch.object(release, "dispatch_automatic_play", return_value=None))
+            stack.enter_context(patch.object(release, "dispatch_automatic_amazon", return_value=None))
             stack.enter_context(patch.object(release, "dispatch_aerynos_delivery", return_value={}))
             stack.enter_context(patch.object(release, "ensure_ci", return_value={"databaseId": 1}))
             build = stack.enter_context(patch.object(release, "ensure_release", return_value={"databaseId": 2}))

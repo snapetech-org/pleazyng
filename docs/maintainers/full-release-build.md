@@ -654,7 +654,7 @@ the native pin changes.
 Before publication, the orchestrator checks that every required release asset
 exists. `--publish-github-only` promotes the verified GitHub draft and runs its
 automatic Discord announcement (unless skipped), aerynOS reconciliation, and
-automatic Google Play delivery when enabled. It skips configured manual package, store, and
+automatic Google Play and Amazon Appstore delivery when enabled. It skips configured manual package, store, and
 container publishers. The Sparkle appcast is a core release asset, not a
 separate publication workflow. `--publish` also dispatches configured manual
 channels. The controller reuses successful channel runs and stops on a prior
@@ -671,10 +671,10 @@ report device playback, vendor permission, or store approval as established by
 a build. The generated LG handoff is for manual review, not store publication.
 
 Tizen remains a tester artifact for qualification; Seller Office signing and
-submission are not configured. App Store Connect and Amazon uploads do not
-submit builds for review. Google Play delivery targets the configured internal
-testing track; successful delivery does not establish installation or review
-qualification.
+submission are not configured. App Store Connect uploads stage binaries.
+Amazon automatically submits stable updates for review after bootstrap. Google
+Play delivery targets the configured track. Review, approval and device
+qualification use separate evidence.
 Microsoft Store, Samsung Seller Office, macOS Developer ID signing, Windows
 Authenticode signing, and vendor-store publication require their configured
 identities, profiles, and credentials. These store channels do not gate the

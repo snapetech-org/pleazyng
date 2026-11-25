@@ -11,6 +11,7 @@ import release_all_platforms as release
 class AerynosWakeTests(unittest.TestCase):
     def test_published_core_wakes_consumer_without_manual_channel_selection(self):
         with patch.object(release, 'dispatch_automatic_play', return_value=None), \
+                patch.object(release, 'dispatch_automatic_amazon', return_value=None), \
                 patch.object(release, 'command') as command:
             result = release.post_release_actions('v3.0.30', '3.0.30', release_sha='a' * 40,
                                                    include_webos_release=True, publish_channels=False)
@@ -27,6 +28,7 @@ class AerynosWakeTests(unittest.TestCase):
             if 'snapetech-org/pleazyng-aerynos' in args:
                 raise release.ReleaseError('consumer temporarily unavailable')
         with patch.object(release, 'dispatch_automatic_play', return_value=None), \
+                patch.object(release, 'dispatch_automatic_amazon', return_value=None), \
                 patch.object(release, 'command', side_effect=command):
             result = release.post_release_actions('v3.0.30', '3.0.30', release_sha='a' * 40,
                                                    include_webos_release=True, publish_channels=False)

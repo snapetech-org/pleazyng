@@ -20,7 +20,7 @@ and the bundled Amazon authentication public key. Its receipt records the APK
 hash, size, signer fingerprint, version and static qualification.
 
 Every Amazon store-upload run installs the exact signed release APK into an
-Android TV API 35 x86_64 emulator. `scripts/qa/test_firetv_emulator.py` verifies
+Android TV API 36 x86_64 emulator. `scripts/qa/test_firetv_emulator.py` verifies
 the emulator ABI, installs the package, launches its Leanback entry point, checks
 that the app remains in the foreground after remote D-pad input, scans app logcat
 for fatal crashes, and retains a screenshot, log, and hash-bound JSON receipt.
@@ -43,11 +43,35 @@ these files in the draft assets and SHA256SUMS; the coverage gate rejects an
 omission even if signing secrets are absent. Never rename an older package to
 represent a new build or attach it to a different source revision.
 
-`publish-app-stores.yml`, channel `amazon-appstore`, downloads and checks the
-release APK plus its receipt, verifies their matching package/hash/signing evidence, and uploads it through Fastlane to the existing Amazon edit, without
-submitting for review. Draft GitHub releases are accepted for this binary upload.
-Listing assets, IAP Test submission, export compliance, device targeting and
-final store review remain separate console steps. Preserve the draft price.
+### Automatic Appstore updates
+
+After the first version goes live in Amazon, set the repository variable
+`AMAZON_APPSTORE_BOOTSTRAP_COMPLETE=true`. Both release-controller publication
+modes then wake `deliver-amazon-appstore.yml` for the published release. Release
+events also wake it, and the hourly catch-up checks the latest stable release.
+The workflow reuses the signed GitHub APK after checking platform coverage,
+source attestation, checksums, and the Android TV emulator smoke test. It
+submits the draft for Amazon review and retains a version- and hash-bound
+receipt. Amazon controls review and availability.
+
+Amazon accepts one active edit per app. Automatic delivery waits when an
+operator draft is open or Amazon is reviewing an update. It never replaces a
+newer store binary with an older one. APKs above 300 MB use Amazon's large upload
+and attach API. Before committing, the workflow verifies the replacement and
+the existing device targeting. It fills missing required release notes and
+retains the existing listing assets and IAP configuration. If a commit response is lost or an edit remains
+open, check the receipt and the Amazon console for that edit before retrying.
+For a fresh retry against an existing published release, run:
+
+```sh
+gh workflow run deliver-amazon-appstore.yml --repo snapetech-org/pleazyng \
+  --ref main -f release_tag=vX.Y.Z
+```
+
+The explicit `publish-app-stores.yml` workflow also supports `amazon_mode=verify`
+to qualify a published APK and confirm read-only Amazon API access. Its default
+`amazon_mode=draft` preserves the legacy Fastlane draft upload for small APKs.
+Use the Developer Console when a large APK needs a manual draft handoff.
 
 Capture genuine TV screens at 1920×1080, phone screens in portrait, and tablet
 screens in their native orientation. Record source SHA, APK SHA256, device/AVD,
@@ -110,10 +134,10 @@ metadata, changelog, image and screenshot uploads to preserve console edits.
 
 [Amazon requires the first version to be submitted through the Developer
 Console](https://developer.amazon.com/docs/app-submission-api/overview.html).
-The corrective 3.0.36 submission is a manual console handoff. The configured API
-lane uploads later binaries only; it leaves listing metadata, screenshots and
-review submission to the operator. Do not edit the same Amazon draft
-concurrently through the API and console.
+The corrective 3.0.36 candidate followed the first-version console handoff.
+Subsequent automatic API updates submit the signed binary for review. Use the console for listing
+metadata, screenshots, and IAP changes. Avoid making console edits while an
+automatic submission is running.
 
 ## Committed capture pack and next release
 
@@ -154,7 +178,6 @@ not a replacement for the next release build or later runtime qualification.
 
 Keep Amazon's initial console submission separate from subsequent API updates.
 Do not set `AMAZON_APPSTORE_BOOTSTRAP_COMPLETE=true` until that initial submission
-has completed. The automated upload verifies the new release APK against its
-receipt and leaves console metadata and screenshots intact. Verify physical Fire
+has completed. Automatic submissions also require a source-attested APK and emulator receipt. Verify physical Fire
 TV navigation, playback and lifetime purchase/restore before claiming device or
 billing qualification. Keep `pleazyng_lifetime_unlock` and its USD $2.99 price.

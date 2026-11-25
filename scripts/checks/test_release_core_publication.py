@@ -19,6 +19,9 @@ class CorePublicationTests(unittest.TestCase):
         automatic = patch.object(release, 'dispatch_automatic_play', return_value=None)
         automatic.start()
         self.addCleanup(automatic.stop)
+        amazon = patch.object(release, "dispatch_automatic_amazon", return_value=None)
+        amazon.start()
+        self.addCleanup(amazon.stop)
         aerynos = patch.object(release, 'dispatch_aerynos_delivery', return_value={})
         aerynos.start()
         self.addCleanup(aerynos.stop)
@@ -324,9 +327,10 @@ class CorePublicationTests(unittest.TestCase):
 
     def test_bad_play_configuration_does_not_stop_another_channel(self):
         settings = {"GOOGLE_PLAY_TRACK": "production", "GOOGLE_PLAY_BOOTSTRAP_COMPLETE": "true",
-                    "AMAZON_APPSTORE_BOOTSTRAP_COMPLETE": "true", "AMAZON_APPSTORE_APP_ID": "example"}
-        secrets = {"GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "AMAZON_APPSTORE_CLIENT_ID", "AMAZON_APPSTORE_CLIENT_SECRET"}
-        assets = {"pleazyng-android-play.aab", "pleazyng-amazon-firetv.apk", "SHA256SUMS.txt"}
+                    "AUR_PACKAGE_NAME": "example"}
+        secrets = {"GOOGLE_PLAY_SERVICE_ACCOUNT_JSON", "AUR_SSH_KEY"}
+        assets = {"pleazyng-android-play.aab", "pleazyng-linux-x64.tar.gz",
+                  "pleazyng-linux-arm64.tar.gz", "SHA256SUMS.txt"}
         with patch.object(release, "release_metadata", return_value={"assets": [{"name": name} for name in assets]}), \
              patch.object(release, "configured_repo_names", return_value=secrets), \
              patch.object(release, "configured_repo_variables", return_value=settings), \
@@ -334,7 +338,7 @@ class CorePublicationTests(unittest.TestCase):
             completed, _, failures = release.publish_configured_channels("v3.0.1", "3.0.1", release_sha="a" * 40,
                                                                          include_webos_release=True)
             self.assertTrue(any("Google Play configuration" in error for error in failures))
-            self.assertTrue(any(item["channel"] == "Amazon Appstore upload" for item in completed))
+            self.assertTrue(any(item["channel"] == "AUR" for item in completed))
             self.assertTrue(all(call.args[2].get("channel") != "google-play" for call in dispatch.call_args_list))
 
     def test_channel_summary_omits_configured_secret_names(self):

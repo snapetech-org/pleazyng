@@ -61,7 +61,7 @@ and remaining asset checks are recorded in
 | Google Play internal test | New app/package, testing-only service account access, upload workflow and review grant configured | First signed Play AAB, Play App Signing, purchase product and real-device purchase/review-access validation; internal distribution must be explicitly activated |
 | Google Play closed beta | Sign-in/review instructions, privacy, category/contact, rating and other declarations saved | Data safety, listing with three phone/two tablet images, 178 Alpha regions and existing five-member tester list are saved. Remaining: first AAB and requested permissions declarations, tester/country configuration, IAP validation and Google review |
 | Google Play production / open testing | Existing personal developer account; website verified, company display name under review, organization conversion awaits D-U-N-S | Closed-test eligibility and production-access approval. Current personal-account console requires 12 opted-in testers for 14 continuous days; this does not delay starting the closed test. Recheck eligibility after an approved organization conversion |
-| Amazon Fire TV Appstore | Existing app; 3.0.36 submission materials prepared | Corrected Fire TV copy and four TV/three tablet captures from the exact signed 3.0.36 APK are prepared locally. Inspect the live console slots, replace stale text/images and resubmit through Developer Console. Company/tax verification, declarations and physical-device purchase testing remain separate gates. |
+| Amazon Fire TV Appstore | Automatic update submission with completed console bootstrap | Uses the signed Fire TV APK from the verified GitHub release. See the [Fire TV runbook](fire-tv.md) for qualification, store review and recovery. |
 | Apple TestFlight | Active Individual Developer Program membership, team `DM9A59DC85`, new identifiers and upload API credentials | English US beta/review information and the automatic-distribution Pleazyng Internal group are saved (zero testers/builds; no invitations sent). Remaining: complete signed iOS/tvOS archive/export and IPA processing, tester assignment, export compliance and external beta review. The existing distribution identity passed native import/signing/strict verification; new-bundle app/extension profiles and the isolated signing path are configured. Validate billing separately before promising full paid-feature testing |
 | Apple iOS / tvOS App Store | Existing app reused, new identifiers and USD $2.99 non-consumable configured; upload automation available | Same signing/build gates plus real screenshots, privacy/review metadata, IAP screenshot and purchase/restore validation, paid agreement activation and Apple review |
 | macOS direct DMG / Sparkle | Universal DMG and appcast pipeline | Developer ID certificate and dedicated secrets now configured; qualified native signing/notarization/Gatekeeper and updater signature verification remain |
@@ -86,8 +86,8 @@ and remaining asset checks are recorded in
 ## Publication behavior
 
 `--publish-github-only` publishes the core GitHub assets and starts the
-automatic Google Play delivery lane when enabled, aerynOS reconciliation, and
-the configured announcement unless skipped; it skips manual package, store, and container
+automatic Google Play and Amazon delivery when enabled, aerynOS reconciliation,
+and the configured announcement unless skipped; it skips manual package, store, and container
 publishers. `--publish` also dispatches configured manual downstream publishers,
 with receipts for completed, skipped and failed channels. Before
 first store publication, complete the console bootstrap and validate the actual
@@ -102,11 +102,11 @@ Apple uploads do not submit App Review or configure
 TestFlight groups. Amazon's initial submission must go through its console.
 
 `AMAZON_APPSTORE_BOOTSTRAP_COMPLETE` similarly enables subsequent Amazon API
-updates after the required first console submission.
+updates and review submissions after the first version goes live. See the [Fire TV runbook](fire-tv.md).
 Set `APPLE_IOS_STORE_UPLOAD_READY` and `APPLE_TVOS_STORE_UPLOAD_READY` independently
 once signing and processing are verified for the corresponding platform. The
 former shared `APPLE_STORE_UPLOAD_READY` variable no longer enables uploads.
-These flags control upload dispatch only. App-store publishers use public hosted runners by default with
+The Apple flags control upload dispatch. App-store publishers use public hosted runners by default with
 optional native private routing. These revisions still need live validation
 against qualified store assets; no extra build was dispatched for this change.
 
