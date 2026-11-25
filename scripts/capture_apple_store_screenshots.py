@@ -179,8 +179,18 @@ guard let selected else {
   fputs("No usable native 1920x1080 display mode is available for a 1280x800 Mac app window.\n", stderr)
   exit(3)
 }
-let switchResult = CGDisplaySetDisplayMode(displayID, selected, nil)
-guard switchResult == .success,
+// The display must retain its mode after this helper process exits.
+var config: CGDisplayConfigRef?
+guard CGBeginDisplayConfiguration(&config) == .success, let config else {
+  fputs("Could not begin the isolated display configuration.\n", stderr)
+  exit(4)
+}
+guard CGConfigureDisplayWithDisplayMode(config, displayID, selected, nil) == .success else {
+  CGCancelDisplayConfiguration(config)
+  fputs("Could not configure native 1920x1080 for the capture session.\n", stderr)
+  exit(4)
+}
+guard CGCompleteDisplayConfiguration(config, .forSession) == .success,
       let active = CGDisplayCopyDisplayMode(displayID),
       active.width == selected.width, active.height == selected.height,
       active.pixelWidth == selected.pixelWidth, active.pixelHeight == selected.pixelHeight else {
@@ -2741,6 +2751,10 @@ def run_macos_listing_window_capture(app: Path, output: Path) -> tuple[Path, dic
     mode_pixels = display_mode.get("active_mode_pixels")
     if mode_points != [1920.0, 1080.0] or mode_pixels != [1920, 1080]:
         raise ValueError(f"The hosted ARM Mac no longer exposes the probed 1920x1080 mode: {display_mode}")
+
+    retained_mode = run_macos_swift_json(MACOS_LIVE_DISPLAY_STATE_SWIFT, [])
+    if retained_mode.get("current_mode_points") != [1920.0, 1080.0]:
+        raise ValueError(f"The hosted Mac display mode reverted before app launch: {retained_mode}")
 
     window_preference = write_macos_main_window_frame_preference(
         width=1280, height=800, x=0, y=0

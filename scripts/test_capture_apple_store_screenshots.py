@@ -867,7 +867,7 @@ class ListingCaptureMetadataTests(unittest.TestCase):
 
 class MacListingCaptureTests(unittest.TestCase):
     def test_mac_listing_capture_uses_native_display_window_and_visible_ocr(self) -> None:
-        self.assertIn("CGDisplaySetDisplayMode", MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
+        self.assertIn("CGCompleteDisplayConfiguration(config, .forSession)", MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
         self.assertIn("1920x1080", MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
         self.assertIn('"target_native_window_points": [1280, 800]', MACOS_SELECT_WINDOW_CAPTURE_DISPLAY_SWIFT)
         self.assertIn("CGWindowListCopyWindowInfo", MACOS_WINDOW_BOUNDS_SWIFT)
