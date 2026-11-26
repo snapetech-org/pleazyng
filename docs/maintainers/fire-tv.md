@@ -44,7 +44,7 @@ a release or uploading to a store:
 gh workflow run build.yml -R snapetech-org/pleazyng --ref main \
   -f action=build -f runner_pool=public -f execution_profile=hybrid \
   -f mode=android-validation -f include_webos_build=false \
-  -f include_webos_release=false -f include_tizen_build=false
+  -f include_webos_release=false
 ```
 
 Download the successful run's `android-apk` artifact. In Android validation mode it contains the Amazon APK and receipt; generic Android APKs and the Play bundle are built only in full release mode. Full release mode includes
