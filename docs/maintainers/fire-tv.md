@@ -19,6 +19,15 @@ alias in the compiled manifest, optional touchscreen, ARMv7/ARM64/x86_64 runtime
 and the bundled Amazon authentication public key. Its receipt records the APK
 hash, size, signer fingerprint, version and static qualification.
 
+New Amazon builds compress the native libraries in the universal APK. Fire OS
+extracts the ABI it uses instead of keeping all three ABI payloads uncompressed
+in the APK. The build verifier checks the ZIP entries and the compiled manifest
+before issuing a receipt. In Amazon's 3.0.52 review, multiple Fire TV models
+reported insufficient installation space for the 911 MB APK. Keep the APK
+download size and the size after extracting one ABI separate when measuring
+this change. Confirm installation on the affected Fire OS devices before
+reporting restored store coverage.
+
 Every Amazon store-upload run installs the exact signed release APK into an
 Android TV API 36 x86_64 emulator. `scripts/qa/test_firetv_emulator.py` verifies
 the emulator ABI, installs the package, launches its Leanback entry point, checks

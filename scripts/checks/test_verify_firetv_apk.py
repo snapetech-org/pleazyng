@@ -52,10 +52,12 @@ class CompiledManifestLauncherTest(unittest.TestCase):
 
 
 class FireTVAPKTest(unittest.TestCase):
-    def inspect(self, *, debug=False, tv=True, abis=('armeabi-v7a', 'arm64-v8a', 'x86_64'), key=True):
+    def inspect(self, *, debug=False, tv=True, abis=('armeabi-v7a', 'arm64-v8a', 'x86_64'), key=True,
+                compress=False, require_compressed_jni=False, prohibit_extraction=False):
         with tempfile.TemporaryDirectory() as directory:
             apk = Path(directory) / 'app.apk'
-            with zipfile.ZipFile(apk, 'w') as archive:
+            compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+            with zipfile.ZipFile(apk, 'w', compression=compression) as archive:
                 for abi in abis:
                     archive.writestr(f'lib/{abi}/libflutter.so', b'fixture')
                     archive.writestr(f'lib/{abi}/libapp.so', b'fixture')
@@ -65,12 +67,27 @@ class FireTVAPKTest(unittest.TestCase):
             if debug:
                 signature += '\nSigner #1 certificate DN: CN=Android Debug, O=Android, C=US'
             badging = "package: name='org.snapetech.pleazyng' versionName='3.0.0'\n"
+            manifest = MANIFEST if tv else ''
+            if prohibit_extraction:
+                manifest = manifest.replace('  E: application (line=2)\n',
+                                            '  E: application (line=2)\n'
+                                            '    A: android:extractNativeLibs(0x010104ea)=(type 0x12)0x0\n')
             with patch('verify_firetv_apk.subprocess.run', side_effect=[
                 subprocess.CompletedProcess([], 0, signature, ''),
                 subprocess.CompletedProcess([], 0, badging, ''),
-                subprocess.CompletedProcess([], 0, MANIFEST if tv else '', ''),
+                subprocess.CompletedProcess([], 0, manifest, ''),
             ]):
-                return inspect_apk(apk, Path('/fixture/build-tools'))
+                return inspect_apk(apk, Path('/fixture/build-tools'),
+                                   require_compressed_jni=require_compressed_jni)
+
+    def test_new_build_requires_compressed_native_libraries(self):
+        with self.assertRaisesRegex(ValueError, 'compress native libraries'):
+            self.inspect(require_compressed_jni=True)
+        self.assertTrue(self.inspect(compress=True, require_compressed_jni=True)['leanback_launcher'])
+
+    def test_new_build_must_allow_extraction_of_compressed_libraries(self):
+        with self.assertRaisesRegex(ValueError, 'allow extraction'):
+            self.inspect(compress=True, require_compressed_jni=True, prohibit_extraction=True)
 
     def test_signed_tv_apk_records_emulator_and_both_device_abis(self):
         receipt = self.inspect()

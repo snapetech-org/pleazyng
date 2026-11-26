@@ -56,7 +56,7 @@ def has_tv_launcher(xmltree: str) -> bool:
     return False
 
 
-def inspect_apk(apk: Path, build_tools: Path) -> dict:
+def inspect_apk(apk: Path, build_tools: Path, *, require_compressed_jni: bool = False) -> dict:
     signature = subprocess.run(
         [str(build_tools / 'apksigner'), 'verify', '--verbose', '--print-certs', str(apk)],
         check=True, capture_output=True, text=True,
@@ -90,6 +90,15 @@ def inspect_apk(apk: Path, build_tools: Path) -> dict:
             raise ValueError('Fire TV APK must include the Flutter AOT application runtime for all device and emulator ABIs')
         if 'assets/AppstoreAuthenticationKey.pem' not in names:
             raise ValueError('Amazon Appstore authentication public key is missing')
+        if require_compressed_jni:
+            native_libraries = [
+                entry for entry in archive.infolist()
+                if entry.filename.startswith('lib/') and entry.filename.endswith('.so')
+            ]
+            if any(entry.compress_type != zipfile.ZIP_DEFLATED for entry in native_libraries):
+                raise ValueError('Fire TV APK must compress native libraries to reduce install staging space')
+            if re.search(r'android:extractNativeLibs(?:\([^)]*\))?=\(type 0x12\)0x0\b', manifest):
+                raise ValueError('Fire TV APK must allow extraction of its compressed native libraries')
     version = re.search(r"versionName='([^']+)'", badging)
     with apk.open('rb') as stream:
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -129,6 +138,8 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--build-tools', type=Path)
     mode.add_argument('--receipt', type=Path, help='Check an attested build receipt against the downloaded APK')
+    parser.add_argument('--require-compressed-jni', action='store_true',
+                        help='Require install-time extraction of compressed JNI libraries in new builds')
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
     if args.receipt:
@@ -136,7 +147,7 @@ def main() -> None:
     else:
         if not args.output:
             parser.error('--output is required when inspecting an APK')
-        receipt = inspect_apk(args.apk, args.build_tools)
+        receipt = inspect_apk(args.apk, args.build_tools, require_compressed_jni=args.require_compressed_jni)
         args.output.write_text(json.dumps(receipt, indent=2) + '\n')
     print(f"Verified signed Fire TV APK: {args.apk.name}")
 

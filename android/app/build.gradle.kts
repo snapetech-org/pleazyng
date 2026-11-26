@@ -1228,6 +1228,11 @@ android {
 
   packaging {
     jniLibs {
+      // The Amazon APK ships three ABIs. Compress the libraries in the APK so
+      // Fire OS can stage a smaller download and extract only the device ABI.
+      if (System.getenv("AMAZON") != null) {
+        useLegacyPackaging = true
+      }
       // pickFirst only suppresses the duplicate libc++ merge error; the
       // sourceSets rule below makes the runtime the mpv-android AAR carries
       // (the one libmpv was linked against) win for std::from_chars<float>,

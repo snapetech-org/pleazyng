@@ -1205,6 +1205,7 @@ jobs:
         run: >-
           python3 scripts/verify_firetv_apk.py pleazyng-amazon-firetv.apk
           --build-tools "$ANDROID_HOME/build-tools/36.1.0"
+          --require-compressed-jni
           --output pleazyng-amazon-firetv-provenance.json
 
       - name: Capture Android hosted runner memory diagnostics
